@@ -204,6 +204,29 @@ def values_file(destination: Path, name: str, body: str) -> Path:
     return path
 
 
+# THE COLLISION THE DUPLICATE RED CASES CONSTRUCT: `task-tls` is moved onto
+# `iam-tls`'s rung through an override values file.
+COLLIDING = ("iam-tls", "task-tls")
+COLLISION = "certificates:\n  leaves:\n    task-tls:\n      renewBefore: 726h\n"
+
+
+def assert_the_collision_has_something_to_collide_with(documents: list[dict]) -> None:
+    """The duplicate red case's own tripwire, and the rename case's has a twin.
+
+    An override naming a leaf the chart no longer carries ADDS an eleventh leaf
+    rather than moving an existing one onto an occupied rung. The set would then
+    grow instead of shrinking, the red case would still fail the equality, and it
+    would be failing for a reason that has nothing to do with a duplicate — the
+    "passes for the wrong reason" form, one layer in.
+    """
+    holders = {name for names in rungs(documents).values() for name in names}
+    assert set(COLLIDING) <= holders, (
+        f"the leaves this red case collides, {COLLIDING}, are not both in the "
+        f"render: found {sorted(holders)}. The override would add a leaf rather "
+        f"than move one, so this case is no longer testing a duplicate"
+    )
+
+
 # ── R1: the chart's own defaults ─────────────────────────────────────────────
 
 
@@ -240,11 +263,8 @@ def test_two_leaves_on_one_rung_are_refused(tmp_path):
     A duplicate moves the SIZE of the set — eleven values become ten — which is why
     the expectation is stated as a set rather than as a count of leaves.
     """
-    collision = values_file(
-        tmp_path,
-        "collision.yaml",
-        "certificates:\n  leaves:\n    task-tls:\n      renewBefore: 726h\n",
-    )
+    assert_the_collision_has_something_to_collide_with(render(CHART, "-f", str(ADOPTER_VALUES)))
+    collision = values_file(tmp_path, "collision.yaml", COLLISION)
     failures = ladder_failures(
         render(CHART, "-f", str(ADOPTER_VALUES), "-f", str(collision)),
         CERTIFICATES_WITH_THE_EDGE_LEAF,
@@ -291,11 +311,10 @@ def test_the_render_without_the_edge_leaf_carries_the_rest_of_the_ladder(tmp_pat
 
 def test_two_leaves_on_one_rung_are_refused_without_the_edge_leaf(tmp_path):
     """The duplicate case carries over unchanged, against the smaller set."""
-    collision = values_file(
-        tmp_path,
-        "collision.yaml",
-        "certificates:\n  leaves:\n    task-tls:\n      renewBefore: 726h\n",
+    assert_the_collision_has_something_to_collide_with(
+        render(CHART, "-f", str(ADOPTER_VALUES), "-f", str(without_the_edge_leaf(tmp_path)))
     )
+    collision = values_file(tmp_path, "collision.yaml", COLLISION)
     failures = ladder_failures(
         render(
             CHART,
