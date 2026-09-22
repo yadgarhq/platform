@@ -1,0 +1,14 @@
+apiVersion: v2
+name: platform
+description: The shared platform layer of a yadgar installation — the internal certificate authority, the leaves it issues, and the edge leaf a different authority issues.
+# NOT `library` and not a subchart of its own making. It renders objects, so it is
+# an application chart even though it carries no workload — the same reading
+# `yadgarhq/config` records for itself, and the whole of ADR-0570.
+type: application
+version: 0.1.0
+# NO `appVersion`, deliberately, and for the reason `yadgarhq/config` states: there
+# is no application here to version. The chart's content is the estate's own
+# platform objects, and the only version that means anything is the chart's.
+home: https://github.com/yadgarhq/platform
+sources:
+  - https://github.com/yadgarhq/platform

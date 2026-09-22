@@ -1,0 +1,26 @@
+{{/*
+EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHING.
+
+ONE CHECK, NOT ONE PER KIND. Every object this chart renders today — the
+self-signed Issuer, the CA Certificate, the CA Issuer, the ten internal leaves and
+the edge leaf — comes from `cert-manager.io/v1`, and one operator provides that
+whole group. `scripts/tests/test_render_checks.py` counts the checks DECLARED here
+and asserts that number, so a check deleted from this file reddens the suite on
+the count rather than letting it quietly exercise one fewer.
+
+THE FILENAME DOES NOT BEGIN WITH AN UNDERSCORE, AND THAT IS LOAD-BEARING. helm
+treats `templates/_*` as partials and never renders them, so a `fail` that lived
+only in `_require_api.tpl` would never fire. The definition is a partial; the
+CALL has to sit in a rendered template. Do not tidy the two into one file.
+
+THE CONDITION IS THE OR OF EVERY TOGGLE THAT RENDERS A `cert-manager.io/v1`
+OBJECT. Each of the three defaults false, so a render that asks for nothing is
+never refused for a cluster it was never going to touch.
+*/}}
+{{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}
+{{- include "platform.require-api" (dict
+      "context" $
+      "apiVersion" "cert-manager.io/v1"
+      "operator" "cert-manager"
+      "toggle" "internalCA.create, certificates.create or edgeTLS.create") }}
+{{- end }}

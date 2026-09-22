@@ -1,0 +1,50 @@
+{{/*
+THE EDGE LEAF, WHICH THIS CHART REQUESTS AND DOES NOT ISSUE.
+
+ITS OWN TOGGLE, BECAUSE ITS AUTHORITY IS SOMEBODY ELSE'S. The internal CA this
+chart renders is self-signed, ten years and pods only; it regenerates with the
+cluster. The authority that signs the edge is held outside the installation, so
+`edgeTLS.issuerRef` is `required` with NO DEFAULT and the render refuses without
+it. A guessed issuer name is worse than a refusal: it renders an object that never
+goes Ready, and the operator meets a pending Certificate instead of a message
+naming the key they did not set.
+
+`kind` IS REQUIRED TOO, not only `name`. It decides whether cert-manager looks the
+issuer up in this namespace (`Issuer`) or cluster-wide (`ClusterIssuer`), so a
+name with no kind is half an address.
+
+`get` RATHER THAN A FIELD ACCESS, so an adopter who omits the whole `issuerRef`
+block meets the `required` message rather than a nil-pointer error naming a
+template line.
+*/}}
+{{- if .Values.edgeTLS.create }}
+{{- $edge := .Values.edgeTLS }}
+{{- $issuerRef := $edge.issuerRef | default dict }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $edge.name }}
+spec:
+  secretName: {{ $edge.name }}
+  commonName: {{ $edge.commonName }}
+  dnsNames:
+    {{- range $edge.dnsNames }}
+    - {{ . }}
+    {{- end }}
+  duration: {{ $edge.duration }}
+  # 720h, THE RUNG HELD OUT OF THE INTERNAL MAP. It is part of the same ladder and
+  # no internal leaf may take it. See `values.yaml`'s header.
+  renewBefore: {{ $edge.renewBefore }}
+  privateKey:
+    algorithm: {{ $edge.privateKey.algorithm }}
+    size: {{ $edge.privateKey.size }}
+    rotationPolicy: {{ $edge.privateKey.rotationPolicy }}
+  usages:
+    {{- range $edge.usages }}
+    - {{ . }}
+    {{- end }}
+  issuerRef:
+    name: {{ required "platform: edgeTLS.issuerRef.name has no default and must be set. edgeTLS.create is true, and the edge certificate is signed by an authority this chart does not own — name yours." (get $issuerRef "name") }}
+    kind: {{ required "platform: edgeTLS.issuerRef.kind has no default and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address." (get $issuerRef "kind") }}
+    group: cert-manager.io
+{{- end }}

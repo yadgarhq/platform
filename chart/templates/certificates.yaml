@@ -1,0 +1,59 @@
+{{/*
+THE TEN INTERNAL LEAVES, RENDERED FROM THE MAP IN `values.yaml` AND FROM NOTHING
+ELSE.
+
+WHAT THIS RANGE IS OVER, AND WHAT IT IS NOT. It ranges over a MAP KEYED BY LEAF
+NAME in which every entry carries its own `renewBefore`. It does NOT range over a
+list of modules deriving the step from a position: that renders the same ten
+objects today and destroys the ladder the first time somebody reorders the list,
+because the rung would follow the index instead of the leaf. The invariant lives
+in the values file, where all eleven rungs are visible at once, and
+`scripts/tests/test_ladder.py` is what reads them together.
+
+THE MAP KEY IS THE OBJECT NAME AND THE SECRET NAME, which is how the source
+manifests name them and how every consuming chart already mounts them.
+
+RENAMING `certificates.leaves` SILENTLY EMPTIES THIS RANGE, which is exactly the
+"passes having examined nothing" failure the ladder gate exists to catch — so that
+rename is one of that gate's constructed red cases.
+*/}}
+{{- if .Values.certificates.create }}
+{{- $certificates := .Values.certificates }}
+{{- range $name, $leaf := $certificates.leaves }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}
+spec:
+  secretName: {{ $name }}
+  commonName: {{ $leaf.commonName }}
+  dnsNames:
+    - {{ $leaf.commonName }}
+    {{- if $leaf.clusterLocalNames }}
+    # THE SERVICE, IN THE RELEASE'S NAMESPACE. A client verifies against the host
+    # it asked for, not the address it reached, so a caller in another namespace
+    # dialling the long form needs that form named here.
+    - {{ printf "%s.%s" $leaf.commonName $.Release.Namespace }}
+    - {{ printf "%s.%s.svc" $leaf.commonName $.Release.Namespace }}
+    - {{ printf "%s.%s.svc.cluster.local" $leaf.commonName $.Release.Namespace }}
+    {{- end }}
+  duration: {{ $certificates.duration }}
+  # THE RUNG. Distinct across every leaf in this estate, six hours apart, so at
+  # most one service restarts per renewal instant. Read `values.yaml`'s header
+  # before moving one.
+  renewBefore: {{ $leaf.renewBefore }}
+  privateKey:
+    algorithm: {{ $certificates.privateKey.algorithm }}
+    size: {{ $certificates.privateKey.size }}
+    rotationPolicy: {{ $certificates.privateKey.rotationPolicy }}
+  usages:
+    {{- range $leaf.usages }}
+    - {{ . }}
+    {{- end }}
+  issuerRef:
+    name: {{ $certificates.issuerRef.name }}
+    kind: {{ $certificates.issuerRef.kind }}
+    group: cert-manager.io
+{{- end }}
+{{- end }}
