@@ -188,13 +188,21 @@ MARIADB_SHELL_VARIABLE = {
 # refusal; `validationMessage` third, whose message presumes the arm above it passed.
 MARIADB_ARM_ORDER = [MARIADB_UNREACHABLE, MARIADB_DENIED_BY, MARIADB_VALIDATION]
 
-# ── TWO MEASURED API-SERVER MESSAGES, AND WHAT IS UNDER TEST IS THE ENCODING ──
-# The message TEXT is transcribed from the denial recorded beside
-# `preflight.mariadb.deniedBy` in `chart/values.yaml` and from the API server's own
-# unreachable-webhook wording. Neither is the assertion. THE ASSERTION IS THE
-# ENCODING: `metav1.Status.Message` is a JSON string, so the `"` the API server
-# writes with `%q` reaches `curl` as `\"`, and a needle carrying a literal `"`
-# cannot match one byte of it.
+# ── TWO API-SERVER MESSAGES, AND WHAT IS UNDER TEST IS THE ENCODING ──────────
+# THESE ARE TRANSCRIPTIONS, NOT CAPTURES, and this file says so rather than
+# letting them read as measured — which is the exact fault the gate below exists
+# to catch. The denial is transcribed from the message recorded beside
+# `preflight.mariadb.deniedBy` in `chart/values.yaml`; the unreachable one is the
+# API server's own wording for a webhook it could not reach.
+#
+# NEITHER TEXT IS THE ASSERTION. THE ENCODING IS: `metav1.Status.Message` is a
+# JSON string, so the `"` the API server writes with `%q` reaches `curl` as `\"`,
+# and a needle carrying a literal `"` cannot match one byte of it. So each message
+# is trimmed to the part this estate can source. The unreachable one carries no
+# request URL: the real message ends in the `Post "https://…": dial tcp …:
+# connect: connection refused` that names the webhook's own Service, and no
+# response body carrying it was captured here. Leaving an invented URL in would
+# make a fixture read as measured, and none of the assertions need it.
 MARIADB_DENIAL_MESSAGE = (
     'admission webhook "vmariadb-v1alpha1.kb.io" denied the request: '
     "spec.storage: Invalid value: {}: either storage size or "
@@ -202,9 +210,7 @@ MARIADB_DENIAL_MESSAGE = (
 )
 MARIADB_UNREACHABLE_MESSAGE = (
     'Internal error occurred: failed calling webhook "vmariadb-v1alpha1.kb.io": '
-    "failed to call webhook: Post "
-    '"https://mariadb-operator-webhook.yadgar.svc:443/validate-k8s-mariadb-com-v1alpha1-mariadb?timeout=10s": '
-    "dial tcp 10.96.0.1:443: connect: connection refused"
+    "failed to call webhook: connect: connection refused"
 )
 
 # Which body each reading has to be able to match. `deniedBy` and
