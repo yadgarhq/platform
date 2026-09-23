@@ -501,6 +501,11 @@ def test_generating_inside_the_request_body_reddens_the_generation_gate(tmp_path
 # name. Both Jobs are checked, and the number is a literal.
 DIGEST_PINNED = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
+# One container per Job, so one image per Job. Counted rather than iterated,
+# because two Jobs rendering no container at all would otherwise find no violation
+# among zero images and report a pass.
+EXPECTED_BOOTSTRAP_IMAGES = EXPECTED_HOOK_JOBS
+
 
 def image_failures(documents: list[dict]) -> list[str]:
     """Every Job whose image is not pinned by digest. PURE.
@@ -517,11 +522,13 @@ def image_failures(documents: list[dict]) -> list[str]:
             f"expected {EXPECTED_HOOK_JOBS} Jobs to check an image on, found "
             f"{len(jobs)}: {sorted(name_of(job) for job in jobs)}"
         )
+    images = 0
     for job in sorted(jobs, key=name_of):
         containers = (((job.get("spec") or {}).get("template") or {}).get("spec") or {}).get(
             "containers"
         ) or []
         for container in containers:
+            images += 1
             image = str(container.get("image"))
             if not DIGEST_PINNED.match(image):
                 failures.append(
@@ -531,6 +538,12 @@ def image_failures(documents: list[dict]) -> list[str]:
                     f"`<repository>@sha256:<digest>`, and keep the tag beside it as "
                     f"a comment"
                 )
+    if images != EXPECTED_BOOTSTRAP_IMAGES:
+        failures.append(
+            f"expected {EXPECTED_BOOTSTRAP_IMAGES} images across the bootstrap "
+            f"Jobs, found {images}. An image this gate did not read is an image it "
+            f"did not check, and a zero here would be vacuous rather than a property"
+        )
     return failures
 
 
