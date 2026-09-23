@@ -23,8 +23,24 @@ consequence is a property this design depends on rather than a nicety:
 than an oversight here: the authorizer runs before the request body is decoded, so
 the name is not yet known. The scope is narrowed by the Role being NAMESPACED
 instead — this identity can create Secrets in the release namespace and nowhere
-else. `scripts/tests/test_bootstrap.py`'s `rbac_failures` asserts the absence of a
-ClusterRole for that reason.
+else.
+
+`scripts/tests/test_bootstrap.py`'s `rbac_failures` asserts THE WIRING, not only
+the absence of a ClusterRole object. A narrow Role nobody is bound to is not a
+narrowing, and a count of cluster-scoped objects does not notice a `roleRef`
+pointed at the built-in `ClusterRole/cluster-admin`, which renders no object. So
+the gate compares the rendered objects against EACH OTHER: `roleRef` against the
+Role this render produced, the binding's subject against the ServiceAccount it
+produced and the namespace it was made for, and both Jobs' `serviceAccountName`
+against that same account.
+
+THE TRIPLE OUTLIVES THE RELEASE, and that is a consequence rather than a bug. With
+`before-hook-creation` and no `hook-succeeded`, `helm uninstall` leaves this
+ServiceAccount, Role and RoleBinding — and both completed Jobs — in the namespace.
+`hook-succeeded` is not an available fix: it would delete this ServiceAccount
+before the Jobs it serves are finished with it. The residual grant is bounded to
+`create` on Secrets in one namespace, and `README.md` states it for an operator
+rather than leaving it to be discovered.
 
 ONE TRIPLE FOR TWO JOBS, not one each. A second ServiceAccount would be an
 identical Role under a different name, reviewed twice for the same guarantee —

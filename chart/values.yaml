@@ -233,12 +233,35 @@ bootstrap:
   # `templates/bootstrap-rbac.yaml` for why a second one would narrow nothing.
   serviceAccountName: bootstrap-secrets
 
-  # curl and a shell, pinned to the tag the reference deployment runs. A
-  # `kubectl` image is distroless with no shell and cannot run a script at all,
-  # and the Kubernetes API is a REST API, so curl was always sufficient. It is a
-  # value rather than a literal so an adopter with a mirrored registry can move
-  # it without forking the chart.
-  image: curlimages/curl:8.16.0
+  # curl and a shell. A `kubectl` image is distroless with no shell and cannot run
+  # a script at all, and the Kubernetes API is a REST API, so curl was always
+  # sufficient. It is a VALUE rather than a literal so an adopter with a mirrored
+  # registry can move it without forking the chart.
+  #
+  # PINNED BY DIGEST, NOT BY TAG, and this is the image in the estate where that
+  # matters most: these two Jobs mint the three machine-only credentials and the
+  # administrative bootstrap token, and nothing outside the installation can
+  # supply any of them. A tag is a MOVING pointer — the same string resolves to
+  # different bytes over time — so a tag here leaves the code that mints the
+  # estate's root credentials as whatever the registry last published under that
+  # name. The digest is the MANIFEST LIST's, deliberately: a per-architecture
+  # digest pins one platform and leaves nodes of every other unable to pull.
+  #
+  # FOUR UNDECLARED DEMANDS THIS CHART MAKES OF WHATEVER THIS NAMES, written down
+  # because no render and no lint can check any of them:
+  #
+  #   - a POSIX shell at `sh`, which is the container's `command`;
+  #   - `curl`, which makes every request;
+  #   - `base64`, which generates every credential. busybox provides it, and an
+  #     image without it would mint EMPTY values were the length check in both
+  #     scripts not there to stop the Job;
+  #   - a nonroot user and group at UID/GID 100, which both Jobs name in
+  #     `runAsUser` and `runAsGroup` under `runAsNonRoot: true`.
+  #
+  # The tag is kept beside the digest because a bare digest reads as nothing at a
+  # glance. It is a COMMENT rather than the pin — changing it changes nothing.
+  # curlimages/curl:8.16.0
+  image: curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
 
   # Four attempts: a rescheduled pod and a briefly unreachable API server are
   # worth retrying, and a 403 is not — it does not become a 201 on the fourth try.

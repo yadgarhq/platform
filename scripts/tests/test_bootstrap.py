@@ -40,11 +40,28 @@ run-time half it does not:
      repository's own `README.md`, beside the install command, for every Secret
      either Job mints. The estate-wide `INSTALL.md` gate is a later step's; this
      one is the copy that lives with the chart that does the minting.
-  4. THE ROLE GRANTS `create` AND NOTHING ELSE. ADR-0750's property 4 said `get`
-     and `create`; ADR-0753 NARROWED it to `create` alone, because the Job never
-     reads and `get` would only add the ability to read credentials it did not
-     mint. Asserted over the RENDERED Role, by LENGTH as well as by content, so a
-     verb added later turns it red.
+  4. THE ROLE GRANTS `create` AND NOTHING ELSE, AND THE WIRING CARRIES IT.
+     ADR-0750's property 4 said `get` and `create`; ADR-0753 NARROWED it to
+     `create` alone, because the Job never reads and `get` would only add the
+     ability to read credentials it did not mint. Asserted over the RENDERED Role,
+     by LENGTH as well as by content, so a verb added later turns it red — and
+     asserted over the BINDING too, because a narrow Role nobody is bound to is
+     not a narrowing. `rbac_failures` has the measurement: an earlier form counted
+     cluster-scoped OBJECTS and three mutations passed it green, the worst being
+     `roleRef` pointed at the built-in `ClusterRole/cluster-admin`, which renders
+     no object at all for such a count to see.
+
+TWO GATES BEYOND ADR-0750'S FOUR, each closing a defect a review REPRODUCED rather
+than a property an ADR named:
+
+  - THE GENERATOR'S FAILURE REACHES THE JOB'S EXIT STATUS (`generation_failures`).
+    A credential built as `$( )` inside a request body cannot fail the run:
+    command substitution discards the exit status, and the pipeline inside it
+    reports only its last element. Measured with `base64` absent from the image —
+    three Secrets created holding `""`, all reported "created", exit 0.
+  - THE IMAGE IS PINNED BY DIGEST (`image_failures`). A tag is a moving pointer,
+    and these two Jobs mint every credential the installation cannot obtain from
+    anywhere else.
 
 EVERY GATE ASSERTS THE COUNT IT EXAMINED, and the numbers are LITERALS. A count
 derived from the render agrees with whatever the render happens to be and detects
@@ -87,6 +104,16 @@ README = REPO / "README.md"
 # `test_render_checks.py`; here it is only the reason for the flag.
 CERT_MANAGER_API = "cert-manager.io/v1"
 
+# EVERY RENDER HERE NAMES A NAMESPACE, AND IT IS NOT `default`. The RoleBinding's
+# subject carries `{{ .Release.Namespace }}`, and a binding whose subject names the
+# wrong namespace grants the Role to NOBODY — the Jobs then run with an identity
+# that holds no permission, and the failure is a 403 at run time rather than
+# anything a render shows. Rendering into a named namespace is what lets
+# `rbac_failures` compare the subject against something; rendering at helm's
+# default would make a hardcoded `namespace: default` indistinguishable from the
+# value following `.Release.Namespace`.
+RELEASE_NAMESPACE = "yadgar"
+
 # ── THE EXPECTED NUMBERS, AND THEY ARE LITERALS ──────────────────────────────
 
 # The three machine-only credentials, named rather than counted, because a count
@@ -115,6 +142,17 @@ EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS = 2
 
 # ADR-0753's narrowing, as the exact list the Role must carry.
 THE_ONLY_VERB = ["create"]
+
+# THE WIRING BETWEEN THE THREE, counted as literals because a narrow Role is worth
+# nothing when the binding points somewhere else. One ServiceAccount, one
+# RoleBinding, and one subject on it — see `rbac_failures` for what each of those
+# numbers buys.
+EXPECTED_SERVICE_ACCOUNTS = 1
+EXPECTED_ROLE_BINDINGS = 1
+EXPECTED_BINDING_SUBJECTS = 1
+
+# The one group a namespaced RoleBinding may reference.
+RBAC_API_GROUP = "rbac.authorization.k8s.io"
 
 # ADR-0750 property 3: one export command per minted Secret, beside the install
 # command. Four, because both Jobs' output has to be exportable.
@@ -149,7 +187,14 @@ def render_text(chart: Path, *arguments: str) -> str:
     a render that dropped them would leave every count at zero.
     """
     result = helm(
-        "template", "platform", str(chart), "--api-versions", CERT_MANAGER_API, *arguments
+        "template",
+        "platform",
+        str(chart),
+        "--namespace",
+        RELEASE_NAMESPACE,
+        "--api-versions",
+        CERT_MANAGER_API,
+        *arguments,
     )
     assert result.returncode == 0, result.stderr
     return result.stdout
@@ -295,6 +340,225 @@ def test_deleting_the_409_arm_reddens_the_idempotence_gate(tmp_path):
     assert "found 2: ['*', '201']" in message, message
 
 
+# ── THE GENERATOR'S FAILURE HAS TO REACH THE JOB'S EXIT STATUS ───────────────
+
+# 33 random bytes of base64 is 44 characters and carries no `=` padding, which is
+# why 33 was chosen. An EXACT length rather than a minimum, for the same reason.
+EXPECTED_CREDENTIAL_LENGTH = 44
+
+# Four request bodies across the two scripts, one per minted Secret. Asserted,
+# because a body regex that silently matched none would make the check below
+# vacuous — which is the defect this whole gate exists to stop repeating.
+EXPECTED_REQUEST_BODIES = len(EVERY_MINTED_SECRET)
+
+# The JSON body of each POST, read between its heredoc delimiters.
+BODY = re.compile(r"<<JSON\s*\n(?P<body>.*?)\n\s*JSON\s*$", re.MULTILINE | re.DOTALL)
+
+# `mint <name>` — the generator, called as a STATEMENT so its exit status is the
+# script's. One per `create <name>`, and in the same order.
+GENERATES = re.compile(r"^\s*mint\s+(?P<name>[a-z0-9][a-z0-9.-]*)\s*$", re.MULTILINE)
+
+# The length check on what the generator produced, and the arm it takes when the
+# length is wrong.
+LENGTH_CHECK = re.compile(
+    r'\[\s*"\$\{#(?P<variable>[A-Za-z_][A-Za-z0-9_]*)\}"\s*-ne\s*(?P<length>\d+)\s*\]'
+    r"(?P<arm>.*?)\bfi\b",
+    re.DOTALL,
+)
+
+
+def generation_failures(documents: list[dict]) -> list[str]:
+    """Every way a degraded image could mint an EMPTY credential and report success. PURE.
+
+    THE DEFECT THIS CLOSES, MEASURED RATHER THAN SUPPOSED. With `base64` absent
+    from the image's PATH, the earlier shape — `"password":"$(password)"` inside
+    the heredoc — created three Secrets holding `""`, reported all three "created",
+    and exited 0. `set -e` cannot see it: COMMAND SUBSTITUTION DISCARDS the
+    function's exit status, so the status never becomes the `create` command's. The
+    pipeline `head | base64 | tr` masks it a second time, because a pipeline
+    reports only its LAST element's status.
+
+    AND IT WOULD BE STICKY, which is what makes it worth a gate rather than a
+    comment. The Role grants `create` alone and a 409 is success, so every run
+    after the first reports "already exists, left untouched". Re-running never
+    repairs it. Recovery needs `kubectl delete secret` first, and nobody reaches
+    for that against a green Job.
+
+    SO THE RENDER-TIME PROPERTY IS: the value is generated into a variable, its
+    LENGTH is checked at the top level of the script where `exit` ends the run, and
+    no request body carries a `$( )` at all. Each of those three is checkable
+    without a cluster, and the red case beside this one reverts the third.
+
+    It does not fire as shipped — `curlimages/curl` is Alpine and busybox provides
+    `base64`. `bootstrap.image` is a value, which is the exposure.
+    """
+    failures = []
+    scripts = job_scripts(documents)
+    bodies = 0
+
+    for job, script in sorted(scripts.items()):
+        generated = [match.group("name") for match in GENERATES.finditer(script)]
+        created = minted_by(script)
+        if generated != created:
+            failures.append(
+                f"{job}: expected one `mint <name>` statement before each `create "
+                f"<name>`, in the same order — the script creates {created} and "
+                f"generates {generated}. A credential built anywhere but a "
+                f"statement cannot fail the run"
+            )
+
+        checks = list(LENGTH_CHECK.finditer(script))
+        if len(checks) != 1:
+            failures.append(
+                f"{job}: expected 1 length check on the generated credential, "
+                f"found {len(checks)}. Without it an empty value is POSTed, "
+                f"answered 201, and reported as created"
+            )
+        else:
+            check = checks[0]
+            if int(check.group("length")) != EXPECTED_CREDENTIAL_LENGTH:
+                failures.append(
+                    f"{job}: expected the generated credential checked against "
+                    f"{EXPECTED_CREDENTIAL_LENGTH} characters, found "
+                    f"{check.group('length')}. 33 random bytes as base64 is "
+                    f"{EXPECTED_CREDENTIAL_LENGTH} characters with no padding"
+                )
+            if "exit 1" not in check.group("arm"):
+                failures.append(
+                    f"{job}: the length check does not stop the Job when it fails. "
+                    f"The arm reads:{check.group('arm')}"
+                )
+
+        for match in BODY.finditer(script):
+            bodies += 1
+            body = match.group("body")
+            if "$(" in body:
+                failures.append(
+                    f"{job}: a request body interpolates a command substitution: "
+                    f"{' '.join(body.split())}. A generator called there CANNOT "
+                    f"fail the run — command substitution discards its exit status "
+                    f"so `set -e` never sees it, and a pipeline inside it reports "
+                    f"only its last element. A degraded image mints an EMPTY "
+                    f"credential, the POST answers 201, and no later run repairs it "
+                    f"because `create` is the only verb and a 409 is success"
+                )
+
+    if bodies != EXPECTED_REQUEST_BODIES:
+        failures.append(
+            f"expected {EXPECTED_REQUEST_BODIES} request bodies across the two "
+            f"scripts, found {bodies}. A body this gate did not read is a body it "
+            f"did not check, and a zero here would be vacuous rather than a property"
+        )
+    return failures
+
+
+def test_an_empty_credential_stops_the_job_instead_of_being_posted():
+    """The generator's failure reaches the exit status, on both Jobs."""
+    failures = generation_failures(adopter_render())
+    assert failures == [], "\n".join(failures)
+
+
+def chart_that_generates_inside_the_request_body(destination: Path) -> Path:
+    """The red case, and it is the shape that shipped: generate inside the heredoc.
+
+    One body reverted, so the gate has to name the body rather than notice a count.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    interpolation = '"stringData":{"password":"$value"}}'
+    assert interpolation in text, "the body moved; this red case is now testing nothing"
+    template.write_text(
+        text.replace(
+            interpolation,
+            '"stringData":{"password":"$(head -c 33 /dev/urandom | base64 | tr -d \'\\n\')"}}',
+            1,
+        )
+    )
+    return copy
+
+
+def test_generating_inside_the_request_body_reddens_the_generation_gate(tmp_path):
+    failures = generation_failures(
+        adopter_render(chart_that_generates_inside_the_request_body(tmp_path))
+    )
+    message = "\n".join(failures)
+    assert failures, (
+        "a credential was generated inside the request body, where its failure "
+        "cannot reach the Job's exit status, and the gate passed"
+    )
+    assert "bootstrap-secrets: a request body interpolates a command substitution" in message, (
+        message
+    )
+
+
+# ── THE IMAGE THAT MINTS THE ESTATE'S ROOT CREDENTIALS IS PINNED EXACTLY ─────
+
+# A digest reference: `<repository>@sha256:<64 hex>`. A tag is a MOVING pointer, so
+# a tag here leaves the code that mints the three machine-only credentials and the
+# administrative bootstrap token as whatever the registry last published under that
+# name. Both Jobs are checked, and the number is a literal.
+DIGEST_PINNED = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+
+
+def image_failures(documents: list[dict]) -> list[str]:
+    """Every Job whose image is not pinned by digest. PURE.
+
+    THE HIGHEST-VALUE IMAGE IN THE ESTATE TO HOLD EXACT, which is the whole of the
+    argument: these two Jobs mint every credential that has no source outside the
+    installation. `bootstrap.image` stays a VALUE so a mirrored registry needs no
+    fork — the pin is what the shipped default is, not what the key can hold.
+    """
+    failures = []
+    jobs = of_kind(documents, "Job")
+    if len(jobs) != EXPECTED_HOOK_JOBS:
+        failures.append(
+            f"expected {EXPECTED_HOOK_JOBS} Jobs to check an image on, found "
+            f"{len(jobs)}: {sorted(name_of(job) for job in jobs)}"
+        )
+    for job in sorted(jobs, key=name_of):
+        containers = (((job.get("spec") or {}).get("template") or {}).get("spec") or {}).get(
+            "containers"
+        ) or []
+        for container in containers:
+            image = str(container.get("image"))
+            if not DIGEST_PINNED.match(image):
+                failures.append(
+                    f"{name_of(job)}: image {image!r} is not pinned by digest. A tag "
+                    f"is a moving pointer, and this Job mints the credentials "
+                    f"nothing outside the installation can supply — pin "
+                    f"`<repository>@sha256:<digest>`, and keep the tag beside it as "
+                    f"a comment"
+                )
+    return failures
+
+
+def test_both_bootstrap_jobs_are_pinned_by_digest():
+    failures = image_failures(adopter_render())
+    assert failures == [], "\n".join(failures)
+
+
+def chart_pinned_by_tag(destination: Path) -> Path:
+    """The red case: the digest replaced by the tag that names the same bytes today."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    values = copy / "values.yaml"
+    text = values.read_text()
+    pinned = "  image: curlimages/curl@sha256:"
+    assert pinned in text, "the image pin moved; this red case is now testing nothing"
+    line = next(line for line in text.splitlines() if line.startswith(pinned))
+    values.write_text(text.replace(line, "  image: curlimages/curl:8.16.0"))
+    return copy
+
+
+def test_pinning_the_image_by_tag_reddens_the_digest_gate(tmp_path):
+    failures = image_failures(adopter_render(chart_pinned_by_tag(tmp_path)))
+    message = "\n".join(failures)
+    assert failures, "the image went back to a moving tag and the digest gate passed"
+    assert "image 'curlimages/curl:8.16.0' is not pinned by digest" in message, message
+
+
 # ── PROPERTY 2 — THE CHART NEVER TEMPLATES THE SECRET ────────────────────────
 
 
@@ -424,11 +688,27 @@ def rbac_failures(documents: list[dict]) -> list[str]:
     own terms: a verb ADDED later has to turn this red, and an equality on a sorted
     list would do that while a subset check would not.
 
-    AND NOTHING CLUSTER-SCOPED. `resourceNames` cannot scope a `create` — the
-    authorizer runs before the request body is decoded — so the ONLY thing
-    narrowing this identity is the Role being namespaced. A ClusterRole here would
-    hand it every namespace at once, which is why its absence is asserted rather
-    than assumed.
+    AND THE WIRING, BECAUSE A NARROW ROLE NOBODY IS BOUND TO IS NOT A NARROWING.
+    An earlier form of this gate counted cluster-scoped OBJECTS and stopped there,
+    and three mutations passed it green: pointing `roleRef` at the built-in
+    `ClusterRole/cluster-admin` (which renders NO ClusterRole object, so the zero
+    stayed zero while the bootstrap identity became cluster-admin), naming a
+    different ServiceAccount in `subjects`, and setting both Jobs'
+    `serviceAccountName` to `default`. So the four terms are asserted AGAINST EACH
+    OTHER, off the render, never against a literal also written into the template:
+
+      - `roleRef` names `Role` in `rbac.authorization.k8s.io`, and its `name` is
+        the name of the Role this render produced.
+      - the binding carries exactly one subject, and it is the ServiceAccount this
+        render produced, in the namespace this render was made for. A subject in
+        the wrong namespace grants the Role to nobody.
+      - every Job's `serviceAccountName` is that same ServiceAccount. A Job left on
+        `default` runs as an identity this Role was never bound to.
+
+    The cluster-scoped zero is kept, because it is a different claim —
+    `resourceNames` cannot scope a `create`, the authorizer runs before the request
+    body is decoded, so the Role being NAMESPACED is the only thing that bounds
+    this identity. It is necessary and it was never sufficient.
     """
     failures = []
 
@@ -441,12 +721,108 @@ def rbac_failures(documents: list[dict]) -> list[str]:
             f"is the only thing that bounds this identity"
         )
 
+    # THE THREE RENDERED NAMES, EACH READ ONCE AND THEN COMPARED WITH THE OTHERS.
+    # `None` where the render did not produce exactly one, so a missing object is
+    # reported as the comparison it made impossible rather than skipping the
+    # comparisons below in silence.
+    accounts = of_kind(documents, "ServiceAccount")
+    if len(accounts) != EXPECTED_SERVICE_ACCOUNTS:
+        failures.append(
+            f"expected {EXPECTED_SERVICE_ACCOUNTS} ServiceAccount, found "
+            f"{len(accounts)}: {sorted(name_of(account) for account in accounts)}. "
+            f"Both Jobs run as one identity — see `templates/bootstrap-rbac.yaml` "
+            f"for why a second one would narrow nothing"
+        )
+    identity = name_of(accounts[0]) if len(accounts) == EXPECTED_SERVICE_ACCOUNTS else None
+
     roles = of_kind(documents, "Role")
     if len(roles) != 1:
         failures.append(
             f"expected 1 Role, found {len(roles)}: "
             f"{sorted(name_of(role) for role in roles)}"
         )
+    role_name = name_of(roles[0]) if len(roles) == 1 else None
+
+    bindings = of_kind(documents, "RoleBinding")
+    if len(bindings) != EXPECTED_ROLE_BINDINGS:
+        failures.append(
+            f"expected {EXPECTED_ROLE_BINDINGS} RoleBinding, found {len(bindings)}: "
+            f"{sorted(name_of(binding) for binding in bindings)}"
+        )
+
+    for binding in bindings:
+        reference = binding.get("roleRef") or {}
+        if reference.get("kind") != "Role" or reference.get("apiGroup") != RBAC_API_GROUP:
+            failures.append(
+                f"{name_of(binding)}: expected roleRef "
+                f"{{'apiGroup': {RBAC_API_GROUP!r}, 'kind': 'Role'}}, found "
+                f"{{'apiGroup': {reference.get('apiGroup')!r}, 'kind': "
+                f"{reference.get('kind')!r}}}. A ClusterRole here binds this "
+                f"identity in EVERY namespace, and a built-in one renders no object "
+                f"for the cluster-scoped count above to see"
+            )
+        if role_name is None:
+            failures.append(
+                f"{name_of(binding)}: the render carries no single Role, so "
+                f"roleRef.name {reference.get('name')!r} was compared against nothing"
+            )
+        elif reference.get("name") != role_name:
+            failures.append(
+                f"{name_of(binding)}: expected roleRef.name to be the rendered "
+                f"Role's name {role_name!r}, found {reference.get('name')!r}. The "
+                f"Role's `create`-only rule bounds nothing the binding does not "
+                f"point at"
+            )
+
+        subjects = binding.get("subjects") or []
+        if len(subjects) != EXPECTED_BINDING_SUBJECTS:
+            failures.append(
+                f"{name_of(binding)}: expected {EXPECTED_BINDING_SUBJECTS} subject, "
+                f"found {len(subjects)}: {subjects}"
+            )
+            continue
+        if identity is None:
+            failures.append(
+                f"{name_of(binding)}: the render carries no single ServiceAccount, "
+                f"so the subject {subjects[0]} was compared against nothing"
+            )
+            continue
+        expected = {
+            "kind": "ServiceAccount",
+            "name": identity,
+            "namespace": RELEASE_NAMESPACE,
+        }
+        if subjects[0] != expected:
+            failures.append(
+                f"{name_of(binding)}: expected the subject to be the rendered "
+                f"ServiceAccount {expected}, found {subjects[0]}. A subject naming "
+                f"another account, or another namespace, leaves the identity the "
+                f"Jobs actually run as holding NOTHING"
+            )
+
+    jobs = of_kind(documents, "Job")
+    if len(jobs) != EXPECTED_HOOK_JOBS:
+        failures.append(
+            f"expected {EXPECTED_HOOK_JOBS} Jobs to check `serviceAccountName` on, "
+            f"found {len(jobs)}: {sorted(name_of(job) for job in jobs)}"
+        )
+    for job in jobs:
+        pod = ((job.get("spec") or {}).get("template") or {}).get("spec") or {}
+        runs_as = pod.get("serviceAccountName")
+        if identity is None:
+            failures.append(
+                f"{name_of(job)}: the render carries no single ServiceAccount, so "
+                f"its serviceAccountName {runs_as!r} was compared against nothing"
+            )
+        elif runs_as != identity:
+            failures.append(
+                f"{name_of(job)}: expected serviceAccountName to be the rendered "
+                f"ServiceAccount {identity!r}, found {runs_as!r}. A Job left on "
+                f"another account runs as an identity this Role was never bound to, "
+                f"and every POST it makes answers 403"
+            )
+
+    if len(roles) != 1:
         return failures
 
     rules = roles[0].get("rules") or []
@@ -501,6 +877,55 @@ def test_a_second_verb_reddens_the_rbac_gate(tmp_path):
     message = "\n".join(failures)
     assert failures, "the Role gained a second verb and the RBAC gate passed"
     assert "expected 1 verb on the Role, exactly ['create'], found 2" in message, message
+
+
+def chart_bound_to_cluster_admin(destination: Path) -> Path:
+    """The wiring's red case, and it is the one that passed the earlier gate green.
+
+    `cluster-admin` EXISTS IN EVERY CLUSTER, so binding to it renders no ClusterRole
+    object at all — the cluster-scoped count stays zero while the bootstrap identity
+    becomes cluster-admin. That is why the four terms are compared against each
+    other rather than counted.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-rbac.yaml"
+    text = template.read_text()
+    reference = (
+        "roleRef:\n"
+        "  apiGroup: rbac.authorization.k8s.io\n"
+        "  kind: Role\n"
+        "  name: {{ $bootstrap.serviceAccountName }}\n"
+    )
+    assert reference in text, "the roleRef moved; this red case is now testing nothing"
+    template.write_text(
+        text.replace(
+            reference,
+            "roleRef:\n"
+            "  apiGroup: rbac.authorization.k8s.io\n"
+            "  kind: ClusterRole\n"
+            "  name: cluster-admin\n",
+        )
+    )
+    return copy
+
+
+def test_binding_to_cluster_admin_reddens_the_rbac_gate(tmp_path):
+    """The mutation that made this round necessary: green before, red now.
+
+    Asserted on BOTH halves — the kind and the name — and on the cluster-scoped
+    count staying zero, because the zero staying zero is the whole finding.
+    """
+    documents = adopter_render(chart_bound_to_cluster_admin(tmp_path))
+    assert of_kind(documents, "ClusterRole") == [], (
+        "binding to cluster-admin rendered a ClusterRole object, so this red case "
+        "is no longer the one that slipped past a count of cluster-scoped objects"
+    )
+    failures = rbac_failures(documents)
+    message = "\n".join(failures)
+    assert failures, "the bootstrap identity became cluster-admin and the RBAC gate passed"
+    assert "'kind': 'ClusterRole'" in message, message
+    assert "found 'cluster-admin'" in message, message
 
 
 # ── THREE SECRETS, AND THE FOURTH THAT ADR-0753 ORDERS BEHIND `iam` ──────────

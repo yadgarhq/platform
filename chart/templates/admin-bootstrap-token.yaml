@@ -114,19 +114,37 @@ spec:
               }
 
               # 33 random bytes as base64, no trailing newline — the same shape
-              # `bootstrap-secrets`' `password()` uses, for the same reason: 33
-              # rather than 32 bytes so the base64 carries no `=` padding for an
-              # operator to trim by hand when they paste it. The generated value
-              # never enters this container's process table — it is piped straight
-              # into the request body on stdin.
-              admin_token() { head -c 33 /dev/urandom | base64 | tr -d '\n'; }
+              # `bootstrap-secrets`' `mint()` uses, for the same reason: 33 rather
+              # than 32 bytes so the base64 carries no `=` padding for an operator
+              # to trim by hand when they paste it, which is why 44 characters is
+              # an exact length here. The generated value never enters this
+              # container's process table — it reaches the request body as
+              # `$value` and the body reaches curl on stdin.
+              #
+              # ASSIGNED AND CHECKED RATHER THAN CALLED AS `$(admin_token)` IN THE
+              # HEREDOC, and `bootstrap-secrets` argues it at length: command
+              # substitution discards the function's exit status so `set -e` never
+              # sees it, and the pipeline reports only its last element anyway. A
+              # degraded image would otherwise mint an EMPTY token, the POST would
+              # answer 201, and the Job would report "created" — and no later run
+              # could repair it, because `create` is the only verb this identity
+              # holds and a 409 is success. An empty administrative bootstrap
+              # token is the credential ADR-0492's whole recovery path rests on.
+              mint() {
+                value="$(head -c 33 /dev/urandom | base64 | tr -d '\n')"
+                if [ "${#value}" -ne 44 ]; then
+                  echo "$1: generated a ${#value}-character credential, expected 44" >&2
+                  exit 1
+                fi
+              }
 
               # `stringData`, not `data`: the API server stores exactly the bytes
               # given, so what lands is the token and nothing appended.
+              mint {{ $bootstrap.adminToken.secretName }}
               create {{ $bootstrap.adminToken.secretName }} <<JSON
               {"apiVersion":"v1","kind":"Secret","type":"Opaque",
                "metadata":{"name":"{{ $bootstrap.adminToken.secretName }}"},
-               "stringData":{"token":"$(admin_token)"}}
+               "stringData":{"token":"$value"}}
               JSON
           resources:
             requests: { cpu: 10m, memory: 16Mi }

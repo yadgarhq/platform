@@ -25,7 +25,7 @@ Four credentials have **no source outside the installation**: `valkey-password`,
 
 Four properties make that safe rather than clever. `scripts/tests/test_bootstrap.py` asserts each of them, and each assertion has a constructed red case beside it.
 
-1. **It generates only when the Secret is absent.** The script does not read and then write — it POSTs, and treats the API server's `409 AlreadyExists` as success. There is no check-then-act window because there is no check, and the Role grants `create` alone, so the Job could not overwrite a live credential even if the script were wrong. **A restore is therefore ordinary:** create the Secret from your backup before you install, and the Job stands down.
+1. **It never rewrites or rotates an existing Secret.** The script generates on _every_ run and POSTs — it does not read first, and it does not check whether the Secret is already there. The API server refuses the second POST and every one after it with `409 AlreadyExists`, the Job reads that answer as success, and the value it generated is discarded unused. There is no check-then-act window because there is no check, and the Role grants `create` alone, so the Job could not overwrite a live credential even if the script were wrong. **A restore is therefore ordinary:** create the Secret from your backup before you install, and the Job stands down.
 2. **The chart never templates the Secret.** Because a Job POSTs it, the Secret is in neither Helm's release manifest nor Argo's tracked set. An uninstall does not delete it and a prune does not remove it, so the key outlives the release that created it.
 3. **The value stays exportable.** The command is below, beside the install command rather than in a section somebody reaches later.
 4. **The Role grants `create` and nothing else** — not `get`, not `list`, not `update`, not `patch`, not `delete`. That is ADR-0750's property 4 as ADR-0753 narrowed it. A compromised bootstrap pod learns nothing about the credentials it did not mint.
@@ -73,14 +73,19 @@ You clone nothing and you fork nothing. Copy `example/values.yaml` into your own
 helm install platform yadgar/platform --namespace yadgar --create-namespace -f values.yaml
 ```
 
-**Then export what the bootstrap Jobs minted.** Nothing tracks those four Secrets, which is what keeps an uninstall or a prune from deleting them — and it is also what leaves nothing backing them up. A cluster deleted without an export loses the values for good, and losing the internal CA's material invalidates every certificate issued under it. Run these four commands after the first install, and store the output where you store your other backups.
+**Then export what the bootstrap Jobs minted.** Nothing tracks those four Secrets, which is what keeps an uninstall or a prune from deleting them — and it is also what leaves nothing backing them up. A cluster deleted without an export loses the values for good. Run these five commands after the first install, and store the output where you store your other backups.
 
 ```sh
 kubectl -n yadgar get secret valkey-password -o yaml
 kubectl -n yadgar get secret nats-auth -o yaml
 kubectl -n yadgar get secret nats-auth-gateway -o yaml
 kubectl -n yadgar get secret admin-bootstrap-token -o yaml
+kubectl -n yadgar get secret yadgar-internal-ca -o yaml
 ```
+
+**The fifth is a different kind of Secret, and the difference is worth stating rather than blurring.** `yadgar-internal-ca` holds the internal authority's private key, and losing that material invalidates every certificate issued under it. It is written by cert-manager from the `isCA` Certificate in `chart/templates/internal-ca.yaml` — neither Job mints it — so ADR-0750's property 3 does not strictly bind it. It is listed here because the hazard is the same one, and naming a hazard while withholding its remedy helps nobody.
+
+**What `helm uninstall` leaves behind, deliberately.** The ServiceAccount, the Role, the RoleBinding and the two completed Jobs carry `hook-delete-policy: before-hook-creation` and nothing else, so all five remain after the release is gone. The design asks for exactly that, and `hook-succeeded` is not an available alternative: it would delete the ServiceAccount before the Jobs it serves are finished with it. The residual grant is real and it is bounded. Anyone who can create a pod in that namespace can mount that ServiceAccount and `create` Secrets there — and nothing else, because the Role holds no `get`, no `list`, no `update` and no `delete`, and it is namespaced. Delete the triple by hand if the namespace outlives the release.
 
 The administrative bootstrap token is the one of the four a person actually reads. Hand it to the first administrator with:
 
