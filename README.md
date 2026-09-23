@@ -8,15 +8,31 @@ A bare cluster with the third-party operators already installed should become a 
 
 ## What is here today
 
-This is the first commit, and it carries the certificate half of the layer.
+The certificate half of the layer, and the Jobs that mint the credentials nothing outside the installation can supply.
 
 | object set                                                                                                           | toggle                | default |
 | -------------------------------------------------------------------------------------------------------------------- | --------------------- | ------- |
 | Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca` | `internalCA.create`   | `false` |
 | The ten internal leaf Certificates, each carrying its own `renewBefore`                                              | `certificates.create` | `false` |
 | The edge Certificate, whose issuer is an authority this chart does not own                                           | `edgeTLS.create`      | `false` |
+| Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share        | `bootstrap.create`    | `false` |
 
-The rest of the layer — the databases, NATS, Valkey, the Gateway listener, the bootstrap Jobs and the preflight Job — arrives in later pull requests.
+The rest of the layer — the databases, NATS, Valkey, the Gateway listener and the preflight Job — arrives in later pull requests.
+
+## The bootstrap Jobs, and the Secrets nothing owns
+
+Four credentials have **no source outside the installation**: `valkey-password`, `nats-auth`, `nats-auth-gateway`, and the administrative bootstrap token that lets the first administrator exist before any administrator exists to create one. Their value is not a credential to some external system — it is created once, and everything derives from it. There is nobody to transcribe them from, so ADR-0750 rules that the chart mints them itself, with an **idempotent Job**, into a Secret that **neither Helm nor Argo tracks**.
+
+Four properties make that safe rather than clever. `scripts/tests/test_bootstrap.py` asserts each of them, and each assertion has a constructed red case beside it.
+
+1. **It never rewrites or rotates an existing Secret.** The script generates on _every_ run and POSTs — it does not read first, and it does not check whether the Secret is already there. The API server refuses the second POST and every one after it with `409 AlreadyExists`, the Job reads that answer as success, and the value it generated is discarded unused. There is no check-then-act window because there is no check, and the Role grants `create` alone, so the Job could not overwrite a live credential even if the script were wrong. **A restore is therefore ordinary:** create the Secret from your backup before you install, and the Job stands down.
+2. **The chart never templates the Secret.** Because a Job POSTs it, the Secret is in neither Helm's release manifest nor Argo's tracked set. An uninstall does not delete it and a prune does not remove it, so the key outlives the release that created it.
+3. **The value stays exportable.** The command is below, beside the install command rather than in a section somebody reaches later.
+4. **The Role grants `create` and nothing else** — not `get`, not `list`, not `update`, not `patch`, not `delete`. That is ADR-0750's property 4 as ADR-0753 narrowed it. A compromised bootstrap pod learns nothing about the credentials it did not mint.
+
+**`iam-keys` is deliberately not among them.** It is data-bearing: every stored name is AES-256-GCM ciphertext, and every username is found through an HMAC blind index. Generate it, and a cluster whose Secret is gone but whose database survived gets an `iam` that **starts healthy and cannot decrypt the rows it already has**. Leave it out, and the same cluster gets a pod that refuses to start and names the missing file — which is the only signal that the keys were lost at all. ADR-0753 puts its generation behind a key-identity marker in the `iam` binary that refuses a wrong key, and orders that marker first, in a change of its own. Until that ships, this chart never names `iam-keys`.
+
+**Rotation is not provided.** Deleting a Secret and re-running the Job mints a _different_ value, which is destructive for anything already encrypted under the old one.
 
 ## The ladder, which is the reason these objects live together
 
@@ -35,20 +51,49 @@ Every leaf has exactly one consuming module, so ADR-0752's rule that a single-co
 ## Layout
 
 ```
-chart/Chart.yaml                      the chart
-chart/values.yaml                     every toggle, every leaf and the ladder, with the reasoning beside each
-chart/templates/_require_api.tpl      the render check's definition — a partial, which helm never renders
-chart/templates/render-checks.yaml    where it is CALLED, which is what makes the refusal happen
-chart/templates/internal-ca.yaml      the self-signed Issuer, the CA Certificate and the CA Issuer
-chart/templates/certificates.yaml     the ten internal leaves, from the map in values.yaml
-chart/templates/edge-certificate.yaml the edge leaf, whose issuerRef is required with no default
-example/values.yaml                   what an adopter commits in their own repository
-scripts/tests/                        the ladder gate and the render-check harness
+chart/Chart.yaml                           the chart
+chart/values.yaml                          every toggle, every leaf and the ladder, with the reasoning beside each
+chart/templates/_require_api.tpl           the render check's definition — a partial, which helm never renders
+chart/templates/render-checks.yaml         where it is CALLED, which is what makes the refusal happen
+chart/templates/internal-ca.yaml           the self-signed Issuer, the CA Certificate and the CA Issuer
+chart/templates/certificates.yaml          the ten internal leaves, from the map in values.yaml
+chart/templates/edge-certificate.yaml      the edge leaf, whose issuerRef is required with no default
+chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
+chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook
+chart/templates/admin-bootstrap-token.yaml the one credential an operator reads out, in its own file
+example/values.yaml                        what an adopter commits in their own repository
+scripts/tests/                             the ladder gate, the render-check harness and the bootstrap gate
 ```
 
 ## Adopting this in your own installation
 
 You clone nothing and you fork nothing. Copy `example/values.yaml` into your own GitOps repository, set `edgeTLS.issuerRef.name` and `edgeTLS.issuerRef.kind` to your own certificate authority, and point your Application at the published chart.
+
+```sh
+helm install platform yadgar/platform --namespace yadgar --create-namespace -f values.yaml
+```
+
+**Then export what the bootstrap Jobs minted.** Nothing tracks those four Secrets, which is what keeps an uninstall or a prune from deleting them — and it is also what leaves nothing backing them up. A cluster deleted without an export loses the values for good. Run these five commands after the first install, and store the output where you store your other backups.
+
+```sh
+kubectl -n yadgar get secret valkey-password -o yaml
+kubectl -n yadgar get secret nats-auth -o yaml
+kubectl -n yadgar get secret nats-auth-gateway -o yaml
+kubectl -n yadgar get secret admin-bootstrap-token -o yaml
+kubectl -n yadgar get secret yadgar-internal-ca -o yaml
+```
+
+**The fifth is a different kind of Secret, and the difference is worth stating rather than blurring.** `yadgar-internal-ca` holds the internal authority's private key, and losing that material invalidates every certificate issued under it. It is written by cert-manager from the `isCA` Certificate in `chart/templates/internal-ca.yaml` — neither Job mints it — so ADR-0750's property 3 does not strictly bind it. It is listed here because the hazard is the same one, and naming a hazard while withholding its remedy helps nobody.
+
+**What `helm uninstall` leaves behind, deliberately.** The ServiceAccount, the Role, the RoleBinding and the two completed Jobs carry `hook-delete-policy: before-hook-creation` and nothing else, so all five remain after the release is gone. The design asks for exactly that, and `hook-succeeded` is not an available alternative: it would delete the ServiceAccount before the Jobs it serves are finished with it. The residual grant is real and it is bounded. Anyone who can create a pod in that namespace can mount that ServiceAccount and `create` Secrets there — and nothing else, because the Role holds no `get`, no `list`, no `update` and no `delete`, and it is namespaced. Delete the triple by hand if the namespace outlives the release.
+
+The administrative bootstrap token is the one of the four a person actually reads. Hand it to the first administrator with:
+
+```sh
+kubectl -n yadgar get secret admin-bootstrap-token -o jsonpath='{.data.token}' | base64 -d; echo
+```
+
+**Read it again after every cluster rebuild.** The Job mints a new token when the Secret is gone, so a value copied from before the rebuild agrees with nothing. The Secret is never _absent_ — it is present, ready, and wrong — and no existence check can tell the two apart.
 
 **cert-manager is your prerequisite and this chart never installs it.** That is the estate's standing rule for every operator — cert-manager, mariadb-operator, KEDA, Envoy Gateway and Argo CD are the adopter's to install, and a chart that needs one checks the API and refuses at render when it is absent.
 
