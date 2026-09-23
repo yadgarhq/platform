@@ -19,15 +19,21 @@ renderer always answers false", which makes it no evidence at all.
 
 SO BOTH CASES PASS `--api-versions`, AND THEY DIFFER ONLY IN WHAT IS IN IT.
 Measured at the same time: `--api-versions` ADDS to helm's built-in set rather
-than replacing it.
+than replacing it. THAT IS WHY THE RED GROUP MUST NOT BE BUILT IN: a built-in
+group passed through `--api-versions` changes nothing observable, so the render
+would be indistinguishable from a bare one and the red case would prove nothing.
+`assert_the_red_group_is_not_built_in` below is the tripwire that catches the red
+group drifting back onto a built-in one.
 
-  RED    --api-versions batch/v1               a non-empty set that does NOT name
-                                               the group. The refusal is then
-                                               attributable to the group being
-                                               absent from the target, which is
-                                               the thing the check is for.
-  GREEN  --api-versions cert-manager.io/v1     the same render, with the group
-                                               present, must produce objects.
+  RED    --api-versions monitoring.coreos.com/v1   a non-empty set that does NOT
+                                                   name the group. The refusal is
+                                                   then attributable to the group
+                                                   being absent from the target,
+                                                   which is the thing the check is
+                                                   for.
+  GREEN  --api-versions cert-manager.io/v1          the same render, with the
+                                                   group present, must produce
+                                                   objects.
 
 `test_a_bare_render_refuses_too_and_that_is_the_renderers_reason` below records
 the measurement that forces this, so nobody later "simplifies" the red case back
@@ -64,10 +70,18 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 EXPECTED_RENDER_CHECKS = 1
 EXPECTED_CHECKS = {"cert-manager.io/v1": "cert-manager"}
 
-# A group that is NOT what any check asks for, and is not built in either, so the
-# red render below carries a real `--api-versions` set that simply lacks the one
-# the check wants.
-A_GROUP_NO_CHECK_ASKS_FOR = "batch/v1"
+# A group that is NOT what any check asks for, and is NOT in helm's built-in set.
+# It must not be built in: `--api-versions` ADDS to the built-in set rather than
+# replacing it (see the module docstring), so a built-in group passed through it
+# changes nothing observable and the red render below would be indistinguishable
+# from a bare one. `assert_the_red_group_is_not_built_in` is the tripwire that
+# catches this constant drifting back onto a built-in group.
+A_GROUP_NO_CHECK_ASKS_FOR = "monitoring.coreos.com/v1"
+
+# The red render's own arguments, funneled through one name so the tripwire and
+# the red case in `test_the_harness_exercises_one_red_green_pair_per_declared_check`
+# can never drift apart from each other.
+RED_API_VERSIONS = ("--api-versions", A_GROUP_NO_CHECK_ASKS_FOR)
 
 INVOCATION = re.compile(
     r'include\s+"platform\.require-api"\s+\(dict(?P<body>.*?)\)\s*\}\}', re.DOTALL
@@ -135,6 +149,60 @@ def objects(stdout: str) -> list[dict]:
     ]
 
 
+def probe_capability(group: str, destination: Path, *api_versions: str) -> bool:
+    """Whether a throwaway chart's OWN render sees `group` in `.Capabilities.APIVersions`.
+
+    A SEPARATE, ONE-TEMPLATE CHART rather than a re-read of the platform chart's
+    render, because the thing under test here is helm's capability mechanism
+    itself — what `--api-versions` does and does not add — not anything this
+    chart declares. `destination` must be a fresh directory per call: two probes
+    sharing one chart directory would collide on `templates/probe.yaml`.
+    """
+    chart = destination / "capability-probe-m-agahi"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text(
+        "apiVersion: v2\nname: capability-probe-m-agahi\nversion: 0.1.0\n"
+    )
+    (chart / "templates" / "probe.yaml").write_text(
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata:\n"
+        "  name: probe\n"
+        "data:\n"
+        '  has: {{ .Capabilities.APIVersions.Has "%s" | quote }}\n' % group
+    )
+    result = helm("template", "probe", str(chart), *api_versions)
+    assert result.returncode == 0, result.stderr
+    (configmap,) = objects(result.stdout)
+    return configmap["data"]["has"] == "true"
+
+
+def assert_the_red_group_is_not_built_in(tmp_path: Path) -> None:
+    """The red case's own tripwire, following `test_ladder.py`'s collision twin.
+
+    PROVES BOTH HALVES OF WHAT MAKES `A_GROUP_NO_CHECK_ASKS_FOR` USABLE AS THE RED
+    GROUP. First, that it is absent from a BARE render's `.Capabilities.APIVersions`
+    — i.e. it is not one of helm's built-in groups, because a built-in group passed
+    through `--api-versions` changes nothing observable (module docstring) and the
+    red render below would then be indistinguishable from a bare one. Second, that
+    it IS present once passed through `RED_API_VERSIONS` — i.e. the red render's
+    own arguments actually reach `.Capabilities.APIVersions`, so a red case rewired
+    to carry no `--api-versions` at all is caught here too.
+    """
+    bare = probe_capability(A_GROUP_NO_CHECK_ASKS_FOR, tmp_path / "bare")
+    assert not bare, (
+        f"{A_GROUP_NO_CHECK_ASKS_FOR} is present in a bare render's "
+        f".Capabilities.APIVersions, so it is one of helm's built-in groups and "
+        f"the red case below can no longer be told apart from a bare render"
+    )
+    red = probe_capability(A_GROUP_NO_CHECK_ASKS_FOR, tmp_path / "red", *RED_API_VERSIONS)
+    assert red, (
+        f"{A_GROUP_NO_CHECK_ASKS_FOR} did not reach .Capabilities.APIVersions "
+        f"through {RED_API_VERSIONS}, so the red render below no longer carries a "
+        f"capability set that differs from a bare render"
+    )
+
+
 def test_the_chart_declares_the_checks_this_harness_exercises():
     """The denominator, asserted against the chart rather than assumed."""
     assert declaration_failures(CHART, EXPECTED_CHECKS) == [], declaration_failures(
@@ -160,7 +228,7 @@ def test_deleting_a_check_from_the_chart_reddens_the_count(tmp_path):
     assert "expected 1 render checks declared in the chart, found 0" in message
 
 
-def test_the_harness_exercises_one_red_green_pair_per_declared_check():
+def test_the_harness_exercises_one_red_green_pair_per_declared_check(tmp_path):
     """Every declared check refuses without its group and renders with it.
 
     BOTH RENDERS PASS `--api-versions`, and the module docstring is where the
@@ -168,9 +236,21 @@ def test_the_harness_exercises_one_red_green_pair_per_declared_check():
     every CRD-backed group out of `.Capabilities.APIVersions`, so a bare render
     refuses whatever the target holds and proves nothing about the check.
     """
+    assert_the_red_group_is_not_built_in(tmp_path)
+
     exercised = 0
     for group, operator in sorted(declared_checks(CHART).items()):
-        red = render("--api-versions", A_GROUP_NO_CHECK_ASKS_FOR)
+        red = render(*RED_API_VERSIONS)
+        # THE RED CASE'S SECOND TRIPWIRE, ORTHOGONAL TO `assert_the_red_group_is_not_built_in`
+        # ABOVE. That one guards the CONSTANT; this one guards the CALL SITE — it reads
+        # `subprocess.CompletedProcess.args`, the literal argv `helm()` ran, so a red case
+        # rewritten straight to a bare `render()` (bypassing `RED_API_VERSIONS` entirely,
+        # rather than draining it to `()`) is caught here instead of silently reverting to
+        # the bare render `test_a_bare_render_refuses_too_and_that_is_the_renderers_reason`
+        # exists to keep out.
+        assert set(RED_API_VERSIONS) <= set(red.args), (
+            f"the red render's own argv no longer carries {RED_API_VERSIONS}: {red.args}"
+        )
         assert red.returncode != 0, (
             f"the render for {operator} succeeded with {group} absent from "
             f"--api-versions, so the check did not refuse"
