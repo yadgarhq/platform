@@ -70,11 +70,26 @@ it down. A gate that renders a set, finds no violation among zero members and
 reports a pass has proved nothing — which is why every zero here is an EQUALITY
 with a red case of its own.
 
-THE HOOK COUNT IS THIS STEP'S, NOT THE FINISHED LAYER'S. Two hook Jobs render
-today, both `pre-install`, across two hook-weight positions: the shared RBAC triple
-below, and the two Jobs sharing one weight above them. The preflight Job and the
-post-install Envoy Gateway probe arrive in later pull requests and move both
-numbers; they are not here, so neither are their counts.
+THE HOOK COUNT IS THIS STEP'S, NOT THE FINISHED LAYER'S, AND IT HAS ALREADY MOVED
+ONCE. Three hook Jobs render today, all `pre-install`, across three hook-weight
+positions: the two RBAC triples sharing the lowest, the preflight Job alone above
+them, and the two bootstrap Jobs sharing the highest. The post-install Envoy
+Gateway probe arrives in a later pull request and moves both numbers again — AND IT
+WILL REDDEN THIS GATE ON ITS PHASE BEFORE IT MOVES ANY NUMBER, because
+`hook_failures` accepts `pre-install,pre-upgrade` and nothing else. That is not an
+oversight to route around: the phase set is a claim about what this chart renders,
+and widening it is the change that step makes deliberately rather than discovers.
+
+WHICH GATES HERE ARE SCOPED TO THE BOOTSTRAP AND WHICH ARE CHART-WIDE, because the
+chart now renders a second hook Job with a triple of its own and the distinction
+decides what each gate proves. `bootstrap_render` narrows to the three templates
+this suite is about, by the `# Source:` marker helm emits — the script, image,
+minted-set and RBAC-wiring gates all read that, because "the ServiceAccount" means
+nothing over a render carrying two. Three claims stay over the WHOLE render and
+must not be narrowed: that no Secret is templated ANYWHERE in this chart (property
+2), that the render carries no cluster-scoped RBAC at all, and the hook set with
+its weight positions. `hook_failures` is the chart-wide one, and the preflight's own
+gates live in `test_preflight.py`.
 
 EVERY RENDER HERE PASSES `--api-versions cert-manager.io/v1`, for the reason
 `test_ladder.py` states: this chart's own render check refuses a bare render of
@@ -135,10 +150,25 @@ EVERY_MINTED_SECRET = MACHINE_ONLY_SECRETS | {ADMIN_TOKEN_SECRET}
 # asserted rather than merely true.
 THE_DATA_BEARING_KEY = "iam-keys"
 
-# Two hook Jobs at this step, and one shared RBAC triple below them.
-EXPECTED_HOOK_JOBS = 2
-EXPECTED_RBAC_OBJECTS = 3
-EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS = 2
+# THE BOOTSTRAP'S OWN TWO JOBS, and the one triple they share. Every gate below
+# that reads a script, an image or the RBAC wiring is scoped to the three templates
+# that render them — `bootstrap_render` — so this number is the bootstrap's and
+# does not move when another template adds a Job.
+EXPECTED_BOOTSTRAP_JOBS = 2
+
+# THE WHOLE CHART'S HOOK SET, WHICH IS A DIFFERENT CLAIM AND A DIFFERENT NUMBER.
+# `hook_failures` below is the one gate here that is deliberately chart-wide: a Job
+# outside the hook set runs in the wrong phase whatever template rendered it, and a
+# weight position colliding across templates is exactly the kind of thing a scoped
+# gate would never see. THREE Jobs — `preflight`, `bootstrap-secrets` and
+# `admin-bootstrap-token` — across TWO triples and THREE weight positions: the
+# triples share the lowest, `preflight` runs alone above them because the whole
+# point of it is to refuse before anything else acts, and the two bootstrap Jobs
+# share the highest because they mint disjoint Secret names and nothing orders one
+# against the other.
+EXPECTED_HOOK_JOBS = 3
+EXPECTED_RBAC_OBJECTS = 6
+EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS = 3
 
 # ADR-0753's narrowing, as the exact list the Role must carry.
 THE_ONLY_VERB = ["create"]
@@ -212,6 +242,50 @@ def adopter_render_text(chart: Path = CHART, *arguments: str) -> str:
     return render_text(chart, "-f", str(ADOPTER_VALUES), *arguments)
 
 
+# The three templates this suite is about. Named rather than derived, so a fourth
+# template added to the bootstrap has to be listed here before these gates see it —
+# which is the moment somebody has to decide whether the counts above still hold.
+BOOTSTRAP_TEMPLATES = {
+    "platform/templates/admin-bootstrap-token.yaml",
+    "platform/templates/bootstrap-rbac.yaml",
+    "platform/templates/bootstrap-secrets.yaml",
+}
+
+SOURCE = re.compile(r"^# Source: (?P<source>\S+)$", re.MULTILINE)
+
+
+def documents_by_source(stdout: str) -> list[tuple[str, dict]]:
+    """Every rendered document paired with the template that produced it. PURE."""
+    found = []
+    for chunk in stdout.split("\n---\n"):
+        source = SOURCE.search(chunk)
+        for document in yaml.safe_load_all(chunk):
+            if isinstance(document, dict) and document.get("apiVersion"):
+                found.append((source.group("source") if source else "", document))
+    return found
+
+
+def bootstrap_render(chart: Path = CHART, *arguments: str) -> list[dict]:
+    """R2, narrowed to the objects the three bootstrap templates render.
+
+    SCOPED BY THE TEMPLATE THAT RENDERED IT, not by a name prefix and not by the
+    hook annotation. The chart now carries a SECOND hook Job with its own triple —
+    the preflight, whose Role is a different verb set on different kinds — so a
+    gate reading "the ServiceAccount" off the whole render would find two and
+    compare neither against anything.
+
+    THE SCOPING IS NARROWER THAN THE GATES IT FEEDS, DELIBERATELY, AND TWO CLAIMS
+    STAY CHART-WIDE BECAUSE NARROWING THEM WOULD NARROW WHAT THEY PROVE: that no
+    Secret is templated ANYWHERE in this chart (ADR-0750 property 2), and that the
+    render carries no cluster-scoped RBAC at all. Both read the whole render below.
+    """
+    return [
+        document
+        for source, document in documents_by_source(adopter_render_text(chart, *arguments))
+        if source in BOOTSTRAP_TEMPLATES
+    ]
+
+
 def of_kind(documents: list[dict], kind: str) -> list[dict]:
     return [document for document in documents if document.get("kind") == kind]
 
@@ -281,9 +355,9 @@ def idempotence_failures(documents: list[dict]) -> list[str]:
     """
     failures = []
     scripts = job_scripts(documents)
-    if len(scripts) != EXPECTED_HOOK_JOBS:
+    if len(scripts) != EXPECTED_BOOTSTRAP_JOBS:
         failures.append(
-            f"expected {EXPECTED_HOOK_JOBS} Jobs carrying a script, found "
+            f"expected {EXPECTED_BOOTSTRAP_JOBS} Jobs carrying a script, found "
             f"{len(scripts)}: {sorted(scripts)}"
         )
     for job, script in sorted(scripts.items()):
@@ -311,7 +385,7 @@ def idempotence_failures(documents: list[dict]) -> list[str]:
 
 def test_the_jobs_classify_409_as_success_and_anything_else_as_failure():
     """Property 1's render-time half, over both Jobs."""
-    failures = idempotence_failures(adopter_render())
+    failures = idempotence_failures(bootstrap_render())
     assert failures == [], "\n".join(failures)
 
 
@@ -333,7 +407,7 @@ def chart_with_409_treated_as_a_failure(destination: Path) -> Path:
 
 def test_deleting_the_409_arm_reddens_the_idempotence_gate(tmp_path):
     failures = idempotence_failures(
-        adopter_render(chart_with_409_treated_as_a_failure(tmp_path))
+        bootstrap_render(chart_with_409_treated_as_a_failure(tmp_path))
     )
     message = "\n".join(failures)
     assert failures, "409 stopped being success and the idempotence gate passed"
@@ -454,7 +528,7 @@ def generation_failures(documents: list[dict]) -> list[str]:
 
 def test_an_empty_credential_stops_the_job_instead_of_being_posted():
     """The generator's failure reaches the exit status, on both Jobs."""
-    failures = generation_failures(adopter_render())
+    failures = generation_failures(bootstrap_render())
     assert failures == [], "\n".join(failures)
 
 
@@ -481,7 +555,7 @@ def chart_that_generates_inside_the_request_body(destination: Path) -> Path:
 
 def test_generating_inside_the_request_body_reddens_the_generation_gate(tmp_path):
     failures = generation_failures(
-        adopter_render(chart_that_generates_inside_the_request_body(tmp_path))
+        bootstrap_render(chart_that_generates_inside_the_request_body(tmp_path))
     )
     message = "\n".join(failures)
     assert failures, (
@@ -504,7 +578,7 @@ DIGEST_PINNED = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 # One container per Job, so one image per Job. Counted rather than iterated,
 # because two Jobs rendering no container at all would otherwise find no violation
 # among zero images and report a pass.
-EXPECTED_BOOTSTRAP_IMAGES = EXPECTED_HOOK_JOBS
+EXPECTED_BOOTSTRAP_IMAGES = EXPECTED_BOOTSTRAP_JOBS
 
 
 def image_failures(documents: list[dict]) -> list[str]:
@@ -517,9 +591,9 @@ def image_failures(documents: list[dict]) -> list[str]:
     """
     failures = []
     jobs = of_kind(documents, "Job")
-    if len(jobs) != EXPECTED_HOOK_JOBS:
+    if len(jobs) != EXPECTED_BOOTSTRAP_JOBS:
         failures.append(
-            f"expected {EXPECTED_HOOK_JOBS} Jobs to check an image on, found "
+            f"expected {EXPECTED_BOOTSTRAP_JOBS} Jobs to check an image on, found "
             f"{len(jobs)}: {sorted(name_of(job) for job in jobs)}"
         )
     images = 0
@@ -548,7 +622,7 @@ def image_failures(documents: list[dict]) -> list[str]:
 
 
 def test_both_bootstrap_jobs_are_pinned_by_digest():
-    failures = image_failures(adopter_render())
+    failures = image_failures(bootstrap_render())
     assert failures == [], "\n".join(failures)
 
 
@@ -566,7 +640,7 @@ def chart_pinned_by_tag(destination: Path) -> Path:
 
 
 def test_pinning_the_image_by_tag_reddens_the_digest_gate(tmp_path):
-    failures = image_failures(adopter_render(chart_pinned_by_tag(tmp_path)))
+    failures = image_failures(bootstrap_render(chart_pinned_by_tag(tmp_path)))
     message = "\n".join(failures)
     assert failures, "the image went back to a moving tag and the digest gate passed"
     assert "image 'curlimages/curl:8.16.0' is not pinned by digest" in message, message
@@ -694,8 +768,16 @@ def test_dropping_an_export_command_reddens_the_runbook_gate():
 # ── PROPERTY 4 — THE ROLE GRANTS `create` AND NOTHING ELSE ───────────────────
 
 
-def rbac_failures(documents: list[dict]) -> list[str]:
+def rbac_failures(documents: list[dict], whole: list[dict]) -> list[str]:
     """Every way the rendered RBAC widens past ADR-0753's narrowing. PURE.
+
+    TWO ARGUMENTS, AND THE SPLIT IS THE POINT. `documents` is the BOOTSTRAP's own
+    objects — the chart now renders a second hook Job with its own triple, and a
+    gate reading "the ServiceAccount" off the whole render would find two and
+    compare neither against anything. `whole` is the entire render, because the
+    cluster-scoped zero below is a claim about the CHART and not about these three
+    templates: a ClusterRole rendered by any other template must still redden
+    something here.
 
     BY LENGTH AS WELL AS BY CONTENT, which the plan states as the register row's
     own terms: a verb ADDED later has to turn this red, and an equality on a sorted
@@ -725,7 +807,7 @@ def rbac_failures(documents: list[dict]) -> list[str]:
     """
     failures = []
 
-    cluster_scoped = of_kind(documents, "ClusterRole") + of_kind(documents, "ClusterRoleBinding")
+    cluster_scoped = of_kind(whole, "ClusterRole") + of_kind(whole, "ClusterRoleBinding")
     if cluster_scoped:
         failures.append(
             f"expected 0 cluster-scoped RBAC objects, found {len(cluster_scoped)}: "
@@ -814,9 +896,9 @@ def rbac_failures(documents: list[dict]) -> list[str]:
             )
 
     jobs = of_kind(documents, "Job")
-    if len(jobs) != EXPECTED_HOOK_JOBS:
+    if len(jobs) != EXPECTED_BOOTSTRAP_JOBS:
         failures.append(
-            f"expected {EXPECTED_HOOK_JOBS} Jobs to check `serviceAccountName` on, "
+            f"expected {EXPECTED_BOOTSTRAP_JOBS} Jobs to check `serviceAccountName` on, "
             f"found {len(jobs)}: {sorted(name_of(job) for job in jobs)}"
         )
     for job in jobs:
@@ -868,7 +950,7 @@ def rbac_failures(documents: list[dict]) -> list[str]:
 
 def test_the_role_grants_create_and_nothing_else():
     """Property 4 as ADR-0753 narrowed it, over the RENDERED Role."""
-    failures = rbac_failures(adopter_render())
+    failures = rbac_failures(bootstrap_render(), adopter_render())
     assert failures == [], "\n".join(failures)
 
 
@@ -886,7 +968,8 @@ def chart_with_a_second_verb(destination: Path) -> Path:
 
 
 def test_a_second_verb_reddens_the_rbac_gate(tmp_path):
-    failures = rbac_failures(adopter_render(chart_with_a_second_verb(tmp_path)))
+    copy = chart_with_a_second_verb(tmp_path)
+    failures = rbac_failures(bootstrap_render(copy), adopter_render(copy))
     message = "\n".join(failures)
     assert failures, "the Role gained a second verb and the RBAC gate passed"
     assert "expected 1 verb on the Role, exactly ['create'], found 2" in message, message
@@ -929,12 +1012,14 @@ def test_binding_to_cluster_admin_reddens_the_rbac_gate(tmp_path):
     Asserted on BOTH halves — the kind and the name — and on the cluster-scoped
     count staying zero, because the zero staying zero is the whole finding.
     """
-    documents = adopter_render(chart_bound_to_cluster_admin(tmp_path))
-    assert of_kind(documents, "ClusterRole") == [], (
+    copy = chart_bound_to_cluster_admin(tmp_path)
+    documents = bootstrap_render(copy)
+    whole = adopter_render(copy)
+    assert of_kind(whole, "ClusterRole") == [], (
         "binding to cluster-admin rendered a ClusterRole object, so this red case "
         "is no longer the one that slipped past a count of cluster-scoped objects"
     )
-    failures = rbac_failures(documents)
+    failures = rbac_failures(documents, whole)
     message = "\n".join(failures)
     assert failures, "the bootstrap identity became cluster-admin and the RBAC gate passed"
     assert "'kind': 'ClusterRole'" in message, message
@@ -967,7 +1052,7 @@ def minted_set_failures(documents: list[dict]) -> list[str]:
 
 
 def test_the_jobs_mint_exactly_the_three_secrets_and_the_token():
-    failures = minted_set_failures(adopter_render())
+    failures = minted_set_failures(bootstrap_render())
     assert failures == [], "\n".join(failures)
 
 
@@ -993,7 +1078,7 @@ def chart_with_a_fourth_create(destination: Path) -> Path:
 
 
 def test_a_fourth_create_reddens_the_minted_set(tmp_path):
-    failures = minted_set_failures(adopter_render(chart_with_a_fourth_create(tmp_path)))
+    failures = minted_set_failures(bootstrap_render(chart_with_a_fourth_create(tmp_path)))
     message = "\n".join(failures)
     assert failures, "a fourth Secret was minted and the gate passed"
     assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
@@ -1161,7 +1246,7 @@ def test_a_job_that_is_not_a_hook_reddens_the_hook_count(tmp_path):
     failures = hook_failures(adopter_render(chart_with_a_job_that_is_not_a_hook(tmp_path)))
     message = "\n".join(failures)
     assert failures, "a Job left the hook set and the hook gate passed"
-    assert "expected 2 hook Jobs, found 1" in message, message
+    assert "expected 3 hook Jobs, found 2" in message, message
 
 
 # ── R1 — THE DEFAULTS RENDER NOTHING, AND THAT IS AN EQUALITY ────────────────
@@ -1217,7 +1302,7 @@ def test_the_admin_token_secret_name_follows_its_value(tmp_path):
     """
     overridden = tmp_path / "renamed.yaml"
     overridden.write_text("bootstrap:\n  adminToken:\n    secretName: a-different-name\n")
-    scripts = job_scripts(adopter_render(CHART, "-f", str(overridden)))
+    scripts = job_scripts(bootstrap_render(CHART, "-f", str(overridden)))
     minted = minted_by(scripts[ADMIN_TOKEN_SECRET])
     assert minted == ["a-different-name"], (
         f"expected the admin-token Job to mint ['a-different-name'] once "

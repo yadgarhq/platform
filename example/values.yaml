@@ -65,3 +65,24 @@ bootstrap:
     # adopter decides rather than a thing that happens to them (ADR-0569's "a
     # value someone can see").
     secretName: admin-bootstrap-token
+
+# ── THE PREFLIGHT: NOTHING TO SET, AND THAT IS THE DECISION ──────────────────
+# NO `preflight` BLOCK APPEARS BELOW, AND ITS ABSENCE IS DELIBERATE RATHER THAN AN
+# OMISSION. Every `preflight.probes.*` key is left UNSET so the tie in
+# `chart/templates/_preflight.tpl` resolves it: `probes.certManager` follows the
+# three `create` toggles above, all true here, so this file renders exactly ONE
+# probe. Writing the key out would replace a tie that tracks the toggles with a
+# constant that does not.
+#
+# `probes.keda` AND `probes.mariadb` RESOLVE FALSE HERE, AND THAT IS CORRECT. This
+# chart renders no ScaledObject and no MariaDB CR, so a probe for either would test
+# an operator nothing in this install needs. They are enabled ONE LEVEL UP, in the
+# parent chart's own adopter values, where `autoscaling.enabled` and
+# `database.create` are visible — a subchart cannot read a sibling's key, so an
+# explicit `true` there is the only place the truth can come from.
+#
+# TO DROP THE DIAGNOSTIC ENTIRELY, set `preflight.enabled: false`. An explicit
+# `preflight.probes.certManager: false` also works and is honoured. What is REFUSED
+# is `probes.certManager: true` beside three false `create` toggles — a probe for an
+# operator this install renders nothing for proves nothing and can only fail for the
+# wrong reason, and the refusal names both keys.

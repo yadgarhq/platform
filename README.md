@@ -87,6 +87,10 @@ kubectl -n yadgar get secret yadgar-internal-ca -o yaml
 
 **What `helm uninstall` leaves behind, deliberately.** The ServiceAccount, the Role, the RoleBinding and the two completed Jobs carry `hook-delete-policy: before-hook-creation` and nothing else, so all five remain after the release is gone. The design asks for exactly that, and `hook-succeeded` is not an available alternative: it would delete the ServiceAccount before the Jobs it serves are finished with it. The residual grant is real and it is bounded. Anyone who can create a pod in that namespace can mount that ServiceAccount and `create` Secrets there — and nothing else, because the Role holds no `get`, no `list`, no `update` and no `delete`, and it is namespaced. Delete the triple by hand if the namespace outlives the release.
 
+**And the preflight leaves a SECOND triple, with a different grant.** The preflight Job runs as its own ServiceAccount under its own Role, and that triple is residual for the same reason and by the same mechanism. Its grant is `create`, `get` and `delete` — never `list` — on the probe kinds alone, and only on the kinds the probes this install enables actually touch. It is namespaced like the bootstrap's. Delete it by hand alongside the other one.
+
+**The preflight refuses the install rather than decorating it.** It runs before every other hook, creates one object per enabled operator, waits for that operator's controller to act on it, deletes it and reports how many operators it probed — asserting that number against how many its values enabled. A cluster whose CRDs are registered but whose controller is absent is the case it exists to name, and the install stops there instead of hanging later on objects that never go Ready. It probes only what the install actually renders: every probe's default follows the toggle that renders what it probes, so a bare `helm install` of this chart with no values runs no probe and renders no Job at all. Set `preflight.enabled: false` to drop it.
+
 The administrative bootstrap token is the one of the four a person actually reads. Hand it to the first administrator with:
 
 ```sh

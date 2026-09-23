@@ -1,0 +1,484 @@
+{{/*
+THE PREFLIGHT: ONE ACTION PER OPERATOR, AND IT PROVES A CONTROLLER IS RUNNING.
+
+WHAT THE RENDER CHECK CANNOT ANSWER. `.Capabilities.APIVersions.Has` answers "is
+this API registered on the target". It NEVER answers "is a controller running". A
+cluster carrying cert-manager's CRDs with no cert-manager pod renders, installs,
+and then hangs forever on Certificates that never go Ready — pods in
+`ContainerCreating`, Argo `Progressing`, and nothing anywhere saying why. This Job
+is the other half: it probes each operator by an ACTION ONLY THAT OPERATOR'S
+CONTROLLER PERFORMS, waits a bounded time, cleans up, and ASSERTS the number of
+operators it probed against the number of probes the values enable.
+
+IT ASSERTS THE COUNT RATHER THAN PRINTING IT, and the difference is the whole rule.
+A Job that prints `probed 2 operators` where three were enabled has reported a pass
+having examined less than it was asked to. So the rendered list and the denominator
+are TWO SEPARATE DERIVATIONS — the list from the blocks this template renders, the
+denominator from the `probes.*` keys the values resolve — and the script compares
+them AT THE TOP LEVEL before it probes anything, and again after.
+
+AND THE COMPARISON IS AT THE TOP LEVEL FOR A MEASURED REASON. Inside a function
+called through `$( )` the exit status is DISCARDED — command substitution never
+lets it become the caller's — so `set -e` cannot see it; and a pipeline masks it a
+second time, reporting only its LAST element's status. `bootstrap-secrets.yaml`
+carries the same note over the same trap. Every value that reaches a request body
+is likewise assigned to a variable and checked BEFORE the body is built.
+
+WHEN EVERY PROBE RESOLVES FALSE, NO JOB RENDERS AT ALL — not an enabled preflight
+that probes nothing. `preflight.enabled` keeps its default of TRUE, the one
+exception to this chart's default-false convention: it renders built-in kinds only,
+so it costs the portability gate nothing, and a diagnostic that is off by default
+is the silent hang it exists to prevent. What the tie in `_preflight.tpl` changes
+is not that exception but its blast radius — the preflight is still on by default,
+and it now probes only what the install actually renders.
+
+A HOOK, SO A FAILURE STOPS THE INSTALL. Rendered as a plain resource a failing Job
+DECORATES the install: `helm install` returns success, the estate is half-up, and
+the failure is a red Job somebody may or may not read. As a `pre-install,
+pre-upgrade` hook Helm waits for it and ABORTS, which is the whole point of a
+preflight. Under Argo the same annotation becomes a `PreSync` hook and a failed
+hook fails the sync — a claim about a specific Argo version which the plan this
+chart is built from records as UNPROVED and schedules; nothing here may report it
+as proved. `helm.sh/hook-delete-policy: before-hook-creation` handles the Job's
+immutability on upgrade.
+
+IT RUNS BEFORE THE BOOTSTRAP JOBS, at the lower Job weight, because the whole point
+of it is to refuse before anything else acts. Minting four credentials into a
+namespace whose operators are absent is work that has to be undone.
+
+WHAT IS NOT PROBED. Argo CD, because on the Argo path it is the thing running the
+sync and on the helm path it is absent by design. Envoy Gateway, because a
+PRE-INSTALL probe of it cannot go red: `Accepted=True` on a GatewayClass is a
+condition already persisted in etcd and stays there with the controller at zero
+replicas, and on a fresh install the GatewayClass does not exist yet anyway. That
+probe is post-install and arrives with the Gateway listener it probes.
+*/}}
+{{- $preflight := .Values.preflight }}
+{{- $probes := without (splitList " " (include "platform.preflight.probes" (dict "context" $))) "" }}
+{{- if and $preflight.enabled $probes }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: preflight
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-7"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  # ZERO RETRIES, and that is the opposite of the bootstrap Jobs' four. A retry is
+  # worth taking when the failure is transient; here the failure is "the operator
+  # is not running", which does not become "it is running" on the second attempt.
+  # More attempts would only multiply the bound before the install is allowed to
+  # fail.
+  backoffLimit: {{ $preflight.backoffLimit }}
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: preflight }
+    spec:
+      serviceAccountName: {{ $preflight.serviceAccountName }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 100
+        seccompProfile: { type: RuntimeDefault }
+      # `readOnlyRootFilesystem` below leaves nowhere to put a response body, and
+      # the bodies are read line by line rather than held in a variable — a
+      # condition list is one long line until it is split. An emptyDir is the
+      # smallest thing that gives the container a writable path without widening
+      # the root filesystem.
+      volumes:
+        - name: scratch
+          emptyDir: {}
+      containers:
+        - name: preflight
+          image: {{ $preflight.image }}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+          command: ["sh", "-c"]
+          args:
+            # `$(...)` BELOW IS THE SHELL'S, NOT KUBERNETES'. Kubernetes expands
+            # `$(VAR)` inside `command` and `args`, but only where VAR names an
+            # environment variable of this container, and an unresolvable
+            # reference is documented to be left unchanged. This container
+            # declares no environment at all, so every substitution here reaches
+            # /bin/sh untouched.
+            - |
+              set -eu
+
+              api="https://kubernetes.default.svc"
+              sa="/var/run/secrets/kubernetes.io/serviceaccount"
+              ns="$(cat "$sa/namespace")"
+              token="$(cat "$sa/token")"
+              body=/tmp/answer
+
+              # ── THE LIST, AND THE DENOMINATOR IT IS ASSERTED AGAINST ──────
+              # TWO SEPARATE DERIVATIONS. `PROBES` is built from the blocks this
+              # template renders; `EXPECTED_PROBES` is the count of `probes.*`
+              # keys the values resolve. A probe added to the template that no key
+              # enables moves the first and not the second, which is the one
+              # mutation an object census would never see.
+              PROBES="{{ join " " $probes }}"
+              EXPECTED_PROBES={{ len $probes }}
+
+              TIMEOUT_SECONDS={{ $preflight.timeoutSeconds }}
+              POLL_SECONDS={{ $preflight.pollSeconds }}
+              PROBE_NAME={{ $preflight.probeName }}
+
+              # THE PATHS THE CLEANUP WALKS. Appended as each object is created,
+              # so a probe that dies half-way still leaves its cleanup a complete
+              # list of what it made.
+              CREATED=""
+
+              # ── THE API, AND THE ONE PLACE A REQUEST IS MADE ──────────────
+              # The status lands in `STATUS` and the answer in `$body`. NOTHING
+              # HERE EXITS: a caller decides what a status means, because a 404 is
+              # a failure to a probe and a success to the cleanup.
+              STATUS=""
+              request() {
+                method="$1"
+                path="$2"
+                payload="$3"
+                if [ -n "$payload" ]; then
+                  STATUS="$(printf '%s' "$payload" | curl --silent --show-error \
+                    --cacert "$sa/ca.crt" \
+                    --header "Authorization: Bearer $token" \
+                    --header "Content-Type: application/json" \
+                    --request "$method" --data-binary @- \
+                    --output "$body" --write-out '%{http_code}' \
+                    "$api$path")"
+                else
+                  STATUS="$(curl --silent --show-error \
+                    --cacert "$sa/ca.crt" \
+                    --header "Authorization: Bearer $token" \
+                    --request "$method" \
+                    --output "$body" --write-out '%{http_code}' \
+                    "$api$path")"
+                fi
+              }
+
+              # ── CLEANUP ON EVERY EXIT PATH, SUCCESS AND FAILURE ALIKE ─────
+              # `helm.sh/hook-delete-policy: before-hook-creation` deletes the JOB
+              # before the next run; IT NEVER TOUCHES OBJECTS THAT JOB CREATED. A
+              # probe that times out and exits 1 would otherwise leave its objects
+              # standing, and a Certificate left behind is a renewal somebody
+              # inherits. So the trap runs on EXIT, and it runs before the failure
+              # is reported.
+              cleanup() {
+                for path in $CREATED; do
+                  request DELETE "$path" "" || true
+                done
+              }
+              trap cleanup EXIT
+
+              # DELETE ANY OBJECT OF THIS NAME AND WAIT FOR IT TO BE GONE BEFORE
+              # CREATING OURS. The names are FIXED, so a Job killed between create
+              # and cleanup — a node eviction, an `OOMKilled` — leaks at most one
+              # object of each name, and this is what makes the next run remove it
+              # rather than collide with it.
+              remove() {
+                waited=0
+                request DELETE "$1" "" || true
+                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
+                  request GET "$1" ""
+                  if [ "$STATUS" = "404" ]; then
+                    return 0
+                  fi
+                  sleep "$POLL_SECONDS"
+                  waited=$((waited + POLL_SECONDS))
+                done
+                echo "preflight: $1 was still present ${waited}s after a delete" >&2
+                return 1
+              }
+
+              create() {
+                remove "$1"
+                request POST "$2" "$3"
+                if [ "$STATUS" != "201" ]; then
+                  echo "preflight: creating $1 answered HTTP $STATUS" >&2
+                  cat "$body" >&2
+                  return 1
+                fi
+                CREATED="$CREATED $1"
+              }
+
+              # WHETHER A CONDITION OF TYPE $2 CARRIES A STATUS MATCHING $3. The
+              # answer is one long line, so it is split on the boundary BETWEEN
+              # condition objects first — `grep` is a line matcher and an unsplit
+              # body would match a type from one condition against a status from
+              # another.
+              condition_matches() {
+                sed 's/},{/}\n{/g' "$body" \
+                  | grep '"type":"'"$1"'"' \
+                  | grep -Eq '"status":"('"$2"')"'
+              }
+
+              # WAIT FOR $1 TO CARRY CONDITION $2 MATCHING $3, OR FAIL AT THE
+              # BOUND NAMING THE OPERATOR. The bound is what makes this a probe
+              # rather than a hang: an operator that is absent produces an object
+              # that simply never gains a condition, which is indistinguishable
+              # from a slow one until the clock says otherwise.
+              await() {
+                path="$1"
+                kind="$2"
+                wanted="$3"
+                operator="$4"
+                waited=0
+                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
+                  request GET "$path" ""
+                  if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted"; then
+                    return 0
+                  fi
+                  sleep "$POLL_SECONDS"
+                  waited=$((waited + POLL_SECONDS))
+                done
+                echo "preflight: $operator did not set $kind on $path within ${waited}s." >&2
+                echo "preflight: its API is registered or this probe could not have created the object, so $operator's CONTROLLER is not running." >&2
+                return 1
+              }
+{{- if has "cert-manager" $probes }}
+
+              # ── cert-manager ──────────────────────────────────────────────
+              # A SELF-SIGNED PROBE ISSUER AND A CERTIFICATE IT SIGNS. Self-signed
+              # deliberately: it depends on no authority this install may not have
+              # created yet, so a red here is the ISSUING CONTROLLER and never a
+              # missing CA. `Ready=True` on the Certificate is written by
+              # cert-manager and by nothing else.
+              probe_cert_manager() {
+                issuers="/apis/{{ $preflight.certManager.apiVersion }}/namespaces/$ns/issuers"
+                certificates="/apis/{{ $preflight.certManager.apiVersion }}/namespaces/$ns/certificates"
+
+                issuer_body=$(cat <<JSON
+              {"apiVersion":"{{ $preflight.certManager.apiVersion }}","kind":"Issuer",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{"selfSigned":{}}}
+              JSON
+              )
+                create "$issuers/$PROBE_NAME" "$issuers" "$issuer_body"
+
+                certificate_body=$(cat <<JSON
+              {"apiVersion":"{{ $preflight.certManager.apiVersion }}","kind":"Certificate",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{"secretName":"$PROBE_NAME","commonName":"$PROBE_NAME",
+                       "duration":"1h","privateKey":{"algorithm":"ECDSA","size":256},
+                       "issuerRef":{"name":"$PROBE_NAME","kind":"Issuer"}}}
+              JSON
+              )
+                create "$certificates/$PROBE_NAME" "$certificates" "$certificate_body"
+
+                await "$certificates/$PROBE_NAME" Ready True cert-manager
+              }
+{{- end }}
+{{- if has "keda" $probes }}
+
+              # ── KEDA ──────────────────────────────────────────────────────
+              # A ScaledObject AGAINST A ZERO-REPLICA Deployment. The Deployment is
+              # part of the probe rather than scenery: KEDA reconciles a
+              # ScaledObject whose target is missing into an error, so the probe
+              # would then be reading KEDA's complaint instead of its success. Zero
+              # replicas because no pod needs to run for the operator to reconcile.
+              #
+              # THE CONDITION IS READ AS SET, NOT AS TRUE. `Ready=False` is still
+              # KEDA having reconciled the object; the question this probe asks is
+              # whether the operator touched it at all. `Unknown` is the untouched
+              # state and does not match.
+              probe_keda() {
+                # NO POD IS EVER SCHEDULED, so this image is never pulled: the
+                # Deployment is created at ZERO replicas and deleted before it is
+                # scaled. It names the preflight's own pinned image rather than a
+                # placeholder so that a Deployment somebody later sets to one
+                # replica by hand pulls something that exists, instead of sitting
+                # in `ImagePullBackOff` under a name nobody recognises.
+                PAUSE_IMAGE={{ $preflight.image | squote }}
+                deployments="/apis/apps/v1/namespaces/$ns/deployments"
+                scaledobjects="/apis/{{ $preflight.keda.apiVersion }}/namespaces/$ns/scaledobjects"
+
+                deployment_body=$(cat <<JSON
+              {"apiVersion":"apps/v1","kind":"Deployment",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{"replicas":0,
+                       "selector":{"matchLabels":{"app.kubernetes.io/name":"$PROBE_NAME"}},
+                       "template":{"metadata":{"labels":{"app.kubernetes.io/name":"$PROBE_NAME"}},
+                                   "spec":{"containers":[{"name":"pause","image":"$PAUSE_IMAGE"}]}}}}
+              JSON
+              )
+                create "$deployments/$PROBE_NAME" "$deployments" "$deployment_body"
+
+                scaledobject_body=$(cat <<JSON
+              {"apiVersion":"{{ $preflight.keda.apiVersion }}","kind":"ScaledObject",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{"scaleTargetRef":{"name":"$PROBE_NAME"},
+                       "minReplicaCount":0,"maxReplicaCount":1,
+                       "triggers":[{"type":"cron",
+                                    "metadata":{"timezone":"UTC","start":"0 6 * * *",
+                                                "end":"0 7 * * *","desiredReplicas":"1"}}]}}
+              JSON
+              )
+                create "$scaledobjects/$PROBE_NAME" "$scaledobjects" "$scaledobject_body"
+
+                await "$scaledobjects/$PROBE_NAME" Ready "True|False" KEDA
+              }
+{{- end }}
+{{- if has "mariadb-operator" $probes }}
+
+              # ── mariadb-operator ──────────────────────────────────────────
+              # A SERVER-SIDE DRY RUN OF AN INVALID MariaDB, AND THE PROBE
+              # REQUIRES THE MESSAGE RATHER THAN THE REJECTION. This is the
+              # weakest of the three — a webhook answering is not a reconciler
+              # reconciling — and it is chosen because a probe MariaDB instance is
+              # a StatefulSet with a volume, far too heavy for a preflight.
+              #
+              # A REJECTION ALONE CANNOT DISCRIMINATE. With the operator at zero
+              # replicas and `failurePolicy: Fail`, the API SERVER also rejects the
+              # request, because it cannot reach the webhook. Both the healthy and
+              # the dead cluster answer with a non-2xx, so a probe requiring "a
+              # rejection" reads green on BOTH. So the probe reads three strings,
+              # every one of them a value recorded beside this probe:
+              #
+              #   $MARIADB_UNREACHABLE  the API server saying it could not reach
+              #                         the webhook. A FAILURE BY NAME, checked
+              #                         FIRST so the message names the operator
+              #                         rather than a string comparison.
+              #   $MARIADB_DENIED_BY    the webhook's own refusal. This is what
+              #                         proves the operator's admission path is
+              #                         LIVE — and it is `denied the request` that
+              #                         carries it, not the webhook's name, because
+              #                         the unreachable message names the webhook
+              #                         too.
+              #   $MARIADB_VALIDATION   the operator's OWN validation text. A
+              #                         second refusal exists at this version and
+              #                         comes from CRD SCHEMA validation, which the
+              #                         API server performs with no operator at
+              #                         all — keying on that one would pass on
+              #                         exactly the cluster this probe is for.
+              #
+              # THE ORDER OF THE THREE READINGS IS LOAD-BEARING, NOT COSMETIC, and
+              # nothing about a block's position falls out of reading the block. So
+              # it is ASSERTED, by
+              # `test_the_mariadb_arms_read_the_unreachable_webhook_first`. Against
+              # an unreachable-webhook body the order below names the operator; with
+              # $MARIADB_DENIED_BY moved above it the SAME body answers "the
+              # rejection did not come from mariadb-operator's admission webhook",
+              # which is a string comparison standing where "mariadb-operator is not
+              # running" belongs. The reviewer made that swap and the suite stayed
+              # green at 65, which is why the assertion now exists.
+              #
+              # AND EVERY ONE OF THE THREE HAS TO BE A STRING THAT CAN MATCH A RAW
+              # BODY. `metav1.Status.Message` is a JSON string, so a `"` in the
+              # message is `\"` on the wire and `grep -F` for a literal `"` matches
+              # nothing at all. `values.yaml` records why the webhook's NAME is
+              # therefore not part of $MARIADB_DENIED_BY, and
+              # `test_every_mariadb_string_can_match_an_api_server_body` checks all
+              # three against a body built the way the API server builds one.
+              MARIADB_UNREACHABLE={{ $preflight.mariadb.unreachableWebhook | squote }}
+              MARIADB_DENIED_BY={{ $preflight.mariadb.deniedBy | squote }}
+              MARIADB_VALIDATION={{ $preflight.mariadb.validationMessage | squote }}
+
+              probe_mariadb() {
+                # `dryRun=All` — the object is validated by every admission plugin
+                # and then DISCARDED. Nothing is persisted, so there is nothing to
+                # clean up and no StatefulSet is ever provisioned.
+                mariadbs="/apis/{{ $preflight.mariadb.apiVersion }}/namespaces/$ns/mariadbs?dryRun=All"
+
+                mariadb_body=$(cat <<JSON
+              {"apiVersion":"{{ $preflight.mariadb.apiVersion }}","kind":"MariaDB",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{"storage":{}}}
+              JSON
+              )
+                request POST "$mariadbs" "$mariadb_body"
+
+                if [ "$STATUS" = "201" ]; then
+                  echo "preflight: mariadb-operator ADMITTED a MariaDB with no storage." >&2
+                  echo "preflight: this probe depends on that object being invalid, so the probe itself is wrong at this operator version rather than the cluster being healthy." >&2
+                  return 1
+                fi
+
+                # THE MATCH IS ON THE API SERVER'S WORDING AND NOT ON THE WEBHOOK'S
+                # NAME, so a DIFFERENT failing webhook that intercepts mariadbs — a
+                # Kyverno or an OPA policy at `failurePolicy: Fail` — lands here
+                # too. Requiring the name would narrow it, and the name is recorded
+                # in prose rather than captured off an unreachable-webhook body:
+                # a wrong or renamed one would stop this arm firing and send a dead
+                # operator into the reading below, which is the exact misreport this
+                # order exists to prevent. So the message states the likely cause
+                # and PRINTS THE BODY, which names the webhook the API server could
+                # not reach.
+                if grep -qF "$MARIADB_UNREACHABLE" "$body"; then
+                  echo "preflight: the API server could not reach the admission webhook that intercepted this MariaDB." >&2
+                  echo "preflight: mariadb-operator configures a webhook on this kind, so its CONTROLLER is not running; the body below names the webhook that was unreachable." >&2
+                  cat "$body" >&2
+                  return 1
+                fi
+
+                if ! grep -qF "$MARIADB_DENIED_BY" "$body"; then
+                  echo "preflight: the rejection did not come from mariadb-operator's admission webhook." >&2
+                  echo "preflight: expected a message containing: $MARIADB_DENIED_BY" >&2
+                  cat "$body" >&2
+                  return 1
+                fi
+
+                if ! grep -qF "$MARIADB_VALIDATION" "$body"; then
+                  echo "preflight: the webhook answered, but not with mariadb-operator's own validation message." >&2
+                  echo "preflight: expected a message containing: $MARIADB_VALIDATION" >&2
+                  echo "preflight: a refusal from CRD schema validation would read like this, and the API server performs that with no operator running." >&2
+                  cat "$body" >&2
+                  return 1
+                fi
+              }
+{{- end }}
+
+              # ── THE DENOMINATOR, CHECKED BEFORE ANYTHING IS PROBED ────────
+              # AT THE TOP LEVEL, and that is not a style choice. Inside a function
+              # reached through `$( )` the status is discarded and `set -e` never
+              # sees it; inside a pipeline only the last element's status is
+              # reported. Both are ways this check could exist and never fire.
+              declared=0
+              for probe in $PROBES; do
+                declared=$((declared + 1))
+              done
+
+              [ "$declared" -eq "$EXPECTED_PROBES" ] || {
+                echo "preflight: the render declares $declared probes ($PROBES) against a denominator of $EXPECTED_PROBES." >&2
+                echo "preflight: a probe runs that no preflight.probes.* key asked for, or a key asks for a probe this Job does not carry." >&2
+                exit 1
+              }
+
+              probed=0
+              for probe in $PROBES; do
+                case "$probe" in
+{{- if has "cert-manager" $probes }}
+                  cert-manager) probe_cert_manager ;;
+{{- end }}
+{{- if has "keda" $probes }}
+                  keda) probe_keda ;;
+{{- end }}
+{{- if has "mariadb-operator" $probes }}
+                  mariadb-operator) probe_mariadb ;;
+{{- end }}
+                  *)
+                    echo "preflight: $probe is in the probe list and this Job carries no probe for it." >&2
+                    exit 1
+                    ;;
+                esac
+                echo "preflight: $probe answered"
+                probed=$((probed + 1))
+              done
+
+              [ "$probed" -eq "$EXPECTED_PROBES" ] || {
+                echo "preflight: probed $probed operators against a denominator of $EXPECTED_PROBES." >&2
+                exit 1
+              }
+
+              echo "preflight: probed $probed operators"
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+{{- end }}

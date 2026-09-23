@@ -278,3 +278,185 @@ bootstrap:
     # export command is in `README.md` beside the install command and a gate
     # asserts it is there (ADR-0750 property 3).
     secretName: admin-bootstrap-token
+
+# ── THE PREFLIGHT, WHICH PROVES A CONTROLLER RUNS ────────────────────────────
+# THE RENDER CHECK AND THIS JOB ANSWER DIFFERENT QUESTIONS, and the estate needs
+# both. `.Capabilities.APIVersions.Has` answers "is this API registered on the
+# target"; it NEVER answers "is a controller running". A cluster carrying
+# cert-manager's CRDs with no cert-manager pod renders, installs, and then hangs
+# forever on Certificates that never go Ready, pods in `ContainerCreating` and
+# nothing saying why. This Job probes each operator by an ACTION only that
+# operator's controller performs, waits a bounded time, cleans up, and ASSERTS the
+# number of operators it probed against the number of probes these values enable.
+#
+# `enabled` IS TRUE, AND IT IS THE ONE EXCEPTION TO THIS FILE'S DEFAULT-FALSE
+# CONVENTION. It renders built-in kinds only — a Job, a ServiceAccount, a Role and
+# a RoleBinding — so it costs the portability gate nothing, and a diagnostic that
+# is off by default is the silent hang it exists to prevent.
+#
+# AND IT STILL RENDERS NOTHING AT THESE DEFAULTS. Every probe below is TIED to the
+# toggle that renders what it probes, every one of those toggles is false here, so
+# every probe resolves false — and when every probe resolves false NO JOB RENDERS
+# AT ALL. A Job reporting `probed 0 operators` is the "a check that cannot fail
+# because it examined nothing" form this chart refuses to ship.
+preflight:
+  enabled: true
+
+  # ITS OWN IDENTITY, NOT THE BOOTSTRAP TRIPLE'S. A different verb set on
+  # different kinds: `create`, `get` and `delete` on the probe objects, where the
+  # bootstrap Role carries `create` on secrets alone. One triple for both would be
+  # the union of two permissions, held by both Jobs.
+  serviceAccountName: preflight
+
+  # curl and a shell, pinned by digest, and NOT read from `bootstrap.image`. The
+  # two toggles are independent — this Job renders with `bootstrap.create` false —
+  # so a preflight reading the bootstrap's key would break the moment somebody
+  # moved it.
+  #
+  # FOUR UNDECLARED DEMANDS THIS SCRIPT MAKES OF WHATEVER THIS NAMES, written down
+  # because no render and no lint can check any of them:
+  #
+  #   - a POSIX shell at `sh`, which is the container's `command`;
+  #   - `curl`, which makes every request;
+  #   - `grep` and `sed`, which read the conditions off a response body. NOT
+  #     `base64` — this Job generates no credential and mints nothing;
+  #   - a nonroot user and group at UID/GID 100, named in `runAsUser` and
+  #     `runAsGroup` under `runAsNonRoot: true`.
+  #
+  # The tag is kept beside the digest because a bare digest reads as nothing at a
+  # glance. It is a COMMENT rather than the pin — changing it changes nothing.
+  # curlimages/curl:8.16.0
+  image: curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
+
+  # ZERO RETRIES, and that is the opposite of the bootstrap Jobs' four. A retry is
+  # worth taking when the failure is transient and the work is idempotent; here the
+  # failure is "the operator is not running", which does not become "it is running"
+  # on the second attempt. Four attempts would only multiply the bound below by
+  # four before the install is allowed to fail.
+  backoffLimit: 0
+
+  # HOW LONG EACH PROBE WAITS FOR ITS CONTROLLER, and how often it looks. A
+  # CEILING RATHER THAN A MEASUREMENT: no measurement of a cold controller's first
+  # reconcile on this estate exists, so this is chosen loose enough that a healthy
+  # cluster never meets it and short enough that a dead one does not hang an
+  # install.
+  timeoutSeconds: 120
+  pollSeconds: 3
+
+  # THE FIXED NAMES THE PROBES CREATE UNDER. Fixed rather than random so a Job
+  # killed between create and cleanup — a node eviction, an `OOMKilled` — leaks at
+  # most ONE object of each name, and the next run deletes it rather than
+  # colliding with it. The script deletes any object of these names and waits for
+  # it to be gone BEFORE creating its own.
+  probeName: preflight-probe
+
+  # ── WHICH OPERATORS ARE PROBED, AND WHY NO KEY IS SET HERE ─────────────────
+  # EVERY KEY UNDER `probes` IS DELIBERATELY UNSET, and the map is empty rather
+  # than absent so a reader meets the decision. A probe's default is TIED to the
+  # toggle that renders what it probes, and helm's `values.yaml` holds static YAML
+  # — a default cannot read another key — so the tie lives in
+  # `templates/_preflight.tpl` and an unset key is what lets it resolve.
+  #
+  #   probes.certManager  unset -> internalCA.create OR certificates.create OR
+  #                                edgeTLS.create
+  #   probes.keda         unset -> FALSE. This chart renders no ScaledObject, and
+  #                                a subchart cannot read the module charts'
+  #                                `autoscaling.enabled`.
+  #   probes.mariadb      unset -> FALSE. This chart renders no MariaDB CR, and a
+  #                                subchart cannot read the `-db` charts'
+  #                                `database.create`.
+  #
+  # THE TWO OVERRIDE DIRECTIONS ARE NOT SYMMETRIC. An explicit `false` is ALWAYS
+  # honoured: losing a diagnostic is a choice an adopter is entitled to make, and
+  # it cannot produce the failure the tie exists to prevent. An explicit `true`
+  # splits. For `keda` and `mariadb` it is REQUIRED and it is the only way to
+  # enable those probes at all. For `certManager` it is REFUSED when its own
+  # toggle is false, because a probe for an operator whose objects this install
+  # renders none of proves nothing and can only fail for the wrong reason — the
+  # refusal names both keys.
+  #
+  # AND THE UNSET TEST IS `hasKey`, NEVER SPRIG'S `default`. `default` treats
+  # `false` AS EMPTY — it returns its fallback for `false` exactly as it does for
+  # an absent key — so a `default` chain cannot tell an unset key from an explicit
+  # `false` and the honoured-`false` direction silently would not exist.
+  probes: {}
+
+  # ── THE OPERATOR STRINGS, READ OFF THE OPERATORS AND RECORDED HERE ─────────
+  # EACH STRING IS READ OFF THE OPERATOR AT THE VERSION THE ESTATE PINS AND
+  # RECORDED BESIDE THE PROBE THAT USES IT, so an operator upgrade that moved a
+  # group or reworded a message turns the probe RED rather than silently
+  # weakening it. A string guessed from documentation is a probe that passes
+  # against a cluster it never understood.
+  certManager:
+    # Read off cert-manager as the estate pins it.
+    apiVersion: cert-manager.io/v1
+
+  keda:
+    # Read off KEDA as the estate pins it.
+    apiVersion: keda.sh/v1alpha1
+
+  mariadb:
+    # MEASURED 2026-09-23 against kind-yadgar, running
+    # ghcr.io/mariadb-operator/mariadb-operator:26.6.0.
+    apiVersion: k8s.mariadb.com/v1alpha1
+    operatorImage: ghcr.io/mariadb-operator/mariadb-operator:26.6.0
+
+    # WHY THIS PROBE SUBMITS AN INVALID OBJECT RATHER THAN A VALID ONE. A probe
+    # MariaDB instance is a StatefulSet with a volume, which is far too heavy for
+    # a preflight. So the probe submits a CR that is invalid in a way the
+    # operator's OWN validation names, as a server-side dry run, and requires the
+    # rejection to be the operator's.
+    #
+    # A REJECTION ALONE CANNOT DISCRIMINATE, which is the whole reason three
+    # strings live here instead of one. With the operator at zero replicas and
+    # `failurePolicy: Fail`, the API SERVER also rejects the request — it cannot
+    # reach the webhook — so the healthy cluster and the dead one both answer with
+    # a non-2xx and a probe requiring "a rejection" reads green on both.
+
+    # THE REFUSAL THAT PROVES THE OPERATOR'S ADMISSION PATH IS LIVE. Measured:
+    #
+    #   admission webhook "vmariadb-v1alpha1.kb.io" denied the request:
+    #     spec.storage: Invalid value: {}: either storage size or
+    #     volumeClaimTemplate must be provided
+    #
+    # AND THE WEBHOOK'S NAME IS NOT IN THE VALUE, for two reasons that agree.
+    #
+    # IT COULD NOT MATCH. The lines above are how `kubectl` PRINTS that message,
+    # and that is not what is on the wire. The API server builds the prefix with
+    # `%q` and puts the result in `metav1.Status.Message`, which is a JSON string,
+    # so every `"` reaches `curl` as `\"`. This probe greps the RAW body, and
+    # `grep -F` for a literal `"` cannot match `\"`. A value carrying the quoted
+    # name therefore misses on a HEALTHY cluster: the Job exits 1, `backoffLimit:
+    # 0` forbids a retry, and the `pre-install` hook aborts the install naming a
+    # string comparison — which is the fail-for-the-wrong-reason class this whole
+    # probe exists to prevent. That value shipped once.
+    # `test_every_mariadb_string_can_match_an_api_server_body` is the gate that
+    # would have caught it, and it checks each string against a body built the way
+    # the API server builds one rather than against the script.
+    #
+    # AND IT CARRIES NOTHING ANYWAY. `denied the request` is the load-bearing
+    # half: the API server's own unreachable-webhook message ALSO names
+    # `vmariadb-v1alpha1.kb.io`, so the name alone discriminates nothing.
+    #
+    # WHAT DISCRIMINATES IS THE ORDER. `denied the request` on its own would also
+    # match a refusal from some other webhook, and it never sees one, because the
+    # unreachable reading is checked FIRST and the validation reading follows.
+    # That ordering is load-bearing for this value's correctness rather than only
+    # for the message a failure prints, and
+    # `test_the_mariadb_arms_read_the_unreachable_webhook_first` asserts it.
+    deniedBy: denied the request
+
+    # THE OPERATOR'S OWN VALIDATION TEXT, AND NOT THE CRD SCHEMA'S. A second
+    # refusal exists at this version — `An odd number of MariaDB instances
+    # (mariadb.spec.replicas) is required` — and it comes from CRD SCHEMA
+    # validation, which the API server performs with no operator running at all.
+    # Keying the probe on that one would pass on exactly the cluster this probe
+    # exists to catch: the CRDs applied, the operator absent or crash-looping.
+    validationMessage: either storage size or volumeClaimTemplate must be provided
+
+    # THE FAILURE THE PROBE NAMES EXPLICITLY, rather than letting it fall out of
+    # the two readings above. A rejection carrying this is the API server saying
+    # it could not reach the webhook, which is the operator being ABSENT — and a
+    # probe that reported it as "the message did not match" would name a string
+    # comparison where the answer is "mariadb-operator is not running".
+    unreachableWebhook: failed calling webhook
