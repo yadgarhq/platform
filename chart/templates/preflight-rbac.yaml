@@ -1,0 +1,110 @@
+{{/*
+THE PREFLIGHT'S OWN IDENTITY, AND THE SMALLEST PERMISSION THAT CAN PROBE.
+
+A SECOND TRIPLE, NOT THE BOOTSTRAP ONE. `templates/bootstrap-rbac.yaml` argues why
+the two bootstrap Jobs SHARE one identity — an identical Role under a different
+name is reviewed twice for the same guarantee. That argument does not reach here,
+because this Role is a DIFFERENT VERB SET ON DIFFERENT KINDS: `create`, `get` and
+`delete` on the probe objects, where the bootstrap Role carries `create` on secrets
+alone. One triple for both would be the UNION of the two, held by both Jobs — the
+bootstrap Jobs gaining `delete` on cert-manager objects, and this Job gaining the
+ability to create Secrets it has no use for.
+
+`create`, `get`, `delete`, AND NEVER `list`. The probe creates ONE object under a
+name it already knows, reads THAT object back, and deletes it. `list` would let it
+enumerate every object of that kind in the namespace and it needs none of them —
+the smallest permission that can do the job, exactly as ADR-0753 reasoned for the
+bootstrap Role. `resourceNames` cannot narrow the `create` (the authorizer runs
+before the request body is decoded), so the Role being NAMESPACED is what bounds
+this identity.
+
+THE RULES FOLLOW THE PROBES THIS RENDER ENABLES, resolved from the SAME partial the
+Job reads. A fixed rule set would grant permission on kinds no enabled probe
+touches, and — worse — it would be a second statement of which probes exist, which
+is the invariant-spanning-two-places shape that passes while the constraint is
+broken.
+
+THE TRIPLE IS A HOOK, AT A WEIGHT BELOW THE JOB IT SERVES. Helm applies plain
+resources AFTER the pre-install hooks have run, so a ServiceAccount rendered as an
+ordinary object DOES NOT EXIST when a `pre-install` Job tries to use it: the Job is
+admitted against an identity that is not there, and the preflight fails on a
+healthy cluster for a reason that has nothing to do with any operator. A
+`hook-delete-policy` that removed this triple between phases would break the Job
+that follows it, so it keeps `before-hook-creation` and nothing else.
+
+IT RENDERS ONLY WHERE THE JOB DOES. `preflight.enabled` defaults TRUE, so a triple
+gated on that key alone would render at this chart's own defaults — where no probe
+resolves true and no Job exists for it to serve. The guard is the resolved probe
+set, the same one the Job carries.
+
+THE WEIGHTS ARE QUOTED. Annotations are `map[string]string`, so an unquoted integer
+is a manifest that does not decode — and that failure arrives at apply time, not at
+render time.
+*/}}
+{{- $preflight := .Values.preflight }}
+{{- $probes := without (splitList " " (include "platform.preflight.probes" (dict "context" $))) "" }}
+{{- if and $preflight.enabled $probes }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $preflight.serviceAccountName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $preflight.serviceAccountName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+{{- if has "cert-manager" $probes }}
+  # A self-signed probe Issuer and the probe Certificate it signs. Both are
+  # created, read until `Ready=True`, and deleted.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["issuers", "certificates"]
+    verbs: ["create", "get", "delete"]
+{{- end }}
+{{- if has "keda" $probes }}
+  # The ScaledObject KEDA must reconcile, and the zero-replica Deployment it
+  # scales. A ScaledObject whose target does not exist is reconciled into an error
+  # rather than ignored, so the Deployment is part of the probe and not scenery.
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "delete"]
+{{- end }}
+{{- if has "mariadb-operator" $probes }}
+  # A SERVER-SIDE DRY RUN ONLY — nothing is persisted, and `get` and `delete` are
+  # never exercised on this kind. They are granted anyway because the cleanup path
+  # is written once for every probe: a dry run that the API server somehow admits
+  # must still be removable, and a rule that differed from its siblings here would
+  # be a special case nobody maintains.
+  - apiGroups: ["k8s.mariadb.com"]
+    resources: ["mariadbs"]
+    verbs: ["create", "get", "delete"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $preflight.serviceAccountName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $preflight.serviceAccountName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $preflight.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
