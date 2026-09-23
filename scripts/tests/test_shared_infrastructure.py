@@ -45,6 +45,7 @@ Run: python3 -m pytest scripts/tests/ -q
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tarfile
@@ -77,6 +78,32 @@ EXPECTED_DECLARED_DEPENDENCIES = 1  # nats
 # The clients each policy admits, by value, because they belong to other charts.
 EXPECTED_VALKEY_CLIENTS = ["gateway"]
 EXPECTED_NATS_CLIENTS = ["gateway", "iam"]
+
+# ── THE PORTS ADMITTED FROM EVERY SOURCE, WRITTEN DOWN ───────────────────────
+# An ingress rule with no `from` matches ALL sources — every namespace, and
+# whatever else the CNI presents (ADR-0664). `nats-ingress` has exactly one such
+# rule, on the monitoring port, and the reason it is not narrowed is argued in
+# `templates/ingress-policies.yaml` beside the rule. `valkey-ingress` has none.
+#
+# THIS IS WHAT `EXPECTED_*_CLIENTS` CANNOT SEE. `client_names` walks each rule's
+# `from`, so a rule carrying none contributes nothing to it and an allow-all
+# leaves the client census reporting the same consumers it always did.
+EXPECTED_ALLOW_ALL_PORTS = {"valkey-ingress": set(), "nats-ingress": {8222}}
+
+# The two Secrets the bootstrap Job mints for the broker, by value, because the
+# StatefulSet that reads them belongs to the upstream chart.
+EXPECTED_NATS_SECRETS = {"nats-auth", "nats-auth-gateway"}
+
+# The name inside a request body the bootstrap script POSTs, which is the only place
+# a Secret is actually created. MEASURED, not assumed: renaming the created Secret to
+# `nats-auth-typo` leaves the string `nats-auth-gateway` in that Job three times over
+# — in a comment, in a `mint` line and in an echo — so a substring search over the
+# Job's text answers "minted" for a Secret the install never creates. That is exactly
+# the typo this gate exists to catch, so the name is read off the body.
+MINTED_SECRET = re.compile(
+    r'"kind"\s*:\s*"Secret".*?"metadata"\s*:\s*\{\s*"name"\s*:\s*"(?P<name>[^"]+)"',
+    re.DOTALL,
+)
 
 # The three decoy groups this check could have been written against, and the two
 # that would have been wrong. Kept as data so the reason travels with the test.
@@ -192,6 +219,86 @@ def client_names(policy: dict) -> list[str]:
     return sorted(names)
 
 
+def from_less_rules(policy: dict) -> list[dict]:
+    """Every ingress rule that names NO source, i.e. every rule admitting all of them. PURE.
+
+    `not rule.get("from")` rather than `"from" not in rule`, and the difference is
+    the whole gate. A rule carrying `from: []` is the SAME allow-all to the API
+    server as a rule carrying no `from` key at all — ADR-0664 read it off the
+    OpenAPI description compiled into the kubectl binary: "If this field is empty or
+    missing, this rule matches all sources". The empty-list shape is also the one a
+    values override or a `range` over an empty list produces, so a predicate keyed
+    on the missing KEY would miss the shape most likely to arrive.
+    """
+    return [rule for rule in policy["spec"]["ingress"] if not rule.get("from")]
+
+
+def minted_secret_names(rendered: list[dict]) -> set[str]:
+    """Every Secret name a bootstrap Job actually CREATES, read off the request body. PURE.
+
+    NOT A SUBSTRING SEARCH OVER THE JOB'S TEXT, and the difference was measured
+    rather than argued: renaming the Secret the script creates to `nats-auth-typo`
+    leaves the old name in the Job in a comment, in a `mint` line and in an echo, so
+    a substring form reports it minted and the gate passes over an install whose
+    broker waits forever on a Secret nothing creates. The request body is where a
+    Secret is made, so the body is what this reads.
+
+    READ OFF `command` AND `args`, NEVER OFF `yaml.dump(job)`. Measured: the dump
+    escapes every quote in the script and wraps its lines, so the JSON bodies do not
+    survive it and a pattern run over the dump matches NOTHING — a gate that reports
+    every Secret as unminted, which is red for the wrong reason rather than green for
+    the wrong reason, and just as useless.
+    """
+    script = "\n".join(
+        part
+        for job in of_kind(rendered, "Job")
+        for container in job["spec"]["template"]["spec"]["containers"]
+        for part in (container.get("command") or []) + (container.get("args") or [])
+    )
+    return {
+        match.group("name")
+        for match in MINTED_SECRET.finditer(script)
+    }
+
+
+def secret_names(workload: dict) -> set[str]:
+    """Every Secret name the workload's containers read through `secretKeyRef`. PURE.
+
+    Over ALL containers rather than the first: the broker's pod carries a `reloader`
+    sidecar beside `nats`, and a credential moved onto a sidecar is still a
+    credential this install has to mint.
+    """
+    return {
+        variable["valueFrom"]["secretKeyRef"]["name"]
+        for container in workload["spec"]["template"]["spec"]["containers"]
+        for variable in container.get("env") or []
+        if "secretKeyRef" in (variable.get("valueFrom") or {})
+    }
+
+
+def broker_ports(rendered: list[dict]) -> set[int]:
+    """Every port the UPSTREAM chart's render serves on the broker. PURE.
+
+    SERVICES AND `containerPorts` BOTH, through ONE function so the gate and its red
+    case cannot come to read different things. A Service is not the whole list of
+    what a pod serves: a listener opened on the pod with no Service in front of it is
+    reachable at the pod IP, denied by a policy that does not name it, and invisible
+    to a gate that reads Services alone.
+    """
+    return {
+        port["port"]
+        for service in of_kind(rendered, "Service")
+        if service["metadata"]["name"] != chart_values()["valkey"]["name"]
+        for port in service["spec"]["ports"]
+    } | {
+        port["containerPort"]
+        for container in one(rendered, "StatefulSet")["spec"]["template"]["spec"][
+            "containers"
+        ]
+        for port in container.get("ports") or []
+    }
+
+
 def policy_ports(policy: dict) -> set[int]:
     return {
         port["port"]
@@ -262,6 +369,11 @@ def test_a_create_toggle_true_at_the_defaults_reddens_the_zero(tmp_path):
     for toggle, kind in (
         ("gatewayListener", "Gateway"),
         ("valkey", "Deployment"),
+        # THE THIRD TOGGLE, AND IT RENDERS THE MOST. `nats.create` is a dependency
+        # `condition` rather than a template `if`, so it switches the whole subchart
+        # on: six objects at the defaults, the StatefulSet among them. Left out, the
+        # zero above passed over a chart whose `condition` had been deleted.
+        ("nats", "StatefulSet"),
     ):
         values = overrides(
             tmp_path / f"{toggle}.yaml", f"{toggle}:\n  create: true\n"
@@ -536,6 +648,77 @@ def test_a_valkey_secret_nothing_mints_reddens_the_gate(tmp_path):
     ), "the red case renamed the Secret and a bootstrap Job minted it anyway"
 
 
+def test_the_broker_reads_the_secrets_the_bootstrap_job_mints():
+    """THE BROKER'S HALF OF THE GATE ABOVE, and it was the half that had none.
+
+    `bootstrap.create` renders the Job that creates `valkey-password`, `nats-auth`
+    AND `nats-auth-gateway`. The Deployment's reference to the first was gated; the
+    StatefulSet's reference to the other two was not, and it is the SAME failure with
+    the same shape — a values flip renaming either Secret leaves the broker in
+    `ContainerCreating` for the lifetime of the install, which is exactly the failure
+    the bootstrap Jobs exist to move earlier.
+
+    IT CROSSES A CHART BOUNDARY, WHICH THE VALKEY TWIN DOES NOT. The StatefulSet is
+    the upstream chart's, built from `nats.container.env` in this chart's
+    `values.yaml`; the Job is this chart's, and mints the names as literals in its
+    script. Nothing keeps the two in step but this comparison.
+
+    TWO SECRETS AND NOT ONE, asserted as an equality. They are separate Secrets
+    rather than two keys on one because the Job's Role grants `create` alone, so a
+    second key on an already-created Secret would 409 forever; a gate satisfied by
+    one of them would pass a render that had lost `gateway`'s credential.
+
+    THE MINTED SIDE IS READ OFF THE REQUEST BODY, NOT OFF THE JOB'S TEXT, and that
+    is the one place this gate is deliberately stricter than its valkey twin above.
+    Measured while building it: renaming the created Secret to `nats-auth-typo`
+    leaves the old name elsewhere in the same Job, so a substring search reports it
+    minted and the gate passes over the failure it exists to catch.
+    """
+    rendered = adopter_render()
+    stateful_set = one(rendered, "StatefulSet")
+    referenced = secret_names(stateful_set)
+    minted = minted_secret_names(rendered)
+
+    assert referenced == EXPECTED_NATS_SECRETS, (
+        f"the broker's containers read {sorted(referenced)} through secretKeyRef; "
+        f"{sorted(EXPECTED_NATS_SECRETS)} is one account per service and a missing "
+        f"one is a service whose access cannot be revoked on its own"
+    )
+    assert referenced <= minted, (
+        f"the broker's containers read {sorted(referenced)} and the bootstrap Jobs "
+        f"in this render mint {sorted(minted)}, so the pod waits in "
+        f"ContainerCreating on a Secret nothing in this install creates"
+    )
+
+
+def test_a_broker_secret_nothing_mints_reddens_the_gate(tmp_path):
+    """The red case: a values flip that renames one Secret the StatefulSet reads.
+
+    A VALUES FLIP AND NOT A TEMPLATE EDIT, because that is the move an adopter
+    actually makes — `nats.container.env` is a documented key of this chart's
+    `values.yaml` and renaming a Secret there touches no template at all.
+    """
+    values = overrides(
+        tmp_path / "other-broker-password.yaml",
+        "nats:\n"
+        "  container:\n"
+        "    env:\n"
+        "      NATS_PASSWORD:\n"
+        "        valueFrom:\n"
+        "          secretKeyRef:\n"
+        "            name: nobody-mints-this\n",
+    )
+    rendered = adopter_render(CHART, "-f", str(values))
+    stateful_set = one(rendered, "StatefulSet")
+    referenced = secret_names(stateful_set)
+
+    assert "nobody-mints-this" in referenced, referenced
+    assert referenced != EXPECTED_NATS_SECRETS, referenced
+    assert not any(
+        "nobody-mints-this" in yaml.dump(job) for job in of_kind(rendered, "Job")
+    ), "the red case renamed the Secret and a bootstrap Job minted it anyway"
+
+
 def test_the_valkey_toggle_switches_its_objects_off(tmp_path):
     values = overrides(tmp_path / "valkey-off.yaml", "valkey:\n  create: false\n")
     rendered = adopter_render(CHART, "-f", str(values))
@@ -607,22 +790,150 @@ def test_the_nats_policy_names_the_ports_the_SUBCHART_serves():
     A NetworkPolicy with any ingress rule DENIES every port it does not name, so a
     policy naming only the client port cuts the monitoring endpoint the upstream
     chart's own probes use — restarting a healthy broker on the first CNI that
-    enforces it. Both numbers are read off the upstream chart's Services rather
+    enforces it. Every number is read off the upstream chart's own render rather
     than written here.
+
+    SERVICES AND `containerPorts` BOTH, and the honest state of that widening is
+    stated rather than implied. A NetworkPolicy admits traffic to the POD, and a pod
+    IP is dialable whether or not a Service points at it — so the set of ports a
+    policy has to name is the pod's, and a Service is the upstream chart's choice
+    about how to reach them rather than a list of them.
+
+    WHAT IT BUYS TODAY IS NOTHING, MEASURED. At 2.14.6 every listener the chart opens
+    also lands on the headless Service: with `config.profiling.enabled` true the
+    headless Service serves {4222, 8222, 65432} and the containers serve the same
+    three, and with `service.enabled` false the headless Service survives and still
+    serves both. So no values setting reachable today opens a pod port that no
+    Service names, and the containerPort half adds no port to the comparison.
+
+    IT IS STILL THE RIGHT SET TO READ. The claim "every listener also gets a Service"
+    is a fact about this upstream chart at this version, not a property of
+    NetworkPolicy, and it is the upstream chart's to change on any bump — silently,
+    into a policy that denies a port the broker is serving. Reading the pod's own
+    ports does not depend on that fact holding.
+
+    The `nats.config.nats.port` red case below stays red either way: the containerPort
+    follows that key exactly as the Service's port does, measured.
     """
     rendered = adopter_render()
     policy = by_name(rendered, "NetworkPolicy", "nats-ingress")
-    served = {
-        port["port"]
-        for service in of_kind(rendered, "Service")
-        if service["metadata"]["name"] != chart_values()["valkey"]["name"]
-        for port in service["spec"]["ports"]
-    }
-    assert served, "the render produced no broker Service to read ports off"
+    served = broker_ports(rendered)
+    assert served, "the render produced no broker port to read"
     assert served <= policy_ports(policy), (
         f"the broker serves {sorted(served)} and nats-ingress admits "
         f"{sorted(policy_ports(policy))}; every port the policy omits is denied"
     )
+
+
+def test_the_policies_admit_from_every_source_only_where_written_down():
+    """THE CENSUS THE CLIENT CENSUS CANNOT SEE, and the hole it exists to close.
+
+    `client_names` walks `rule.get("from", [])`. A rule with NO `from` contributes
+    nothing to that walk, so `client_names(policy) == EXPECTED_..._CLIENTS` passes
+    unchanged over a policy admitting a port from EVERY source in the cluster. That
+    is not a narrow rule read loosely — an ingress rule whose `from` is absent or
+    empty matches all sources, every namespace included (ADR-0664). The two censuses
+    are complementary and neither substitutes for the other: one names who is
+    admitted by selector, this one names what is admitted to everybody.
+
+    AN EQUALITY AGAINST PORTS WRITTEN DOWN, NOT A COUNT AND NOT A CEILING. A count
+    passes when one from-less rule is deleted and another added on a different port.
+    A ceiling passes when a from-less rule is added to a policy that had none. Only
+    the equality names both the number and what each rule admits.
+
+    `nats-ingress`'s one such rule is deliberate and argued beside it in
+    `templates/ingress-policies.yaml`; this case does not judge that decision, it
+    makes the decision VISIBLE so the next edit has to restate it here.
+    """
+    rendered = adopter_render()
+    for name, expected in EXPECTED_ALLOW_ALL_PORTS.items():
+        policy = by_name(rendered, "NetworkPolicy", name)
+        rules = from_less_rules(policy)
+
+        unbounded = [rule for rule in rules if not rule.get("ports")]
+        assert not unbounded, (
+            f"{name} carries {len(unbounded)} ingress rule(s) naming NEITHER a source "
+            f"nor a port, and each admits every port from every source: {unbounded}"
+        )
+        admitted = {port["port"] for rule in rules for port in rule["ports"]}
+        assert admitted == expected, (
+            f"{name} carries {len(rules)} ingress rule(s) with no `from`, admitting "
+            f"{sorted(admitted)} from ALL SOURCES — every namespace, not merely this "
+            f"one; {sorted(expected)} is what was written down. A rule with no `from` "
+            f"contributes nothing to `client_names`, so the client census above passes "
+            f"over it in silence and this is the only case that sees it"
+        )
+
+
+def test_a_from_less_rule_added_to_a_policy_reddens_the_allow_all_census(tmp_path):
+    """The red case, and it DEMONSTRATES the blindness as well as closing it.
+
+    One from-less rule is added to `valkey-ingress`, which today carries none. The
+    first assertion is the point of the whole case: `client_names` is UNCHANGED, so
+    the client census keeps reporting the one consumer it expects while the policy
+    admits a port from every source in the cluster. The second is this file's new
+    census going red on that same render.
+    """
+    copy = chart_with(
+        tmp_path,
+        "templates/ingress-policies.yaml",
+        lambda text: text.replace(
+            "          port: {{ .Values.valkey.port }}\n",
+            "          port: {{ .Values.valkey.port }}\n"
+            "    - ports:\n"
+            "        - protocol: TCP\n"
+            "          port: 9121\n",
+        ),
+    )
+    rendered = render(copy, *api_version_arguments(), "-f", str(ADOPTER_VALUES))
+    policy = by_name(rendered, "NetworkPolicy", "valkey-ingress")
+
+    assert client_names(policy) == EXPECTED_VALKEY_CLIENTS, (
+        f"the added rule moved the client census to {client_names(policy)}, so this "
+        f"case is no longer demonstrating the blindness it exists to demonstrate"
+    )
+    admitted = {
+        port["port"] for rule in from_less_rules(policy) for port in rule["ports"]
+    }
+    assert admitted == {9121}, admitted
+    assert admitted != EXPECTED_ALLOW_ALL_PORTS["valkey-ingress"], (
+        "a from-less rule was added to valkey-ingress and the census above would "
+        "still have passed, so it sees no more than `client_names` does"
+    )
+
+
+def test_a_from_less_rule_written_as_an_empty_list_is_seen_too(tmp_path):
+    """The predicate's own red case: `from: []` is the SAME allow-all as no `from`.
+
+    A gate written `"from" not in rule` passes this render and reports a policy with
+    no allow-all rule, because the KEY is present. ADR-0664 measured that the API
+    server treats the two identically, and the empty-list shape is the one a values
+    override or a `range` over an empty list produces.
+    """
+    copy = chart_with(
+        tmp_path,
+        "templates/ingress-policies.yaml",
+        lambda text: text.replace(
+            "          port: {{ .Values.valkey.port }}\n",
+            "          port: {{ .Values.valkey.port }}\n"
+            "    - from: []\n"
+            "      ports:\n"
+            "        - protocol: TCP\n"
+            "          port: 9121\n",
+        ),
+    )
+    rendered = render(copy, *api_version_arguments(), "-f", str(ADOPTER_VALUES))
+    policy = by_name(rendered, "NetworkPolicy", "valkey-ingress")
+
+    seen = from_less_rules(policy)
+    assert len(seen) == 1, (
+        f"valkey-ingress carries a rule with `from: []` and `from_less_rules` "
+        f"returned {seen} — a predicate keyed on the missing KEY rather than on the "
+        f"missing VALUE reports this allow-all as a narrow rule, which is the "
+        f"measurement ADR-0664 exists to stop being re-derived wrongly"
+    )
+    assert seen[0]["from"] == [], seen[0]
+    assert client_names(policy) == EXPECTED_VALKEY_CLIENTS, client_names(policy)
 
 
 def test_a_moved_subchart_label_reddens_the_nats_policy_gate(tmp_path):
@@ -651,12 +962,7 @@ def test_a_moved_subchart_port_reddens_the_nats_policy_gate(tmp_path):
     )
     rendered = adopter_render(CHART, "-f", str(values))
     policy = by_name(rendered, "NetworkPolicy", "nats-ingress")
-    served = {
-        port["port"]
-        for service in of_kind(rendered, "Service")
-        if service["metadata"]["name"] != chart_values()["valkey"]["name"]
-        for port in service["spec"]["ports"]
-    }
+    served = broker_ports(rendered)
     assert not served <= policy_ports(policy), (
         "the broker's client port moved and the policy's port list followed it, "
         "so this red case is testing nothing"
@@ -905,4 +1211,39 @@ def test_a_moved_valkey_pod_label_reddens_the_policy_and_service_gates(tmp_path)
     assert not policy["spec"]["podSelector"]["matchLabels"].items() <= labels.items(), (
         "the pod labels were moved and the policy's selector followed them, so "
         "this red case is testing nothing"
+    )
+
+
+def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
+    """`DECLARED_API_VERSIONS` RESTATED AGAINST THE CHART. An assertion, NOT a derivation.
+
+    THE LITERAL ABOVE STAYS A LITERAL, and that is deliberate rather than an omission
+    this case tidies up. A tuple computed from `declared_checks(CHART)` would FOLLOW a
+    check deleted from the chart: every render in this file would keep passing over
+    one fewer group and this file would stop discriminating at exactly the moment the
+    render checks stopped existing. `test_render_checks.py` catches that deletion on
+    its own count. So the independent restatement has to survive, and what was missing
+    beside it was the comparison.
+
+    WHAT THE COMPARISON BUYS IS A NAMED CAUSE. This constant is spliced into every
+    enabled render in this file, and `fail` aborts a whole chart render at the first
+    check whose group is absent. So ONE stale entry here does not fail as "this tuple
+    is stale" — it fails as dozens of cases across this file, each printing the
+    CHART's refusal and naming the chart's operator. The reader meets a symptom that
+    names the chart and is caused by a constant in a test file. This case fails first
+    and says so.
+
+    It is imported inside the function, following this file's existing precedent, so
+    the constant stays readable without a module-level dependency between suites.
+    """
+    from test_render_checks import declared_checks
+
+    declared = tuple(sorted(declared_checks(CHART)))
+    assert DECLARED_API_VERSIONS == declared, (
+        f"this file's DECLARED_API_VERSIONS names {DECLARED_API_VERSIONS} and the "
+        f"chart declares {declared}. Every enabled render in this file passes the "
+        f"first, and `fail` aborts each of them at the first check whose group is "
+        f"missing — so a stale entry HERE reddens this whole file with the CHART's "
+        f"refusal, naming the chart rather than this constant. Move this tuple to "
+        f"match the chart, or restore the check the chart lost"
     )

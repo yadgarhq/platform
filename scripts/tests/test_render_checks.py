@@ -62,17 +62,23 @@ assertion names the cause, which is why it runs first.
 
 IT ASSERTS HOW MANY PAIRS IT EXERCISED, against a number written here. The rule the
 number is computed from is ONE PAIR PER RENDER CHECK THE CHART DECLARES — not per
-CRD-backed kind, because one check can guard several kinds rendered by one toggle,
-which is exactly this chart's case: every object it renders comes from
-`cert-manager.io/v1`. Printing a count is not asserting one, and the difference is
-the whole point: a harness that quietly exercises one fewer check after somebody
-deletes one is the "passes having examined nothing" failure wearing a green tick.
+CRD-backed kind, and not per API GROUP either, because one toggle can render several
+kinds, from more than one group, behind ONE check. `templates/render-checks.yaml` is
+where each check states what it guards, and the count of checks is never to be read
+off the count of kinds rendered. `EXPECTED_RENDER_CHECKS` below is the one place the
+number lives. Printing a count is not asserting one, and the difference is the whole
+point: a harness that quietly exercises one fewer check after somebody deletes one is
+the "passes having examined nothing" failure wearing a green tick.
 
-AND THE CONSTRUCTION IS PROVED AT TWO CHECKS, not only at the one this chart
-declares. `test_the_construction_is_correct_at_two_checks` builds a throwaway
-two-check chart around THIS chart's own `_require_api.tpl` and runs the SAME
-construction over it. A generalisation asserted only against the one-check chart
-proves nothing about the count it was generalised for.
+AND THE CONSTRUCTION IS PROVED AT A COUNT THIS CHART DOES NOT CONTROL.
+`test_the_construction_is_correct_at_two_checks` builds a throwaway TWO-check chart
+around THIS chart's own `_require_api.tpl` and runs the SAME construction over it.
+The fixture's count is `FIXTURE_RENDER_CHECKS`, which is two whatever
+`EXPECTED_RENDER_CHECKS` happens to say — so the generalisation stays proved at two
+on a chart declaring one, and stays proved on the next chart this file is copied into
+whatever that one declares. THIS PARAGRAPH IS DELIBERATELY WRITTEN OVER NO PARTICULAR
+COUNT: this file is copied into every chart that carries a render check, so a reason
+stated in terms of one chart's count arrives false in the next.
 
 Run: python3 -m pytest scripts/tests/ -q
 """
@@ -489,18 +495,26 @@ def test_the_harness_exercises_one_red_green_pair_per_declared_check(tmp_path):
 
 
 def test_the_construction_is_correct_at_two_checks(tmp_path):
-    """THE GENERALISATION, PROVED AT THE COUNT IT WAS GENERALISED FOR.
+    """THE GENERALISATION, PROVED AT A COUNT THIS CHART DOES NOT CONTROL.
 
-    This chart declares ONE check, and at one check the construction above is
-    indistinguishable from the narrower one it replaced — green naming "the group
-    under test" and red naming "the filler alone". Measured on helm 3.18.4 and 4.3.0
-    against a two-check chart, that narrower one is FALSE, and
-    `test_the_narrower_construction_is_false_at_two_checks` below is where that
-    measurement is asserted rather than described.
+    AT ONE CHECK the construction above is indistinguishable from the narrower one it
+    replaced — green naming "the group under test" and red naming "the filler alone".
+    Measured on helm 3.18.4 and 4.3.0 against a two-check chart, that narrower one is
+    FALSE, and `test_the_narrower_construction_is_false_at_two_checks` below is where
+    that measurement is asserted rather than described.
 
-    So the same construction runs here over a throwaway chart declaring two checks.
-    Without this case the generalisation would be asserted only where it cannot
-    differ from what it replaced, which is the exact mistake it exists to fix.
+    SO THE COUNT EXERCISED HERE IS THE FIXTURE'S, NEVER THE CHART'S, AND THAT IS WHAT
+    THIS CASE BUYS. `FIXTURE_RENDER_CHECKS` is two however many checks
+    `EXPECTED_RENDER_CHECKS` says the chart declares, so the generalisation is proved
+    at two on a chart declaring one and stays proved the day a chart drops back to
+    one. This file is copied into every chart that carries a render check, and those
+    charts declare different counts; a case whose reason for existing is read off one
+    chart's count arrives stale in the next.
+
+    IT ALSO ASSERTS SOMETHING NO RENDER OF A REAL CHART CAN GIVE. The fixture renders
+    exactly one object per check, so the green half is asserted to produce one object
+    PER CHECK rather than merely to produce something — the difference between a green
+    half that exercised every check it counted and one that rendered anything at all.
     """
     fixture = two_check_fixture(tmp_path / "fixture")
 

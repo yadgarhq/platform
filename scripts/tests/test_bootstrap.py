@@ -1324,3 +1324,38 @@ def test_the_admin_token_secret_name_follows_its_value(tmp_path):
         f"`bootstrap.adminToken.secretName` was overridden, found {minted}. A "
         f"hardcoded name leaves the gateway mounting a Secret nothing mints"
     )
+
+
+def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
+    """`DECLARED_API_VERSIONS` RESTATED AGAINST THE CHART. An assertion, NOT a derivation.
+
+    THE LITERAL ABOVE STAYS A LITERAL, and that is deliberate rather than an omission
+    this case tidies up. A tuple computed from `declared_checks(CHART)` would FOLLOW a
+    check deleted from the chart: every render in this file would keep passing over
+    one fewer group and this file would stop discriminating at exactly the moment the
+    render checks stopped existing. `test_render_checks.py` catches that deletion on
+    its own count. So the independent restatement has to survive, and what was missing
+    beside it was the comparison.
+
+    WHAT THE COMPARISON BUYS IS A NAMED CAUSE. This constant is spliced into every
+    enabled render in this file, and `fail` aborts a whole chart render at the first
+    check whose group is absent. So ONE stale entry here does not fail as "this tuple
+    is stale" — it fails as dozens of cases across this file, each printing the
+    CHART's refusal and naming the chart's operator. The reader meets a symptom that
+    names the chart and is caused by a constant in a test file. This case fails first
+    and says so.
+
+    It is imported inside the function, following this file's existing precedent, so
+    the constant stays readable without a module-level dependency between suites.
+    """
+    from test_render_checks import declared_checks
+
+    declared = tuple(sorted(declared_checks(CHART)))
+    assert DECLARED_API_VERSIONS == declared, (
+        f"this file's DECLARED_API_VERSIONS names {DECLARED_API_VERSIONS} and the "
+        f"chart declares {declared}. Every enabled render in this file passes the "
+        f"first, and `fail` aborts each of them at the first check whose group is "
+        f"missing — so a stale entry HERE reddens this whole file with the CHART's "
+        f"refusal, naming the chart rather than this constant. Move this tuple to "
+        f"match the chart, or restore the check the chart lost"
+    )
