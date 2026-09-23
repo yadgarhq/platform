@@ -57,3 +57,11 @@ edgeTLS:
 # lost with the cluster. README.md carries the command beside the install command.
 bootstrap:
   create: true
+
+  adminToken:
+    # NAMED HERE RATHER THAN INHERITED, although the value equals the chart's own
+    # default. The parent chart refuses an install where this and the gateway's
+    # `gateway.adminBootstrap.tokenSecret` disagree, so the name is a thing an
+    # adopter decides rather than a thing that happens to them (ADR-0569's "a
+    # value someone can see").
+    secretName: admin-bootstrap-token

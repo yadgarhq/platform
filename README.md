@@ -51,18 +51,18 @@ Every leaf has exactly one consuming module, so ADR-0752's rule that a single-co
 ## Layout
 
 ```
-chart/Chart.yaml                      the chart
-chart/values.yaml                     every toggle, every leaf and the ladder, with the reasoning beside each
-chart/templates/_require_api.tpl      the render check's definition — a partial, which helm never renders
-chart/templates/render-checks.yaml    where it is CALLED, which is what makes the refusal happen
-chart/templates/internal-ca.yaml      the self-signed Issuer, the CA Certificate and the CA Issuer
-chart/templates/certificates.yaml     the ten internal leaves, from the map in values.yaml
-chart/templates/edge-certificate.yaml the edge leaf, whose issuerRef is required with no default
-chart/templates/bootstrap-rbac.yaml   the one identity both Jobs run as — `create` on secrets, nothing else
-chart/templates/bootstrap-secrets.yaml the three machine-only credentials, minted by a pre-install hook
+chart/Chart.yaml                           the chart
+chart/values.yaml                          every toggle, every leaf and the ladder, with the reasoning beside each
+chart/templates/_require_api.tpl           the render check's definition — a partial, which helm never renders
+chart/templates/render-checks.yaml         where it is CALLED, which is what makes the refusal happen
+chart/templates/internal-ca.yaml           the self-signed Issuer, the CA Certificate and the CA Issuer
+chart/templates/certificates.yaml          the ten internal leaves, from the map in values.yaml
+chart/templates/edge-certificate.yaml      the edge leaf, whose issuerRef is required with no default
+chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
+chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook
 chart/templates/admin-bootstrap-token.yaml the one credential an operator reads out, in its own file
-example/values.yaml                   what an adopter commits in their own repository
-scripts/tests/                        the ladder gate, the render-check harness and the bootstrap gate
+example/values.yaml                        what an adopter commits in their own repository
+scripts/tests/                             the ladder gate, the render-check harness and the bootstrap gate
 ```
 
 ## Adopting this in your own installation
