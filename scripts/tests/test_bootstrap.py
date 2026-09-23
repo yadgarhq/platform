@@ -74,7 +74,11 @@ THE HOOK COUNT IS THIS STEP'S, NOT THE FINISHED LAYER'S, AND IT HAS ALREADY MOVE
 ONCE. Three hook Jobs render today, all `pre-install`, across three hook-weight
 positions: the two RBAC triples sharing the lowest, the preflight Job alone above
 them, and the two bootstrap Jobs sharing the highest. The post-install Envoy
-Gateway probe arrives in a later pull request and moves both numbers again.
+Gateway probe arrives in a later pull request and moves both numbers again — AND IT
+WILL REDDEN THIS GATE ON ITS PHASE BEFORE IT MOVES ANY NUMBER, because
+`hook_failures` accepts `pre-install,pre-upgrade` and nothing else. That is not an
+oversight to route around: the phase set is a claim about what this chart renders,
+and widening it is the change that step makes deliberately rather than discovers.
 
 WHICH GATES HERE ARE SCOPED TO THE BOOTSTRAP AND WHICH ARE CHART-WIDE, because the
 chart now renders a second hook Job with a triple of its own and the distinction

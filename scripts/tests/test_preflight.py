@@ -74,6 +74,13 @@ RELEASE_NAMESPACE = "yadgar"
 # R1. Every `create` toggle is false, so every probe resolves false, so no Job.
 EXPECTED_PROBES_AT_R1 = 0
 
+# AND A SECOND ZERO, WHICH MEANS SOMETHING ELSE. The line above counts PROBES; this
+# one counts the OBJECTS the preflight renders. They are both zero at R1 and they
+# are not the same claim: step 5b adds a probe and the first may move while the
+# second must not. One literal serving both would let the object assertion follow a
+# probe count it has nothing to do with.
+EXPECTED_PREFLIGHT_OBJECTS_AT_R1 = 0
+
 # R2. cert-manager ALONE: `probes.keda` and `probes.mariadb` resolve false when
 # `platform` renders alone, because a subchart cannot read a sibling chart's key
 # and this chart renders neither a ScaledObject nor a MariaDB CR.
@@ -168,6 +175,10 @@ DIGEST_PINNED = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 # Two for cert-manager (the Issuer and the Certificate it signs), two for KEDA (the
 # Deployment and the ScaledObject that scales it), one for mariadb.
 EXPECTED_REQUEST_BODIES = 5
+
+# One container on the preflight Job, asserted so the image gate below cannot pass
+# by examining an empty list.
+EXPECTED_PREFLIGHT_CONTAINERS = 1
 
 # A heredoc body, so the generator-inside-`$( )` trap can be read off the script.
 HEREDOC = re.compile(r"<<JSON\s*\n(?P<body>.*?)\n\s*JSON\s*$", re.MULTILINE | re.DOTALL)
@@ -347,7 +358,7 @@ def test_the_defaults_render_no_preflight_object_at_all():
     """
     rendered = preflight_objects(defaults_render())
     assert rendered == [], (
-        f"expected {EXPECTED_PROBES_AT_R1} preflight objects at the chart's "
+        f"expected {EXPECTED_PREFLIGHT_OBJECTS_AT_R1} preflight objects at the chart's "
         f"defaults, found {len(rendered)}: "
         f"{sorted((document.get('kind'), name_of(document)) for document in rendered)}"
     )
@@ -1135,12 +1146,23 @@ def test_no_request_body_generates_anything_inside_itself(tmp_path):
 
 
 def test_the_preflight_image_is_pinned_by_digest():
-    """A tag is a MOVING pointer: the same string resolves to different bytes over time."""
+    """A tag is a MOVING pointer: the same string resolves to different bytes over time.
+
+    THE COUNT IS ASSERTED BEFORE THE PATTERN IS. A loop over `containers` examines
+    whatever it is handed, so a Job rendering none of them — or a second container
+    added beside the first — would walk through this green having checked nothing
+    or having checked only half. One container, one image, and the pattern on it.
+    """
     job = preflight_job(adopter_render())
     assert job is not None
     containers = (((job.get("spec") or {}).get("template") or {}).get("spec") or {})[
         "containers"
     ]
+    assert len(containers) == EXPECTED_PREFLIGHT_CONTAINERS, (
+        f"expected {EXPECTED_PREFLIGHT_CONTAINERS} container on the preflight Job, "
+        f"found {len(containers)}: "
+        f"{[container.get('name') for container in containers]}"
+    )
     for container in containers:
         assert DIGEST_PINNED.match(container["image"]), (
             f"the preflight image {container['image']!r} is not pinned by digest"
@@ -1274,7 +1296,7 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
             print(f"    {label}: {count}")
 
     assert census == {
-        "preflight objects at R1": EXPECTED_PROBES_AT_R1,
+        "preflight objects at R1": EXPECTED_PREFLIGHT_OBJECTS_AT_R1,
         "probes at R2": EXPECTED_PROBES_AT_R2,
         "denominator at R2": EXPECTED_PROBES_AT_R2,
         "probes at R3 (keda+mariadb true)": EXPECTED_PROBES_AT_R3_BOTH,
