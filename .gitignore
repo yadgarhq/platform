@@ -1,0 +1,17 @@
+# `helm package` output and fetched subcharts. Neither is produced by anything
+# here today — Argo renders the chart from git — but both land in the working
+# tree the moment somebody runs helm by hand.
+*.tgz
+chart/charts/
+
+# Python bytecode and pytest's cache, which `scripts/tests/` produces the first
+# time it runs. The suite is the only Python here and it is not packaged.
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Scratch PR-body files agents write while reviewing. Ignored here, in the
+# repository, instead of relying on a contributor's machine-wide git config —
+# that cover exists on one machine and reaches no other clone, no CI, and no
+# other contributor.
+.local-review/

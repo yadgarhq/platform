@@ -1,0 +1,199 @@
+# EVERY `create` TOGGLE IN THIS FILE IS FALSE, AND THAT IS THE CHART'S CONTRACT
+# RATHER THAN A STARTING POSITION (ADR-0752). The chart installs on a bare cluster
+# rendering nothing and requiring no CRD. An adopter turns the layer on in their
+# own values file; this organisation states every toggle explicitly false, so the
+# file documents what `yadgarhq/deploy` still owns (ADR-0569's "a value someone
+# can see").
+#
+# THE NAME IS `create` AND NOT `enabled`, deliberately. `enabled` reads as "this
+# feature is on"; these say "render this object". The cost of the distinction is
+# that `flip_enabled` in `yadgarhq/actions`' `scripts/d80_portability.py` — "Set
+# every key named `enabled`, at any depth, to false" — cannot see a key named
+# `create`, so the shared portability job does not cover these toggles. The plan
+# this chart is built from files that one-line change to the shared job
+# separately, and until it lands nothing may report the shared job as covering
+# them.
+
+# ── THE INTERNAL AUTHORITY ───────────────────────────────────────────────────
+# Three objects, one chain: a self-signed Issuer, the CA Certificate it signs,
+# and the CA Issuer that consumes that Certificate's Secret. Nothing else in this
+# estate signs a pod-to-pod leaf.
+internalCA:
+  create: false
+
+  # The self-signed Issuer at the root. It exists to sign exactly one object, the
+  # CA Certificate below.
+  selfSignedIssuerName: yadgar-internal-selfsign
+
+  # ONE NAME FOR THREE THINGS, and that is how the authority is wired: the CA
+  # Certificate, the Secret it writes and the CA Issuer that reads that Secret all
+  # carry this name. `certificates.issuerRef.name` below names the same string,
+  # which is what makes the leaves this authority's leaves.
+  name: yadgar-internal-ca
+  commonName: yadgar internal CA
+
+  # TEN YEARS, and the key NEVER ROTATES. `rotationPolicy: Never` is the load-
+  # bearing half: a CA whose key rotates invalidates every leaf it has issued, so
+  # the renewal of this Certificate must re-sign with the SAME key. The one-year
+  # `renewBefore` is the CA's own renewal window and is NOT a rung of the leaf
+  # ladder below — `scripts/tests/test_ladder.py` scopes the ladder to the
+  # Certificates that are not `isCA` for exactly that reason.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+
+# ── THE TEN INTERNAL LEAVES, AND THE LADDER ACROSS THEM ──────────────────────
+# READ THIS BEFORE ADDING OR MOVING A LEAF. The `renewBefore` values below are one
+# invariant, not ten settings. They are distinct and six hours apart so that AT
+# MOST ONE SERVICE RESTARTS PER RENEWAL INSTANT, and a leaf renews every
+# `duration - renewBefore`, so a distinct `renewBefore` is a distinct period as
+# well as a distinct instant and the separations grow rather than drifting back
+# together. The full argument is the header of
+# `deploy/infra/internal-tls/certificates.yaml`, which these values are moved
+# from unchanged.
+#
+# 720h IS DELIBERATELY ABSENT FROM THIS MAP. It belongs to the EDGE leaf under
+# `edgeTLS` below, which a different authority issues and a different toggle
+# renders. The ladder is shared across both: a step is free only if NEITHER uses
+# it. THE NEXT FREE STEP IS 786h, then 792h. Never a value already in use.
+#
+# THE LEAVES ARE A MAP KEYED BY NAME, CARRYING THE `renewBefore` EXPLICITLY, and
+# no template derives one. A range over a list of modules that computed the step
+# from an index would render the same ten objects today and destroy the invariant
+# the moment the list was reordered — the value would follow the position instead
+# of the leaf. The template ranges over THIS map, and every rung is a line
+# somebody wrote down.
+certificates:
+  create: false
+
+  # WHICH AUTHORITY SIGNS THEM. `internalCA.name` above renders the Issuer this
+  # names; the two agreeing is what makes the chain a chain.
+  issuerRef:
+    name: yadgar-internal-ca
+    kind: Issuer
+
+  # SHARED BY EVERY LEAF, because the ladder is the only thing that varies across
+  # them. Ninety days, an ECDSA P-256 key, and a key that DOES rotate on renewal —
+  # the opposite of the CA above, and correct for a leaf: nothing has been signed
+  # with it.
+  duration: 2160h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+
+  leaves:
+    # ── SERVING LEAVES ───────────────────────────────────────────────────────
+    # `clusterLocalNames: true` adds the three namespace-qualified forms of the
+    # common name to `dnsNames`. A client verifies the certificate against THE
+    # HOST IT ASKED FOR rather than the address it reached, and a caller in
+    # another namespace dials a longer form — a certificate naming only the short
+    # one is a silent trap for the first such caller.
+    #
+    # `server auth` AND NOT `client auth`. Under the one authority this
+    # deployment runs, the absence of the client bit is exactly what stops a
+    # stolen serving certificate being replayed as a client credential. Omitting
+    # the block entirely would be worse than widening it: cert-manager then issues
+    # a leaf with no extended key usage, which webpki accepts in BOTH directions.
+    iam-tls:
+      commonName: iam
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 726h
+    task-tls:
+      commonName: task
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 732h
+    iam-db-tls:
+      commonName: iam-db
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 738h
+    task-db-tls:
+      commonName: task-db
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 744h
+    project-db-tls:
+      commonName: project-db
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 768h
+    project-tls:
+      commonName: project
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 774h
+
+    # ── CLIENT LEAVES ────────────────────────────────────────────────────────
+    # A SEPARATE LEAF FOR THE CALLING DIRECTION, with a separate key and a
+    # `-caller` common name. `iam` reads `iam-tls` to answer and `iam-client-tls`
+    # to call, and naming both directions on one leaf would collapse the wall that
+    # replaces a second certificate authority. `clusterLocalNames` is absent:
+    # nothing dials a caller, so the name is the identity and no Service form
+    # belongs on it.
+    gateway-client-tls:
+      commonName: gateway-caller
+      usages: [client auth, digital signature]
+      renewBefore: 750h
+    iam-client-tls:
+      commonName: iam-caller
+      usages: [client auth, digital signature]
+      renewBefore: 756h
+    task-client-tls:
+      commonName: task-caller
+      usages: [client auth, digital signature]
+      renewBefore: 762h
+    project-client-tls:
+      commonName: project-caller
+      usages: [client auth, digital signature]
+      renewBefore: 780h
+
+# ── THE EDGE LEAF, WHICH THIS CHART DOES NOT ISSUE ───────────────────────────
+# A DIFFERENT AUTHORITY SIGNS THIS ONE, and that is the whole reason it sits
+# behind its own toggle. The internal CA above is self-signed, ten years, pods
+# only, and regenerates with the cluster. The authority that signs the edge is
+# held outside the installation — this organisation's is a hand-minted
+# ClusterIssuer whose key lives in 1Password (ADR-0580) — and an adopter names
+# their own. The two are never conflated.
+edgeTLS:
+  create: false
+  name: gateway-tls
+
+  # NO DEFAULT, AND `required` REFUSES THE RENDER WITHOUT IT. There is no honest
+  # default for somebody else's certificate authority: a guessed name renders an
+  # object that never goes Ready, and the operator meets a pending Certificate
+  # rather than a message naming the key they did not set. Both halves are
+  # refused, because `kind` decides whether the name is looked up in this
+  # namespace or cluster-wide.
+  #
+  #   edgeTLS:
+  #     issuerRef:
+  #       name: your-ca
+  #       kind: ClusterIssuer
+  issuerRef: {}
+
+  # THE STARTING VALUE, NOT A CONSTANT — change it to the host your edge answers
+  # on. It is a shipped default rather than a `required` because the plan this
+  # chart is built from names `edgeTLS.issuerRef` as the one thing an adopter must
+  # state, and because a stated choice somebody edits is how this estate ships
+  # every other default (`yadgarhq/config`'s README states the same rule).
+  commonName: gateway.yadgar.internal
+  dnsNames:
+    - gateway.yadgar.internal
+
+  # 720h IS THE EDGE'S RUNG and it is held out of the map above, not missing from
+  # it. Envoy Gateway reloads this leaf through xDS instead of restarting, so no
+  # pod exits on its renewal — ADR-0588's structural ground for keeping it off the
+  # ladder the internal leaves share while still leaving every value distinct.
+  duration: 2160h
+  renewBefore: 720h
+  usages: [server auth]
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always

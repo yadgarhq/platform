@@ -1,0 +1,41 @@
+# THE VALUES FILE AN ORGANISATION COMMITS BESIDE ITS OWN Application, in its OWN
+# GitOps repository. Copy it there and point the Application at it.
+#
+# THIS FILE IS THE WHOLE PLATFORM LAYER TURNED ON. The chart's own defaults render
+# NOTHING — every `create` toggle is false — so an install that copies nothing gets
+# no Certificate, no Issuer and needs no CRD. This file is the other end of that:
+# it is what an adopter with cert-manager installed actually sets.
+#
+# IT IS ALSO A TEST INPUT. `scripts/tests/test_ladder.py` and
+# `scripts/tests/test_render_checks.py` render the chart with this exact file,
+# because a values file nobody renders is a values file nobody has checked.
+#
+# ─── what you must change ────────────────────────────────────────────────────
+#
+# `edgeTLS.issuerRef` — BOTH KEYS. There is no default, and the render refuses
+# without them, naming the key. The edge certificate is signed by an authority
+# this chart does not own: this organisation's is a hand-minted ClusterIssuer
+# whose key is held outside the cluster, and yours is yours.
+#
+# `edgeTLS.commonName` and `edgeTLS.dnsNames` — the host your edge answers on.
+# The chart ships this organisation's as a stated starting value rather than
+# leaving it blank; it is not a constant.
+#
+# ─── what you should not change without reading first ────────────────────────
+#
+# The `renewBefore` values under `certificates.leaves` in the chart's own
+# `values.yaml`. They are one invariant across the whole set, not ten settings.
+# This file does not restate them, deliberately — it turns the set on and inherits
+# the ladder, which is what keeps one source for it.
+
+internalCA:
+  create: true
+
+certificates:
+  create: true
+
+edgeTLS:
+  create: true
+  issuerRef:
+    name: yadgar-dev-ca
+    kind: ClusterIssuer

@@ -1,0 +1,61 @@
+{{/*
+THE INTERNAL AUTHORITY, AS THREE OBJECTS THAT ONLY MEAN ANYTHING TOGETHER.
+
+  Issuer  yadgar-internal-selfsign   signs exactly one thing: the Certificate below
+  Certificate  yadgar-internal-ca    isCA, ten years, and its key NEVER rotates
+  Issuer  yadgar-internal-ca         reads that Certificate's Secret and signs the leaves
+
+NO `argocd.argoproj.io/sync-wave` ANNOTATION, and the source manifests this is
+moved from carry one. Under helm a wave means nothing, and under Argo every object
+in one Application at wave 0 is applied together. Nothing here needs ordering to
+be CORRECT: an Issuer whose Secret does not exist yet retries until it does. What
+a wave buys is TIME, and no measurement of this install exists to spend it on.
+
+THE THREE ARE ONE TOGGLE BECAUSE THEY ARE ONE CHAIN. A CA Issuer without its
+Certificate is an Issuer that never goes Ready, and a CA Certificate without the
+self-signed Issuer above it is a Certificate that is never signed. There is no
+useful install that has one and not the others.
+*/}}
+{{- if .Values.internalCA.create }}
+{{- $ca := .Values.internalCA }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $ca.selfSignedIssuerName }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $ca.name }}
+spec:
+  isCA: true
+  # THE SAME NAME AS THE CERTIFICATE, because the Issuer below reads this Secret
+  # by that name. The three agreeing is the whole of the chain.
+  secretName: {{ $ca.name }}
+  commonName: {{ $ca.commonName | quote }}
+  duration: {{ $ca.duration }}
+  renewBefore: {{ $ca.renewBefore }}
+  privateKey:
+    algorithm: {{ $ca.privateKey.algorithm }}
+    size: {{ $ca.privateKey.size }}
+    # `Never`. A CA that rotated its key on renewal would invalidate every leaf it
+    # has already issued.
+    rotationPolicy: {{ $ca.privateKey.rotationPolicy }}
+  usages:
+    - cert sign
+    - crl sign
+  issuerRef:
+    name: {{ $ca.selfSignedIssuerName }}
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $ca.name }}
+spec:
+  ca:
+    secretName: {{ $ca.name }}
+{{- end }}
