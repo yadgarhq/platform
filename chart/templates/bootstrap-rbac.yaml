@@ -1,0 +1,88 @@
+{{/*
+THE ONE IDENTITY BOTH BOOTSTRAP JOBS RUN AS, AND THE SMALLEST PERMISSION THAT CAN
+DO THE JOB. Moved from `yadgarhq/deploy`'s `infra/bootstrap/rbac.yaml`, whose
+header argues every line of it.
+
+`create` AND NOTHING ELSE. Not `get`, not `list`, not `update`, not `patch`, not
+`delete`. ADR-0750's property 4 said `get` and `create`; ADR-0753 NARROWED it to
+`create` alone, because the precedent grants `create` alone and is sufficient. Each
+consequence is a property this design depends on rather than a nicety:
+
+  - It CANNOT read a credential back. A compromised bootstrap pod learns nothing
+    about the estate's existing secrets, only about the ones it minted in its own
+    process and then discarded.
+  - It CANNOT rotate one. The idempotence ADR-0750 property 1 calls load-bearing is
+    therefore enforced by the API SERVER rather than by the script remembering to
+    check first. A `create` against a name that exists answers 409 AlreadyExists,
+    which is the only "already done" signal either Job needs and the only one it
+    can get.
+  - It CANNOT delete one, so a pruned or mis-synced Application cannot take the
+    estate's credentials with it.
+
+`resourceNames` IS NOT AVAILABLE ON `create`, and that is a Kubernetes rule rather
+than an oversight here: the authorizer runs before the request body is decoded, so
+the name is not yet known. The scope is narrowed by the Role being NAMESPACED
+instead — this identity can create Secrets in the release namespace and nowhere
+else. `scripts/tests/test_bootstrap.py`'s `rbac_failures` asserts the absence of a
+ClusterRole for that reason.
+
+ONE TRIPLE FOR TWO JOBS, not one each. A second ServiceAccount would be an
+identical Role under a different name, reviewed twice for the same guarantee —
+`resourceNames` cannot narrow either of them, so any identity with this permission
+can create any Secret in the namespace, both Jobs' names included. The preflight
+Job a later step adds gets its OWN triple, because its Role is a different verb set
+on a different kind.
+
+THE TRIPLE IS A HOOK, AT A WEIGHT BELOW THE JOBS IT SERVES. Helm applies plain
+resources AFTER the pre-install hooks have run, so a ServiceAccount rendered as an
+ordinary object DOES NOT EXIST when a `pre-install` Job tries to use it: the Job is
+admitted against an identity that is not there, and the bootstrap fails on a
+healthy cluster for a reason that has nothing to do with this chart. A
+`hook-delete-policy` that removed this triple between phases would break the Jobs
+that follow it, so it keeps `before-hook-creation` and nothing else.
+
+THE WEIGHTS ARE QUOTED. Annotations are `map[string]string`, so an unquoted integer
+is a manifest that does not decode — and the failure arrives at apply time, not at
+render time. The gate asserts the rendered type for that reason.
+*/}}
+{{- if .Values.bootstrap.create }}
+{{- $bootstrap := .Values.bootstrap }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $bootstrap.serviceAccountName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $bootstrap.serviceAccountName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $bootstrap.serviceAccountName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $bootstrap.serviceAccountName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $bootstrap.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -6,9 +6,10 @@
 # no Certificate, no Issuer and needs no CRD. This file is the other end of that:
 # it is what an adopter with cert-manager installed actually sets.
 #
-# IT IS ALSO A TEST INPUT. `scripts/tests/test_ladder.py` and
-# `scripts/tests/test_render_checks.py` render the chart with this exact file,
-# because a values file nobody renders is a values file nobody has checked.
+# IT IS ALSO A TEST INPUT. `scripts/tests/test_ladder.py`,
+# `scripts/tests/test_render_checks.py` and `scripts/tests/test_bootstrap.py`
+# render the chart with this exact file, because a values file nobody renders is
+# a values file nobody has checked.
 #
 # ─── what you must change ────────────────────────────────────────────────────
 #
@@ -27,6 +28,12 @@
 # `values.yaml`. They are one invariant across the whole set, not ten settings.
 # This file does not restate them, deliberately — it turns the set on and inherits
 # the ladder, which is what keeps one source for it.
+#
+# ─── what you must do AFTER the first install ────────────────────────────────
+#
+# EXPORT THE FOUR SECRETS THE BOOTSTRAP JOBS MINT. Nothing tracks them, so nothing
+# backs them up either, and a cluster deleted without an export loses the values
+# for good. `README.md` carries the command beside the install command.
 
 internalCA:
   create: true
@@ -39,3 +46,14 @@ edgeTLS:
   issuerRef:
     name: yadgar-dev-ca
     kind: ClusterIssuer
+
+# THE BOOTSTRAP JOBS. Two pre-install hooks mint the four credentials nothing
+# outside the installation can supply, and neither Helm nor Argo tracks the
+# Secrets they create — so an uninstall or a prune leaves them standing (ADR-0750).
+# Turn this OFF if your own secret manager populates those four names instead;
+# every consumer takes a file path and does not care how the file arrived.
+#
+# EXPORT WHAT THEY MINT. A generated credential nobody exported is a credential
+# lost with the cluster. README.md carries the command beside the install command.
+bootstrap:
+  create: true

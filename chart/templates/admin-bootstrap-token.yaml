@@ -1,0 +1,138 @@
+{{/*
+THE ADMINISTRATIVE BOOTSTRAP TOKEN — the credential that lets the FIRST
+administrator exist before any administrator exists to create one (ADR-0492).
+
+WHY THIS IS NOT `templates/bootstrap-secrets.yaml`. That file mints three
+MACHINE-ONLY credentials, in its own words "never read by a person". This one is
+the opposite kind of exception. It is NOT data-bearing — losing it costs a
+regeneration, never a row — and it is NOT machine-only either: an operator MUST be
+able to read it out, at least once, to hand it to the first administrator. ADR-0517
+names that third shape: "a human-facing credential, meaning the first admin
+password and anything an operator must paste elsewhere, is also generated but MUST
+be retrievable at least once through a documented command." Keeping it in its own
+file keeps the three-way split legible instead of merging two different contracts
+into one script.
+
+ITS NAME IS A VALUE, AND THE OTHER THREE ARE NOT. `bootstrap.adminToken.secretName`
+exists because the gateway MOUNTS this Secret by a name of its own
+(`gateway.adminBootstrap.tokenSecret`), and the parent chart refuses an install
+where the two disagree — so the Job would otherwise mint a name nothing reads. That
+agreement check belongs to the parent, at a later step; what this chart owes it is
+a name that actually follows the value, which `test_bootstrap.py` asserts by
+overriding it.
+
+THE MECHANISM IS `templates/bootstrap-secrets.yaml`'S, UNCHANGED. Same idempotent
+POST: no read-then-write, 201 on a first run, 409 treated as success on every run
+after it, anything else stops the Job (ADR-0750 property 1). Same generation shape:
+33 random bytes from `/dev/urandom`, base64, no trailing newline. Same identity,
+reused rather than duplicated — `templates/bootstrap-rbac.yaml`'s Role grants
+`create` on secrets and nothing else, and a second ServiceAccount would be an
+identical Role under a different name, because `resourceNames` cannot scope a
+`create`.
+
+THE SAME HOOK WEIGHT AS `bootstrap-secrets`, because the two mint disjoint Secret
+names and nothing orders one against the other. Both sit above the RBAC triple,
+which is what makes their ServiceAccount exist when they are admitted.
+
+A RECREATE MINTS A NEW ONE, AND NO EXISTENCE CHECK CAN DISCRIMINATE. On a rebuilt
+cluster the old token is gone with the cluster, this Job runs again, mints a
+DIFFERENT 264 bits, and the Secret comes back holding a value that agrees with
+nothing an operator wrote down. The Secret is never ABSENT — it is present and
+WRONG the moment the old one is discarded. Retrieve it again after every recreate;
+do not reuse a value copied from before one. The retrieval command is in
+`README.md`, beside the install command, and `test_bootstrap.py` asserts it is
+there (ADR-0750 property 3).
+*/}}
+{{- if .Values.bootstrap.create }}
+{{- $bootstrap := .Values.bootstrap }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: admin-bootstrap-token
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  # Same rationale as `bootstrap-secrets`: retry a rescheduled pod or a briefly
+  # unreachable API server, not a 403, which does not become a 201 on the fourth
+  # try. Going Failed here should be loud — it means the estate has no bootstrap
+  # credential and, until an administrator exists another way, ADR-0492's whole
+  # recovery path is unreachable.
+  backoffLimit: {{ $bootstrap.backoffLimit }}
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: admin-bootstrap-token }
+    spec:
+      serviceAccountName: {{ $bootstrap.serviceAccountName }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 100
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          # Same image, same reasoning as `bootstrap-secrets`: curl and a shell
+          # are enough for one POST, and `registry.k8s.io/kubectl` has no shell to
+          # run a script with at all.
+          image: {{ $bootstrap.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            # `$(...)` below is the SHELL's, not Kubernetes' — see
+            # `bootstrap-secrets`' identical note. This container declares no
+            # environment, so every substitution reaches /bin/sh untouched.
+            - |
+              set -eu
+
+              api="https://kubernetes.default.svc"
+              sa="/var/run/secrets/kubernetes.io/serviceaccount"
+              ns="$(cat "$sa/namespace")"
+              token_auth="$(cat "$sa/token")"
+
+              # POST and classify the answer, identical to `bootstrap-secrets`:
+              # 201 is a first run, 409 is every run after it, and anything else
+              # is a failure that stops the Job rather than being read as "already
+              # exists". A 403 from a mis-bound Role must not be swallowed — that
+              # reading reports a healthy bootstrap while the estate has zero
+              # administrators and no way to create one.
+              create() {
+                code="$(curl --silent --show-error \
+                  --cacert "$sa/ca.crt" \
+                  --header "Authorization: Bearer $token_auth" \
+                  --header "Content-Type: application/json" \
+                  --data-binary @- \
+                  --output /dev/null --write-out '%{http_code}' \
+                  "$api/api/v1/namespaces/$ns/secrets")"
+                case "$code" in
+                  201) echo "$1: created" ;;
+                  409) echo "$1: already exists, left untouched" ;;
+                  *) echo "$1: refused with HTTP $code" >&2; exit 1 ;;
+                esac
+              }
+
+              # 33 random bytes as base64, no trailing newline — the same shape
+              # `bootstrap-secrets`' `password()` uses, for the same reason: 33
+              # rather than 32 bytes so the base64 carries no `=` padding for an
+              # operator to trim by hand when they paste it. The generated value
+              # never enters this container's process table — it is piped straight
+              # into the request body on stdin.
+              admin_token() { head -c 33 /dev/urandom | base64 | tr -d '\n'; }
+
+              # `stringData`, not `data`: the API server stores exactly the bytes
+              # given, so what lands is the token and nothing appended.
+              create {{ $bootstrap.adminToken.secretName }} <<JSON
+              {"apiVersion":"v1","kind":"Secret","type":"Opaque",
+               "metadata":{"name":"{{ $bootstrap.adminToken.secretName }}"},
+               "stringData":{"token":"$(admin_token)"}}
+              JSON
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+{{- end }}
