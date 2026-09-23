@@ -45,6 +45,7 @@ Run: python3 -m pytest scripts/tests/ -q
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -169,6 +170,52 @@ PROBED_EQUALITY = re.compile(r'^\[ "\$probed" -eq "\$EXPECTED_PROBES" \]', re.MU
 MARIADB_DENIED_BY = "deniedBy"
 MARIADB_VALIDATION = "validationMessage"
 MARIADB_UNREACHABLE = "unreachableWebhook"
+
+# The shell variable each reading is assigned to in the rendered script. The gates
+# below read the needle OUT OF THE RENDER rather than out of `values.yaml`, so what
+# they check is what `grep -qF` is actually handed at run time — after `squote` and
+# after the template.
+MARIADB_SHELL_VARIABLE = {
+    MARIADB_DENIED_BY: "MARIADB_DENIED_BY",
+    MARIADB_VALIDATION: "MARIADB_VALIDATION",
+    MARIADB_UNREACHABLE: "MARIADB_UNREACHABLE",
+}
+
+# THE ORDER THE THREE ARMS ARE READ IN, which the template and `values.yaml` both
+# state and which nothing asserted until this list existed. The unreachable reading
+# is FIRST, so an absent operator is named as an absent operator; `deniedBy` second,
+# which is also what keeps `denied the request` from ever meeting another webhook's
+# refusal; `validationMessage` third, whose message presumes the arm above it passed.
+MARIADB_ARM_ORDER = [MARIADB_UNREACHABLE, MARIADB_DENIED_BY, MARIADB_VALIDATION]
+
+# ── TWO MEASURED API-SERVER MESSAGES, AND WHAT IS UNDER TEST IS THE ENCODING ──
+# The message TEXT is transcribed from the denial recorded beside
+# `preflight.mariadb.deniedBy` in `chart/values.yaml` and from the API server's own
+# unreachable-webhook wording. Neither is the assertion. THE ASSERTION IS THE
+# ENCODING: `metav1.Status.Message` is a JSON string, so the `"` the API server
+# writes with `%q` reaches `curl` as `\"`, and a needle carrying a literal `"`
+# cannot match one byte of it.
+MARIADB_DENIAL_MESSAGE = (
+    'admission webhook "vmariadb-v1alpha1.kb.io" denied the request: '
+    "spec.storage: Invalid value: {}: either storage size or "
+    "volumeClaimTemplate must be provided"
+)
+MARIADB_UNREACHABLE_MESSAGE = (
+    'Internal error occurred: failed calling webhook "vmariadb-v1alpha1.kb.io": '
+    "failed to call webhook: Post "
+    '"https://mariadb-operator-webhook.yadgar.svc:443/validate-k8s-mariadb-com-v1alpha1-mariadb?timeout=10s": '
+    "dial tcp 10.96.0.1:443: connect: connection refused"
+)
+
+# Which body each reading has to be able to match. `deniedBy` and
+# `validationMessage` are two halves of ONE message and share it; the unreachable
+# reading is the other body entirely, and a probe whose readings were checked
+# against the wrong one would prove nothing about either.
+MARIADB_MESSAGE_FOR = {
+    MARIADB_DENIED_BY: MARIADB_DENIAL_MESSAGE,
+    MARIADB_VALIDATION: MARIADB_DENIAL_MESSAGE,
+    MARIADB_UNREACHABLE: MARIADB_UNREACHABLE_MESSAGE,
+}
 
 DIGEST_PINNED = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
@@ -1090,7 +1137,7 @@ def chart_whose_unreachable_arm_names_no_operator(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     job = copy / "templates" / "preflight.yaml"
     text = job.read_text()
-    line = "preflight: the CRDs are registered and the webhook is configured, so mariadb-operator's CONTROLLER is not running."
+    line = "preflight: mariadb-operator configures a webhook on this kind, so its CONTROLLER is not running; the body below names the webhook that was unreachable."
     assert line in text, "the unreachable refusal's wording moved; this red case is now testing nothing"
     job.write_text(text.replace(line, "preflight: the message did not match.", 1))
     return copy
@@ -1109,6 +1156,235 @@ def test_an_unreachable_arm_that_names_no_operator_reddens_the_mariadb_gate(tmp_
         "string comparison"
     )
     assert "does not refuse on it by name" in message, message
+
+
+# ── CAN EACH MARIADB STRING MATCH A REAL BODY, AND IN WHAT ORDER ARE THEY READ ─
+
+
+def mariadb_needle(script: str, reading: str) -> str:
+    """The value `grep -qF` is handed for `reading` at run time. PURE.
+
+    READ OUT OF THE RENDER, NOT OUT OF `values.yaml`, and that is the whole point
+    of this helper. `mariadb_failures` above asks whether the value REACHES the
+    script; these gates ask what the script then DOES with it, so they have to read
+    the needle after `squote` and after the template rather than the key it came
+    from. It also removes the trap the red cases below would otherwise walk into: a
+    helper reading `CHART` while the case renders a mutated copy reads the shipped
+    value, passes, and asserts nothing.
+    """
+    variable = MARIADB_SHELL_VARIABLE[reading]
+    match = re.search(r"^\s*" + variable + r"='(?P<needle>[^']*)'\s*$", script, re.MULTILINE)
+    assert match, (
+        f"the rendered script assigns no {variable}, so this gate has no needle to "
+        f"check and would pass having examined nothing"
+    )
+    return match.group("needle")
+
+
+def api_server_body(message: str) -> str:
+    """The bytes `curl` writes to `$body` when the API server refuses with `message`. PURE.
+
+    NOT A STRING THIS SUITE CHOSE. A refused admission is answered with a
+    `metav1.Status`, and `message` is one JSON STRING FIELD of it — so what the
+    probe greps is the JSON ENCODING of the message and never the message.
+    `json.dumps` applies exactly that encoding, which is the one step the whole gate
+    turns on: a `"` in the message becomes `\\"` in the body.
+    """
+    return json.dumps(
+        {
+            "kind": "Status",
+            "apiVersion": "v1",
+            "metadata": {},
+            "status": "Failure",
+            "message": message,
+            "reason": "BadRequest",
+            "code": 400,
+        },
+        separators=(",", ":"),
+    )
+
+
+def mariadb_escaping_failures(script: str) -> list[str]:
+    """Whether each mariadb needle CAN MATCH the body it is greped against. PURE.
+
+    THE GAP THIS CLOSES SHIPPED A REAL DEFECT ON THIS BRANCH. `mariadb_failures`
+    asserts a string REACHES the script; nothing asserted it could match a body.
+    `deniedBy` carried `admission webhook "vmariadb-v1alpha1.kb.io" denied the
+    request`, which is how `kubectl` prints the message and not what is on the
+    wire: the API server builds that prefix with `%q` into
+    `metav1.Status.Message`, a JSON string, so the quotes arrive as `\\"` and
+    `grep -F` for a literal `"` matches nothing. The probe therefore MISSED ON A
+    HEALTHY CLUSTER — the Job exits 1, `backoffLimit: 0` forbids the retry, and
+    the `pre-install` hook aborts the install naming a string comparison.
+
+    So the check is the probe's own operation, run in Python: `grep -qF "$X"
+    "$body"` is a fixed-string search for the needle in the body's bytes, which is
+    `in`. The red case is a needle carrying an unescaped `"`.
+    """
+    failures = []
+    for reading in MARIADB_ARM_ORDER:
+        needle = mariadb_needle(script, reading)
+        body = api_server_body(MARIADB_MESSAGE_FOR[reading])
+        if needle not in body:
+            failures.append(
+                f"`preflight.mariadb.{reading}` reaches the script as {needle!r} and "
+                f"cannot match one byte of the body the API server writes for it, "
+                f"{body}. `grep -qF` searches the RAW response, where a `\"` in the "
+                f"message is `\\\"`, so a needle carrying a literal `\"` misses on a "
+                f"HEALTHY cluster and aborts the install naming a string comparison"
+            )
+    return failures
+
+
+def test_every_mariadb_string_can_match_an_api_server_body(tmp_path):
+    """R3 with `probes.mariadb` true: the three needles, against real response bodies."""
+    values = overrides(tmp_path / "mariadb-on.yaml", "preflight:\n  probes:\n    mariadb: true\n")
+    script = preflight_script(adopter_render(CHART, "-f", str(values)))
+    failures = mariadb_escaping_failures(script)
+    assert failures == [], "\n".join(failures)
+
+
+def chart_with_the_webhooks_name_back_in_denied_by(destination: Path) -> Path:
+    """The escaping gate's red case: the value this branch shipped, restored.
+
+    NOT AN INVENTED MUTATION. This is the exact string the branch carried and the
+    exact defect it caused, so the case is at once the permanent red case and the
+    demonstration against the real bug.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    values = copy / "values.yaml"
+    text = values.read_text()
+    line = "    deniedBy: denied the request\n"
+    assert line in text, (
+        "`preflight.mariadb.deniedBy` no longer reads `denied the request`; this red "
+        "case is now testing nothing"
+    )
+    quoted = "    deniedBy: 'admission webhook \"vmariadb-v1alpha1.kb.io\" denied the request'\n"
+    values.write_text(text.replace(line, quoted, 1))
+    return copy
+
+
+def test_an_unescaped_quote_in_a_mariadb_string_reddens_the_escaping_gate(tmp_path):
+    """The webhook's name put back in `deniedBy`: it renders, and it can never match."""
+    values = overrides(tmp_path / "mariadb-on.yaml", "preflight:\n  probes:\n    mariadb: true\n")
+    script = preflight_script(
+        adopter_render(chart_with_the_webhooks_name_back_in_denied_by(tmp_path), "-f", str(values))
+    )
+    failures = mariadb_escaping_failures(script)
+    message = "\n".join(failures)
+    assert failures, (
+        "`deniedBy` carried an unescaped `\"` and the escaping gate passed, so a "
+        "needle that cannot match a single byte of a real body would ship again"
+    )
+    assert MARIADB_DENIED_BY in message, message
+
+
+def mariadb_arm_position(script: str, reading: str) -> int:
+    """Where `reading`'s arm stands in the rendered script. PURE."""
+    variable = MARIADB_SHELL_VARIABLE[reading]
+    match = re.search(r'grep -qF "\$' + variable + r'" "\$body"', script)
+    assert match, (
+        f"the rendered script greps no {variable}, so there is no arm to place and "
+        f"this gate would pass having examined nothing"
+    )
+    return match.start()
+
+
+def mariadb_order_failures(script: str) -> list[str]:
+    """Whether the three arms are read in the order the chart documents. PURE.
+
+    THE ORDER IS LOAD-BEARING AND WAS ASSERTED BY NOTHING. The reviewer moved the
+    unreachable block BELOW the `deniedBy` block: 65 passed and `sh -n` was clean,
+    because `mariadb_failures` searches 500 characters after the FIRST use of
+    `"$MARIADB_UNREACHABLE"` and that window travels with the block.
+
+    Against an unreachable-webhook body the documented order answers "the API
+    server could not reach the admission webhook … its CONTROLLER is not running".
+    The swapped order answers "the rejection did not come from mariadb-operator's
+    admission webhook" — a string comparison standing where the operator's absence
+    belongs, which is the plan's own red case landing silently.
+
+    AND THE ORDER IS WHAT MAKES `denied the request` SAFE, not only what makes the
+    message good. Now that the needle no longer carries the webhook's name it would
+    also match another webhook's refusal; it never meets one, because the
+    unreachable reading is read first and the validation reading follows.
+    """
+    failures = []
+    placed = [(reading, mariadb_arm_position(script, reading)) for reading in MARIADB_ARM_ORDER]
+    for (earlier, first), (later, second) in zip(placed, placed[1:]):
+        if first >= second:
+            failures.append(
+                f"the mariadb probe reads `preflight.mariadb.{later}` at character "
+                f"{second} and `preflight.mariadb.{earlier}` at {first}, so {earlier} "
+                f"is no longer read first. The order is what decides which failure a "
+                f"body is reported AS, and every arm below one of these presumes the "
+                f"arm above it did not fire"
+            )
+    return failures
+
+
+def test_the_mariadb_arms_read_the_unreachable_webhook_first(tmp_path):
+    """R3 with `probes.mariadb` true: unreachable, then the refusal, then the validation."""
+    values = overrides(tmp_path / "mariadb-on.yaml", "preflight:\n  probes:\n    mariadb: true\n")
+    script = preflight_script(adopter_render(CHART, "-f", str(values)))
+    failures = mariadb_order_failures(script)
+    assert failures == [], "\n".join(failures)
+
+
+def arm_block(text: str, variable: str) -> str:
+    """One `if … grep -qF "$VARIABLE" … fi` arm, whole, out of the template."""
+    match = re.search(
+        r"^[ ]*if (?:! )?grep -qF \"\$" + variable + r"\" \"\$body\"; then\n.*?^[ ]*fi\n",
+        text,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert match, (
+        f"the {variable} arm is no longer an `if grep -qF` block; this red case is "
+        f"now testing nothing"
+    )
+    return match.group(0)
+
+
+def chart_with_the_mariadb_arms_swapped(destination: Path) -> Path:
+    """The ordering gate's red case: the unreachable arm moved BELOW the refusal.
+
+    The reviewer's own mutation, committed as a case. It leaves the script valid —
+    `sh -n` is clean and every other gate here stays green — and changes only which
+    failure an unreachable-webhook body is reported as.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "preflight.yaml"
+    text = job.read_text()
+    unreachable = arm_block(text, "MARIADB_UNREACHABLE")
+    denied = arm_block(text, "MARIADB_DENIED_BY")
+    assert text.index(unreachable) < text.index(denied), (
+        "the unreachable arm already stands below the refusal in the template, so "
+        "this red case would restore the documented order rather than break it"
+    )
+    placeholder = "@@SWAP@@\n"
+    assert placeholder not in text
+    swapped = text.replace(unreachable, placeholder, 1)
+    swapped = swapped.replace(denied, unreachable, 1)
+    swapped = swapped.replace(placeholder, denied, 1)
+    job.write_text(swapped)
+    return copy
+
+
+def test_swapping_the_mariadb_arms_reddens_the_ordering_gate(tmp_path):
+    values = overrides(tmp_path / "mariadb-on.yaml", "preflight:\n  probes:\n    mariadb: true\n")
+    script = preflight_script(
+        adopter_render(chart_with_the_mariadb_arms_swapped(tmp_path), "-f", str(values))
+    )
+    failures = mariadb_order_failures(script)
+    message = "\n".join(failures)
+    assert failures, (
+        "the unreachable-webhook arm was moved below the refusal and the ordering "
+        "gate passed, so an absent mariadb-operator would again be reported as a "
+        "rejection that came from the wrong place"
+    )
+    assert MARIADB_UNREACHABLE in message, message
 
 
 # ── THE SCRIPT'S OWN SHAPE ───────────────────────────────────────────────────

@@ -354,6 +354,25 @@ spec:
               #                         API server performs with no operator at
               #                         all — keying on that one would pass on
               #                         exactly the cluster this probe is for.
+              #
+              # THE ORDER OF THE THREE READINGS IS LOAD-BEARING, NOT COSMETIC, and
+              # nothing about a block's position falls out of reading the block. So
+              # it is ASSERTED, by
+              # `test_the_mariadb_arms_read_the_unreachable_webhook_first`. Against
+              # an unreachable-webhook body the order below names the operator; with
+              # $MARIADB_DENIED_BY moved above it the SAME body answers "the
+              # rejection did not come from mariadb-operator's admission webhook",
+              # which is a string comparison standing where "mariadb-operator is not
+              # running" belongs. The reviewer made that swap and the suite stayed
+              # green at 65, which is why the assertion now exists.
+              #
+              # AND EVERY ONE OF THE THREE HAS TO BE A STRING THAT CAN MATCH A RAW
+              # BODY. `metav1.Status.Message` is a JSON string, so a `"` in the
+              # message is `\"` on the wire and `grep -F` for a literal `"` matches
+              # nothing at all. `values.yaml` records why the webhook's NAME is
+              # therefore not part of $MARIADB_DENIED_BY, and
+              # `test_every_mariadb_string_can_match_an_api_server_body` checks all
+              # three against a body built the way the API server builds one.
               MARIADB_UNREACHABLE={{ $preflight.mariadb.unreachableWebhook | squote }}
               MARIADB_DENIED_BY={{ $preflight.mariadb.deniedBy | squote }}
               MARIADB_VALIDATION={{ $preflight.mariadb.validationMessage | squote }}
@@ -378,9 +397,20 @@ spec:
                   return 1
                 fi
 
+                # THE MATCH IS ON THE API SERVER'S WORDING AND NOT ON THE WEBHOOK'S
+                # NAME, so a DIFFERENT failing webhook that intercepts mariadbs — a
+                # Kyverno or an OPA policy at `failurePolicy: Fail` — lands here
+                # too. Requiring the name would narrow it, and the name is recorded
+                # in prose rather than captured off an unreachable-webhook body:
+                # a wrong or renamed one would stop this arm firing and send a dead
+                # operator into the reading below, which is the exact misreport this
+                # order exists to prevent. So the message states the likely cause
+                # and PRINTS THE BODY, which names the webhook the API server could
+                # not reach.
                 if grep -qF "$MARIADB_UNREACHABLE" "$body"; then
-                  echo "preflight: the API server could not reach mariadb-operator's admission webhook." >&2
-                  echo "preflight: the CRDs are registered and the webhook is configured, so mariadb-operator's CONTROLLER is not running." >&2
+                  echo "preflight: the API server could not reach the admission webhook that intercepted this MariaDB." >&2
+                  echo "preflight: mariadb-operator configures a webhook on this kind, so its CONTROLLER is not running; the body below names the webhook that was unreachable." >&2
+                  cat "$body" >&2
                   return 1
                 fi
 

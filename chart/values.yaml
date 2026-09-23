@@ -419,10 +419,32 @@ preflight:
     #     spec.storage: Invalid value: {}: either storage size or
     #     volumeClaimTemplate must be provided
     #
-    # `denied the request` is the load-bearing half rather than the webhook's
-    # name: the API server's own unreachable-webhook message ALSO names
+    # AND THE WEBHOOK'S NAME IS NOT IN THE VALUE, for two reasons that agree.
+    #
+    # IT COULD NOT MATCH. The lines above are how `kubectl` PRINTS that message,
+    # and that is not what is on the wire. The API server builds the prefix with
+    # `%q` and puts the result in `metav1.Status.Message`, which is a JSON string,
+    # so every `"` reaches `curl` as `\"`. This probe greps the RAW body, and
+    # `grep -F` for a literal `"` cannot match `\"`. A value carrying the quoted
+    # name therefore misses on a HEALTHY cluster: the Job exits 1, `backoffLimit:
+    # 0` forbids a retry, and the `pre-install` hook aborts the install naming a
+    # string comparison — which is the fail-for-the-wrong-reason class this whole
+    # probe exists to prevent. That value shipped once.
+    # `test_every_mariadb_string_can_match_an_api_server_body` is the gate that
+    # would have caught it, and it checks each string against a body built the way
+    # the API server builds one rather than against the script.
+    #
+    # AND IT CARRIES NOTHING ANYWAY. `denied the request` is the load-bearing
+    # half: the API server's own unreachable-webhook message ALSO names
     # `vmariadb-v1alpha1.kb.io`, so the name alone discriminates nothing.
-    deniedBy: 'admission webhook "vmariadb-v1alpha1.kb.io" denied the request'
+    #
+    # WHAT DISCRIMINATES IS THE ORDER. `denied the request` on its own would also
+    # match a refusal from some other webhook, and it never sees one, because the
+    # unreachable reading is checked FIRST and the validation reading follows.
+    # That ordering is load-bearing for this value's correctness rather than only
+    # for the message a failure prints, and
+    # `test_the_mariadb_arms_read_the_unreachable_webhook_first` asserts it.
+    deniedBy: denied the request
 
     # THE OPERATOR'S OWN VALIDATION TEXT, AND NOT THE CRD SCHEMA'S. A second
     # refusal exists at this version — `An odd number of MariaDB instances
