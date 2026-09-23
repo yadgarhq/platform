@@ -12,3 +12,45 @@ version: 0.1.0
 home: https://github.com/yadgarhq/platform
 sources:
   - https://github.com/yadgarhq/platform
+
+# THE ESTATE'S FIRST NON-YADGARHQ CHART DEPENDENCY. The broker is ADOPTED as the
+# upstream chart rather than forked or copied into templates here: `yadgarhq/deploy`
+# already runs exactly this chart at exactly this version, through an Argo
+# Application whose `source` is this repository, and re-typing its StatefulSet into
+# this chart would be a fork nobody signed up to maintain. This chart renders the
+# `nats-ingress` NetworkPolicy itself, because that is this estate's object and not
+# the upstream chart's.
+#
+# `condition: nats.create` IS LOAD-BEARING. A declared dependency renders
+# UNCONDITIONALLY unless a `condition` names a values key that is false — so
+# without it the parent's default render would grow by the whole NATS release the
+# day this chart is added, on every install, for every adopter. `nats.create` is
+# false in `chart/values.yaml`, so `helm template` of this chart at its own
+# defaults emits nothing from the broker at all.
+#
+# NOTHING IS VENDORED INTO GIT (ADR-0725). `chart/charts/` stays ignored and the
+# release pipeline resolves this before it packages or renders anything. The
+# measurement behind that rule is that a STALE vendored subchart is silent on every
+# tool this estate runs: `helm package`, `helm lint --strict` and `helm template`
+# all exit 0 on a chart whose `Chart.yaml` pins one version while `charts/` holds
+# another. Run `helm dependency update chart` after cloning, or every helm command
+# here refuses with "found in Chart.yaml, but missing in charts/ directory".
+#
+# WHAT `helm package -u` PRODUCES IS PROVED RATHER THAN ASSUMED.
+# `scripts/tests/test_shared_infrastructure.py`'s
+# `test_the_package_carries_every_declared_subchart` packages this chart and
+# asserts `platform/charts/nats/Chart.yaml` is inside the tarball, because
+# `helm install` does NOT resolve dependencies — an adopter with no helm
+# repositories configured gets a broker only if the published artifact carries one.
+#
+# LICENCE, AND AN OBSERVATION RATHER THAN A CLAIM. The upstream project is
+# Apache-2.0, and its PACKAGED chart tree carries no LICENSE and no NOTICE file —
+# measured 2026-09-23 over the 54 members of `nats-2.14.6.tgz`. Nothing is
+# redistributed from this repository, since nothing is vendored here; the
+# obligation, if there is one, attaches to the published `platform` artifact that
+# the release pipeline builds, and it is filed rather than answered here.
+dependencies:
+  - name: nats
+    version: 2.14.6
+    repository: https://nats-io.github.io/k8s/helm/charts
+    condition: nats.create

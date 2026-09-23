@@ -57,11 +57,25 @@ REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
-# The group the chart's render check demands before ANY object renders once a
-# `create` toggle is true. Every render below that turns one on has to pass it, or
-# `render-checks.yaml`'s `fail` aborts the whole render first and the case reads a
-# refusal that has nothing to do with the preflight.
-CERT_MANAGER_API = "cert-manager.io/v1"
+# ── EVERY GROUP THE CHART'S RENDER CHECKS ASK FOR ────────────────────────────
+# ONE ENTRY PER CHECK THE CHART DECLARES, AND A LITERAL RATHER THAN A LIST READ
+# OFF THE CHART. `fail` aborts the WHOLE render at the FIRST failing check and
+# names only that one, so a render here that omits a group is refused for THAT
+# check's reason before the objects this suite counts exist at all — which is how
+# every case in this file went red the day the second check landed. Deriving the
+# tuple from `test_render_checks.py`'s `declared_checks` would follow a check
+# DELETED from the chart, so these renders would keep passing over one fewer group
+# and stop discriminating at the moment the checks stopped existing.
+#
+# `test_render_checks.py` owns the count of what the chart declares; this is the
+# independent restatement that disagrees with it when somebody moves one and not
+# the other.
+DECLARED_API_VERSIONS = ("cert-manager.io/v1", "gateway.envoyproxy.io/v1alpha1")
+
+# `--api-versions <group>` for each of them, spliced into every render below.
+API_VERSIONS = tuple(
+    part for group in DECLARED_API_VERSIONS for part in ("--api-versions", group)
+)
 
 # The RoleBinding's subject carries `{{ .Release.Namespace }}`, and a subject in the
 # wrong namespace grants the Role to NOBODY. Rendering into a named namespace is
@@ -277,7 +291,7 @@ def defaults_render(chart: Path = CHART) -> list[dict]:
 def adopter_render(chart: Path = CHART, *arguments: str) -> list[dict]:
     """R2 — `example/values.yaml`, every `preflight.probes.*` key left UNSET."""
     return render(
-        chart, "--api-versions", CERT_MANAGER_API, "-f", str(ADOPTER_VALUES), *arguments
+        chart, *API_VERSIONS, "-f", str(ADOPTER_VALUES), *arguments
     )
 
 
@@ -428,7 +442,7 @@ def test_a_create_toggle_true_at_the_defaults_reddens_the_no_job_zero(tmp_path):
     """
     values = overrides(tmp_path / "one-create.yaml", "internalCA:\n  create: true\n")
     rendered = preflight_objects(
-        render(CHART, "--api-versions", CERT_MANAGER_API, "-f", str(values))
+        render(CHART, *API_VERSIONS, "-f", str(values))
     )
     assert rendered, (
         "a `create` toggle was turned true at the defaults, its probe should have "
@@ -760,7 +774,7 @@ def test_an_explicit_true_beside_its_own_false_toggle_is_refused(tmp_path):
         "preflight:\n  probes:\n    certManager: true\n",
     )
     result = template(
-        CHART, "--api-versions", CERT_MANAGER_API, "-f", str(ADOPTER_VALUES), "-f", str(values)
+        CHART, *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values)
     )
     assert result.returncode != 0, (
         "`preflight.probes.certManager: true` beside three false toggles rendered "
@@ -797,8 +811,7 @@ def test_a_refusal_that_names_one_key_reddens_the_refusal_gate(tmp_path):
     )
     result = template(
         chart_whose_refusal_names_one_key(tmp_path),
-        "--api-versions",
-        CERT_MANAGER_API,
+        *API_VERSIONS,
         "-f",
         str(ADOPTER_VALUES),
         "-f",

@@ -1,0 +1,151 @@
+{{/*
+THE ONE SHARED CACHE: a Service and a Deployment, behind `valkey.create`.
+
+NO PERSISTENCE AND ONE REPLICA, and that is a property of what is stored rather
+than a saving. Every entry here recomputes — compute caches are content-addressed,
+row caches key on a version, query caches on an epoch — so losing this cache costs
+a cold start, not data. A StatefulSet with a PVC would buy durability nothing asks
+for and would make a rollout a data migration.
+
+THE OFFICIAL IMAGE AND NOT A CHART. `values.yaml` carries the supply-chain
+measurement that decided it; the short version is that the obvious chart's images
+cannot be pinned any more, only unpinned.
+
+THE PASSWORD IS THE CONTROL AND THE POLICY IS THE SECOND LAYER. `requirepass` is
+enforced by the SERVER, so it holds on every CNI and every platform;
+`ingress-policies.yaml` is a second layer whose enforcement depends on the
+cluster's CNI. That ordering is deliberate and is the reason this file does not
+depend on the policy existing.
+*/}}
+{{- if .Values.valkey.create }}
+{{- $valkey := .Values.valkey }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $valkey.name }}
+  labels:
+    app.kubernetes.io/name: {{ $valkey.name }}
+spec:
+  # THE SELECTOR AND THE POD TEMPLATE'S LABELS ARE ONE INVARIANT. A Service whose
+  # selector matches no pod is accepted, listed and describable, and has empty
+  # endpoints — the caller simply gets connection refused.
+  # `test_the_valkey_service_selects_the_pods_the_deployment_creates` compares the
+  # two rather than counting either.
+  selector:
+    app.kubernetes.io/name: {{ $valkey.name }}
+  ports:
+    - name: valkey
+      port: {{ $valkey.port }}
+      targetPort: valkey
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $valkey.name }}
+  labels:
+    app.kubernetes.io/name: {{ $valkey.name }}
+spec:
+  replicas: 1
+  # `Recreate`, NOT `RollingUpdate`. Two instances of a single-instance cache
+  # would serve two different views of the same keys for the length of a rollout,
+  # and the epoch counters that invalidate entries are themselves in here.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $valkey.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $valkey.name }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          image: {{ $valkey.image }}
+          imagePullPolicy: IfNotPresent
+          # ── A SHELL, AND IT IS THE ONLY WAY TO GET THE PASSWORD IN ──────────
+          # Container `args` are NOT shell-expanded, and this image's entrypoint
+          # execs `valkey-server "$@"` without evaluating anything, so
+          # `--requirepass $VALKEY_PASSWORD` as a bare argument would set the
+          # password to the literal characters of that string. Kubernetes' own
+          # `$(VAR)` expansion does apply to `command` and `args` — but it expands
+          # into the rendered PodSpec, which is exactly where this arrangement
+          # exists to keep the password out of.
+          #
+          # `exec` SO valkey-server IS PID 1 and receives SIGTERM directly.
+          # Without it the shell is PID 1, the signal never reaches the server,
+          # and every rollout waits out the whole termination grace period.
+          #
+          # THE RESIDUAL, stated rather than left to be found: the password is
+          # visible in `/proc/1/cmdline` inside this container. It is not in this
+          # chart, not in `kubectl describe pod`, and not in git — which are the
+          # three places it would otherwise reach somebody who is not already
+          # inside the container.
+          command: ["sh", "-c"]
+          args:
+            - |
+              exec valkey-server \
+                --requirepass "$VALKEY_PASSWORD" \
+                --maxmemory {{ $valkey.maxmemory }} \
+                --maxmemory-policy {{ $valkey.maxmemoryPolicy }} \
+                --save "" \
+                --appendonly no
+          env:
+            # MINTED BY THE BOOTSTRAP JOB, not by a human and not by a template
+            # here. A missing Secret leaves this pod in `ContainerCreating`, which
+            # is why the Job is a `pre-install` hook that fails the install
+            # instead.
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $valkey.passwordSecret.name }}
+                  key: {{ $valkey.passwordSecret.key }}
+            # THE PROBE'S COPY, under the name `valkey-cli` itself reads. A
+            # probe's `exec.command` is NOT subject to Kubernetes' `$(VAR)`
+            # expansion — that applies to `command` and `args` only — so the
+            # credential reaches the probe either through the environment or on a
+            # command line that runs every few seconds. This is the better of the
+            # two. `VALKEYCLI_AUTH` and NOT `REDISCLI_AUTH`: the fork renamed it
+            # and the Redis name is silently ignored.
+            - name: VALKEYCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $valkey.passwordSecret.name }}
+                  key: {{ $valkey.passwordSecret.key }}
+          ports:
+            - name: valkey
+              containerPort: {{ $valkey.port }}
+          resources:
+            {{- toYaml $valkey.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            # A TCP PROBE DELIBERATELY. It asks whether the port is open, which is
+            # a question `requirepass` does not change — a liveness probe that
+            # could fail on a credential would restart a healthy server because a
+            # Secret was rotated wrong.
+            tcpSocket:
+              port: valkey
+            initialDelaySeconds: 5
+          readinessProbe:
+            # THE ANSWER IS CHECKED, NOT JUST THE EXIT CODE. Measured against this
+            # image: with `requirepass` set and no credential available,
+            # `valkey-cli ping` prints `NOAUTH Authentication required.` and EXITS
+            # 0. So the bare form is a probe that cannot fail on the one thing
+            # this arrangement makes possible to get wrong — it would report a
+            # server nobody can talk to as Ready.
+            exec:
+              command: ["sh", "-c", "valkey-cli ping | grep -q PONG"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+{{- end }}

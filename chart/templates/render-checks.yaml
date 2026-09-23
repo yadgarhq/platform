@@ -1,12 +1,14 @@
 {{/*
 EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHING.
 
-ONE CHECK, NOT ONE PER KIND. Every object this chart renders today — the
-self-signed Issuer, the CA Certificate, the CA Issuer, the ten internal leaves and
-the edge leaf — comes from `cert-manager.io/v1`, and one operator provides that
-whole group. `scripts/tests/test_render_checks.py` counts the checks DECLARED here
-and asserts that number, so a check deleted from this file reddens the suite on
-the count rather than letting it quietly exercise one fewer.
+ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
+Certificate, the CA Issuer, the ten internal leaves and the edge leaf all come from
+`cert-manager.io/v1`, and one operator provides that whole group — so they share a
+check. The Gateway listener is the same shape one level along: it renders three
+kinds from TWO groups behind ONE toggle, and carries ONE check.
+`scripts/tests/test_render_checks.py` counts the checks DECLARED here and asserts
+that number, so a check deleted from this file reddens the suite on the count
+rather than letting it quietly exercise one fewer.
 
 THE FILENAME DOES NOT BEGIN WITH AN UNDERSCORE, AND THAT IS LOAD-BEARING. helm
 treats `templates/_*` as partials and never renders them, so a `fail` that lived
@@ -23,4 +25,46 @@ never refused for a cluster it was never going to touch.
       "apiVersion" "cert-manager.io/v1"
       "operator" "cert-manager"
       "toggle" "internalCA.create, certificates.create or edgeTLS.create") }}
+{{- end }}
+
+{{/*
+ENVOY GATEWAY, AND THE GROUP IS THE WHOLE DECISION.
+
+`gatewayListener.create` renders three kinds from TWO API groups: a GatewayClass
+and a Gateway on `gateway.networking.k8s.io/v1`, and an EnvoyProxy on
+`gateway.envoyproxy.io/v1alpha1`. Only the second is checked, and the first is
+deliberately NOT.
+
+THE GATEWAY API IS A SPECIFICATION, NOT AN OPERATOR.
+`.Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1"` is satisfied by the
+Gateway API CRDs ALONE. Istio registers them, and so does every other
+implementation, so a check on that group is green on a cluster with no Envoy
+Gateway anywhere — it names a specification and can never be the refusal that
+names Envoy Gateway. The same cluster also serves
+`gateway.networking.x-k8s.io/v1alpha1`, the upstream experimental channel, which
+is wrong for the same reason. Three plausible strings, one correct: the EnvoyProxy
+below is the object whose group no other implementation registers.
+
+Adding a Gateway API check beside this one would be LEGAL under the default-false
+rule and is still not added: it names no operator, so it adds a refusal nobody can
+attribute. One check per operator is the count this chart asserts.
+
+THE STRING IS A LITERAL HERE AND IS RECORDED IN `values.yaml` UNDER
+`gatewayListener.envoyGateway.apiVersion`, read off the operator at the version
+the estate pins. It has to be a literal because
+`scripts/tests/test_render_checks.py` reads these arguments off the template to
+count and exercise the checks; the gate that keeps the two in step is
+`test_the_render_check_names_the_group_the_values_file_records`.
+
+THE TOGGLE IS OPT-IN, which is what makes this check legal at all. A render check
+may only ever sit behind a default-false toggle: `Has` is false for every
+CRD-backed group with no cluster, so a check reachable at the defaults would
+refuse every offline render in the estate.
+*/}}
+{{- if .Values.gatewayListener.create }}
+{{- include "platform.require-api" (dict
+      "context" $
+      "apiVersion" "gateway.envoyproxy.io/v1alpha1"
+      "operator" "Envoy Gateway"
+      "toggle" "gatewayListener.create") }}
 {{- end }}

@@ -95,8 +95,18 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # A LITERAL, for the reason every expected count in this estate is a literal: a
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
-EXPECTED_RENDER_CHECKS = 1
-EXPECTED_CHECKS = {"cert-manager.io/v1": "cert-manager"}
+EXPECTED_RENDER_CHECKS = 2
+EXPECTED_CHECKS = {
+    "cert-manager.io/v1": "cert-manager",
+    # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
+    # `gateway.networking.k8s.io/v1` — the UPSTREAM specification, a different
+    # project that Istio and every other implementation also registers — and
+    # `gateway.networking.x-k8s.io/v1alpha1` beside it. A check written against
+    # either is green on a cluster with the Gateway API CRDs and no Envoy Gateway
+    # anywhere, which is exactly the adopter state this check exists to refuse.
+    # `test_shared_infrastructure.py` asserts the two decoys are absent.
+    "gateway.envoyproxy.io/v1alpha1": "Envoy Gateway",
+}
 
 # The number of checks the throwaway fixture declares, and it is a LITERAL for the
 # same reason — `len(declared_checks(fixture))` would agree with a fixture whose

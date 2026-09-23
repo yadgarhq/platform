@@ -60,9 +60,25 @@ REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
-# The group the render check demands before any of this renders. See the module
-# docstring, and `test_render_checks.py` for the check itself.
-CERT_MANAGER_API = "cert-manager.io/v1"
+# ── EVERY GROUP THE CHART'S RENDER CHECKS ASK FOR ────────────────────────────
+# ONE ENTRY PER CHECK THE CHART DECLARES, AND A LITERAL RATHER THAN A LIST READ
+# OFF THE CHART. `fail` aborts the WHOLE render at the FIRST failing check and
+# names only that one, so a render here that omits a group is refused for THAT
+# check's reason before the objects this suite counts exist at all — which is how
+# every case in this file went red the day the second check landed. Deriving the
+# tuple from `test_render_checks.py`'s `declared_checks` would follow a check
+# DELETED from the chart, so these renders would keep passing over one fewer group
+# and stop discriminating at the moment the checks stopped existing.
+#
+# `test_render_checks.py` owns the count of what the chart declares; this is the
+# independent restatement that disagrees with it when somebody moves one and not
+# the other.
+DECLARED_API_VERSIONS = ("cert-manager.io/v1", "gateway.envoyproxy.io/v1alpha1")
+
+# `--api-versions <group>` for each of them, spliced into every render below.
+API_VERSIONS = tuple(
+    part for group in DECLARED_API_VERSIONS for part in ("--api-versions", group)
+)
 
 # ── THE EXPECTED NUMBERS, ONE PAIR PER RENDER ────────────────────────────────
 # THEY ARE LITERALS AND THEY MUST STAY LITERALS. A count derived from the render
@@ -113,7 +129,7 @@ def helm(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 def render(chart: Path, *arguments: str) -> list[dict]:
     result = helm(
-        "template", "platform", str(chart), "--api-versions", CERT_MANAGER_API, *arguments
+        "template", "platform", str(chart), *API_VERSIONS, *arguments
     )
     assert result.returncode == 0, result.stderr
     return [
@@ -375,8 +391,7 @@ def test_the_edge_leaf_refuses_without_an_issuer(tmp_path):
             "template",
             "platform",
             str(CHART),
-            "--api-versions",
-            CERT_MANAGER_API,
+            *API_VERSIONS,
             "-f",
             str(overridden),
         )
