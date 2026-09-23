@@ -212,8 +212,8 @@ spec:
               # another.
               condition_matches() {
                 sed 's/},{/}\n{/g' "$body" \
-                  | grep '"type":"'"$2"'"' \
-                  | grep -Eq '"status":"('"$3"')"'
+                  | grep '"type":"'"$1"'"' \
+                  | grep -Eq '"status":"('"$2"')"'
               }
 
               # WAIT FOR $1 TO CARRY CONDITION $2 MATCHING $3, OR FAIL AT THE
@@ -229,7 +229,7 @@ spec:
                 waited=0
                 while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
                   request GET "$path" ""
-                  if [ "$STATUS" = "200" ] && condition_matches "$path" "$kind" "$wanted"; then
+                  if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted"; then
                     return 0
                   fi
                   sleep "$POLL_SECONDS"
@@ -286,6 +286,13 @@ spec:
               # whether the operator touched it at all. `Unknown` is the untouched
               # state and does not match.
               probe_keda() {
+                # NO POD IS EVER SCHEDULED, so this image is never pulled: the
+                # Deployment is created at ZERO replicas and deleted before it is
+                # scaled. It names the preflight's own pinned image rather than a
+                # placeholder so that a Deployment somebody later sets to one
+                # replica by hand pulls something that exists, instead of sitting
+                # in `ImagePullBackOff` under a name nobody recognises.
+                PAUSE_IMAGE={{ $preflight.image | squote }}
                 deployments="/apis/apps/v1/namespaces/$ns/deployments"
                 scaledobjects="/apis/{{ $preflight.keda.apiVersion }}/namespaces/$ns/scaledobjects"
 
@@ -295,7 +302,7 @@ spec:
                "spec":{"replicas":0,
                        "selector":{"matchLabels":{"app.kubernetes.io/name":"$PROBE_NAME"}},
                        "template":{"metadata":{"labels":{"app.kubernetes.io/name":"$PROBE_NAME"}},
-                                   "spec":{"containers":[{"name":"pause","image":"$PROBE_NAME"}]}}}}
+                                   "spec":{"containers":[{"name":"pause","image":"$PAUSE_IMAGE"}]}}}}
               JSON
               )
                 create "$deployments/$PROBE_NAME" "$deployments" "$deployment_body"
