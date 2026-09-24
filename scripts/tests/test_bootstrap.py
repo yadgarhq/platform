@@ -628,8 +628,13 @@ def generation_failures(
     redundant reopens exactly one hole:
 
     1. THE COUNT. Every variable a body interpolates is counted against the `mint`
-       statements for that Secret. Drop one of the two `iam-keys` draws and the
-       body still names two variables while the script generates one.
+       statements for that Secret. The shape only THIS clause reports is a body
+       that DROPS A KEY FIELD while both draws remain — one variable against two
+       `mint` statements, with clauses 2 and 3 both silent. Dropping one of the
+       two DRAWS instead reddens this clause and clause 3 TOGETHER, measured, so
+       that mutation is not this clause's sole witness and the red case below
+       asserts the message this clause writes rather than the mere presence of a
+       failure.
     2. THE VALUES ARE PAIRWISE DISTINCT, over `data` and `stringData` together.
        This is a comparison of RENDERED TEXT. It sees one draw feeding both key
        fields — the body then reads `"$encryption_key"` twice — and it is the only
