@@ -604,6 +604,17 @@ def test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints():
     Deployment consumes it by name. A disagreement leaves the pod in
     `ContainerCreating` for the lifetime of the install, which is the failure the
     bootstrap Jobs exist to move earlier.
+
+    THE MINTED SIDE IS READ OFF THE REQUEST BODY, through the same
+    `minted_secret_names` the broker's gate below uses. It did not used to be, and
+    what the substring form cost was MEASURED rather than argued: with `minted`
+    computed as `if name in yaml.dump(job)`, renaming the Secret the script CREATES
+    to `valkey-password-typo` — the `"metadata":{"name":...}` of the POSTed body,
+    the one field the API server reads — left `valkey-password` in that same Job in
+    a `mint` line and in a `create` line, so the dump still carried it, this gate
+    still called it minted, and THE WHOLE SUITE REPORTED 107 PASSED over an install
+    whose cache sits in `ContainerCreating` for its lifetime. The body is where a
+    Secret is made, so the body is what this reads.
     """
     rendered = adopter_render()
     deployment = by_name(rendered, "Deployment", chart_values()["valkey"]["name"])
@@ -614,12 +625,7 @@ def test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints():
         for variable in container["env"]
         if "secretKeyRef" in variable.get("valueFrom", {})
     }
-    minted = {
-        name
-        for job in of_kind(rendered, "Job")
-        for name in [chart_values()["valkey"]["passwordSecret"]["name"]]
-        if name in yaml.dump(job)
-    }
+    minted = minted_secret_names(rendered)
     assert referenced, "the valkey container reads no Secret, so the cache is open"
     assert referenced <= minted, (
         f"the valkey container mounts {sorted(referenced)} and the bootstrap Jobs "
@@ -629,7 +635,16 @@ def test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints():
 
 
 def test_a_valkey_secret_nothing_mints_reddens_the_gate(tmp_path):
-    """The red case: a values flip that renames the Secret the container reads."""
+    """The red case: a values flip that renames the Secret the container reads.
+
+    THE "NOTHING MINTS IT" HALF IS READ OFF THE REQUEST BODY TOO. A guard phrased
+    as `"nobody-mints-this" not in yaml.dump(job)` asks whether the name appears
+    ANYWHERE in the Job's text, which is a broader question than the one this red
+    case has to answer and is not the question the gate above asks — and a red case
+    that checks something other than its gate is how the substring form survived in
+    that gate for a round. `minted` is asserted non-empty first, because "not among
+    the minted names" proves nothing when nothing is named.
+    """
     values = overrides(
         tmp_path / "other-password.yaml",
         "valkey:\n  passwordSecret:\n    name: nobody-mints-this\n",
@@ -643,9 +658,12 @@ def test_a_valkey_secret_nothing_mints_reddens_the_gate(tmp_path):
         if "secretKeyRef" in variable.get("valueFrom", {})
     }
     assert referenced == {"nobody-mints-this"}, referenced
-    assert not any(
-        "nobody-mints-this" in yaml.dump(job) for job in of_kind(rendered, "Job")
-    ), "the red case renamed the Secret and a bootstrap Job minted it anyway"
+    minted = minted_secret_names(rendered)
+    assert minted, "the render mints no Secret at all, so this red case checks nothing"
+    assert "nobody-mints-this" not in minted, (
+        f"the red case renamed the Secret and a bootstrap Job minted it anyway; "
+        f"the render mints {sorted(minted)}"
+    )
 
 
 def test_the_broker_reads_the_secrets_the_bootstrap_job_mints():
@@ -668,11 +686,14 @@ def test_the_broker_reads_the_secrets_the_bootstrap_job_mints():
     second key on an already-created Secret would 409 forever; a gate satisfied by
     one of them would pass a render that had lost `gateway`'s credential.
 
-    THE MINTED SIDE IS READ OFF THE REQUEST BODY, NOT OFF THE JOB'S TEXT, and that
-    is the one place this gate is deliberately stricter than its valkey twin above.
-    Measured while building it: renaming the created Secret to `nats-auth-typo`
-    leaves the old name elsewhere in the same Job, so a substring search reports it
-    minted and the gate passes over the failure it exists to catch.
+    THE MINTED SIDE IS READ OFF THE REQUEST BODY, NOT OFF THE JOB'S TEXT. Measured
+    while building it: renaming the created Secret to `nats-auth-typo` leaves the
+    old name elsewhere in the same Job, so a substring search reports it minted and
+    the gate passes over the failure it exists to catch. The valkey twin above was
+    written against `yaml.dump` and did exactly that for a round — the same mutation
+    against `valkey-password` left the whole suite at 107 passed — so it now shares
+    `minted_secret_names` with this gate. NEITHER READS A DUMP, and the asymmetry
+    this paragraph used to record is gone.
     """
     rendered = adopter_render()
     stateful_set = one(rendered, "StatefulSet")
@@ -714,9 +735,12 @@ def test_a_broker_secret_nothing_mints_reddens_the_gate(tmp_path):
 
     assert "nobody-mints-this" in referenced, referenced
     assert referenced != EXPECTED_NATS_SECRETS, referenced
-    assert not any(
-        "nobody-mints-this" in yaml.dump(job) for job in of_kind(rendered, "Job")
-    ), "the red case renamed the Secret and a bootstrap Job minted it anyway"
+    minted = minted_secret_names(rendered)
+    assert minted, "the render mints no Secret at all, so this red case checks nothing"
+    assert "nobody-mints-this" not in minted, (
+        f"the red case renamed the Secret and a bootstrap Job minted it anyway; "
+        f"the render mints {sorted(minted)}"
+    )
 
 
 def test_the_valkey_toggle_switches_its_objects_off(tmp_path):
