@@ -81,14 +81,29 @@ EXPECTED_NATS_CLIENTS = ["gateway", "iam"]
 
 # ── THE PORTS ADMITTED FROM EVERY SOURCE, WRITTEN DOWN ───────────────────────
 # An ingress rule with no `from` matches ALL sources — every namespace, and
-# whatever else the CNI presents (ADR-0664). `nats-ingress` has exactly one such
-# rule, on the monitoring port, and the reason it is not narrowed is argued in
-# `templates/ingress-policies.yaml` beside the rule. `valkey-ingress` has none.
+# whatever else the CNI presents (ADR-0664). NEITHER POLICY CARRIES ONE NOW.
+# `nats-ingress` used to: the monitoring port was admitted from every source in
+# the cluster. It is narrowed to the release namespace, and
+# `test_the_monitoring_rule_admits_this_namespace_and_no_other` is the gate that
+# says WHICH namespace rather than merely that some source is named.
+#
+# BOTH EXPECTATIONS BEING EMPTY DOES NOT MAKE THIS VACUOUS. The two red cases
+# below construct the non-empty path — one adds a from-less rule, one adds
+# `from: []` — and each asserts this census would go red on it. An expectation of
+# `set()` is the strongest form this gate takes, not the absence of one.
 #
 # THIS IS WHAT `EXPECTED_*_CLIENTS` CANNOT SEE. `client_names` walks each rule's
 # `from`, so a rule carrying none contributes nothing to it and an allow-all
 # leaves the client census reporting the same consumers it always did.
-EXPECTED_ALLOW_ALL_PORTS = {"valkey-ingress": set(), "nats-ingress": {8222}}
+EXPECTED_ALLOW_ALL_PORTS = {"valkey-ingress": set(), "nats-ingress": set()}
+
+# The broker's monitoring port, and the namespace the narrowed rule must name.
+# The namespace is a SENTINEL the template could not plausibly contain: it is
+# passed as `--namespace` and read back out of the rendered selector, so a
+# template that hardcoded a namespace fails rather than agreeing with itself.
+MONITORING_PORT = 8222
+SENTINEL_NAMESPACE = "sentinel-namespace-1999"
+NAMESPACE_LABEL = "kubernetes.io/metadata.name"
 
 # The two Secrets the bootstrap Job mints for the broker, by value, because the
 # StatefulSet that reads them belongs to the upstream chart.
@@ -338,6 +353,39 @@ def policy_ports(policy: dict) -> set[int]:
         for rule in policy["spec"]["ingress"]
         for port in rule.get("ports", [])
     }
+
+
+def rules_admitting(policy: dict, port: int) -> list[dict]:
+    """Every ingress rule of `policy` that names `port`. PURE.
+
+    RETURNS THE LIST RATHER THAN THE RULE, and the caller asserts its length. A
+    helper that returned "the" rule would have to pick one when a policy names the
+    same port twice — two rules on one port are an OR, so a second one widens what
+    is admitted while the first still reads correctly — and it would have to raise
+    or return `None` when there are none, which is the shape that lets a caller
+    written as `for rule in ...:` pass over an empty list in silence.
+    """
+    return [
+        rule
+        for rule in policy["spec"]["ingress"]
+        if any(named["port"] == port for named in rule.get("ports", []))
+    ]
+
+
+def without_the_monitoring_from(text: str) -> str:
+    """`templates/ingress-policies.yaml` with the monitoring rule's `from` cut out.
+
+    THE RESULT IS THE RULE `main` SHIPPED — a bare `- ports:` on 8222, admitting
+    every source in the cluster. Written as an index walk from the rule's own
+    comment heading rather than as a `str.replace` of the whole block, because a
+    replace whose pattern drifts returns the text UNCHANGED and `chart_with`'s
+    tripwire would then be the only thing standing between this red case and a
+    silent pass. `str.index` raises instead, naming the anchor that moved.
+    """
+    heading = text.index("# THE MONITORING PORT")
+    start = text.index("    - from:\n", heading)
+    ports = text.index("      ports:\n", start)
+    return text[:start] + "    - ports:\n" + text[ports + len("      ports:\n") :]
 
 
 def chart_with(destination: Path, relative: str, edit) -> Path:
@@ -898,9 +946,13 @@ def test_the_policies_admit_from_every_source_only_where_written_down():
     A ceiling passes when a from-less rule is added to a policy that had none. Only
     the equality names both the number and what each rule admits.
 
-    `nats-ingress`'s one such rule is deliberate and argued beside it in
-    `templates/ingress-policies.yaml`; this case does not judge that decision, it
-    makes the decision VISIBLE so the next edit has to restate it here.
+    BOTH EXPECTATIONS ARE EMPTY NOW, and that is the point rather than a hole.
+    `nats-ingress` carried one such rule on the monitoring port until it was
+    narrowed to the release namespace; the two red cases below construct the
+    non-empty path and assert this census goes red on it, so the equality is still
+    doing work. `test_the_monitoring_rule_admits_this_namespace_and_no_other` is
+    the other half: this case says no rule admits everybody, that one says which
+    single namespace the monitoring rule does admit.
     """
     rendered = adopter_render()
     for name, expected in EXPECTED_ALLOW_ALL_PORTS.items():
@@ -991,6 +1043,175 @@ def test_a_from_less_rule_written_as_an_empty_list_is_seen_too(tmp_path):
     )
     assert seen[0]["from"] == [], seen[0]
     assert client_names(policy) == EXPECTED_VALKEY_CLIENTS, client_names(policy)
+
+
+def assert_monitoring_rule_admits_only(rules: list[dict], namespace: str) -> None:
+    """The monitoring gate's whole assertion, factored so a red case can call it.
+
+    IT TAKES THE RULES RATHER THAN THE POLICY, and that is what makes the second
+    red case below possible: the case hands this an EMPTY list — the shape a
+    selector lookup that found nothing produces — and demands it still go red. A
+    gate written inline as `for rule in rules_admitting(...)` could not be tested
+    that way, and would pass over an empty list in silence.
+    """
+    assert len(rules) == 1, (
+        f"expected exactly ONE ingress rule naming port {MONITORING_PORT}, found "
+        f"{len(rules)}: {rules}. Zero means the monitoring port is DENIED to "
+        f"everything and the broker's own probes with it; more than one is an OR, "
+        f"so a second rule widens what is admitted while the first still reads "
+        f"correctly"
+    )
+    peers = rules[0]["from"]
+    assert len(peers) == 1, (
+        f"the monitoring rule names {len(peers)} peers and each is an OR with the "
+        f"others, so any one of them admits traffic on its own: {peers}"
+    )
+    assert set(peers[0]) == {"namespaceSelector"}, (
+        f"the monitoring rule's peer carries {sorted(peers[0])}; a `podSelector` "
+        f"beside the `namespaceSelector` NARROWS this peer to named pods, and an "
+        f"`ipBlock` in a peer of its own WIDENS it to a CIDR — neither is what "
+        f"'the release namespace, all of it, and nothing else' means"
+    )
+    assert peers[0]["namespaceSelector"]["matchLabels"] == {
+        NAMESPACE_LABEL: namespace
+    }, (
+        f"the monitoring rule selects namespaces by "
+        f"{peers[0]['namespaceSelector']['matchLabels']}; the release namespace is "
+        f"{namespace!r} and `{NAMESPACE_LABEL}` is the label kube-apiserver sets on "
+        f"every Namespace, so any other key here selects on a label nothing "
+        f"guarantees exists"
+    )
+
+
+def test_the_monitoring_rule_admits_this_namespace_and_no_other():
+    """THE MONITORING PORT IS SCOPED TO THE RELEASE NAMESPACE, and to which one.
+
+    The census above says no rule admits everybody. That is not the same claim as
+    this one: a rule could name a `from` and still admit a namespace nobody meant,
+    or admit every namespace by selecting on a label they all carry. This case
+    reads the selector's VALUE back.
+
+    THE NAMESPACE IS A SENTINEL, PASSED IN AND READ BACK OUT. `--namespace
+    sentinel-namespace-1999` is a value the template could not plausibly contain,
+    so a template that hardcoded `yadgar` — or any other real namespace — fails
+    here instead of agreeing with a fixture that had copied it. That is this
+    estate's certifying-fixture antipattern, met head on.
+
+    WHY THE RULE IS SAFE TO NARROW AT ALL, in one line, with the argument in
+    `templates/ingress-policies.yaml`: all three of the broker's probes are
+    `httpGet` on this port, they originate from the NODE, and node-sourced traffic
+    is exempt from pod-selector ingress rules (ADR-0592) on a CNI whose enforcement
+    is independently proven (ADR-0688).
+    """
+    rendered = adopter_render(CHART, "--namespace", SENTINEL_NAMESPACE)
+    policy = by_name(rendered, "NetworkPolicy", "nats-ingress")
+    rules = policy["spec"]["ingress"]
+    admitting = rules_admitting(policy, MONITORING_PORT)
+
+    # THE DENOMINATOR, PRINTED. A reference assertion reports what it examined, so
+    # a render that quietly stopped producing rules is visible in the output rather
+    # than only in a passing count.
+    print(
+        f"[monitoring-rule gate] nats-ingress: {len(rules)} ingress rule(s) "
+        f"examined, {len(admitting)} naming port {MONITORING_PORT}, "
+        f"{len(from_less_rules(policy))} naming no source at all; "
+        f"ports admitted overall: {sorted(policy_ports(policy))}"
+    )
+
+    assert admitting and admitting[0] not in from_less_rules(policy), (
+        f"the rule admitting port {MONITORING_PORT} names NO source, so it admits "
+        f"every pod in every namespace (ADR-0664). `from_less_rules` is the "
+        f"hardened predicate for that and it sees `from: []` as well as a missing "
+        f"key, which is the shape a `range` over an empty list produces"
+    )
+    assert_monitoring_rule_admits_only(admitting, SENTINEL_NAMESPACE)
+
+
+def test_the_monitoring_rule_losing_its_from_reddens_the_new_gate(tmp_path):
+    """THE CONSTRUCTED RED CASE, and it rebuilds exactly the state `main` shipped.
+
+    The `from` block is cut out of the monitoring rule, leaving `- ports:` — which
+    is the rule this file carried before the narrowing, character for character.
+    Both gates must go red on it: the new one above, and the allow-all census,
+    whose `nats-ingress` expectation is now `set()`.
+    """
+    copy = chart_with(
+        tmp_path, "templates/ingress-policies.yaml", without_the_monitoring_from
+    )
+    rendered = render(
+        copy,
+        *api_version_arguments(),
+        "-f",
+        str(ADOPTER_VALUES),
+        "--namespace",
+        SENTINEL_NAMESPACE,
+    )
+    policy = by_name(rendered, "NetworkPolicy", "nats-ingress")
+
+    admitting = rules_admitting(policy, MONITORING_PORT)
+    assert len(admitting) == 1, admitting
+    assert admitting[0] in from_less_rules(policy), (
+        "the red case cut the `from` out of the monitoring rule and "
+        "`from_less_rules` did not see the result, so it is constructing nothing"
+    )
+
+    # The new gate goes red, and the message is asserted rather than the exception
+    # alone — a gate that reddened for the WRONG reason would pass a bare check.
+    try:
+        assert_monitoring_rule_admits_only(admitting, SENTINEL_NAMESPACE)
+    except (AssertionError, KeyError) as failure:
+        assert isinstance(failure, KeyError) and failure.args[0] == "from", (
+            f"expected the gate to fail reaching the absent `from`, got {failure!r}"
+        )
+    else:
+        raise AssertionError(
+            "the monitoring rule lost its `from` and the gate passed, so the gate "
+            "does not check that the rule names a source at all"
+        )
+
+    # And the census that owns "admits everybody" goes red on the same render.
+    admitted = {
+        port["port"] for rule in from_less_rules(policy) for port in rule["ports"]
+    }
+    assert admitted == {MONITORING_PORT}, admitted
+    assert admitted != EXPECTED_ALLOW_ALL_PORTS["nats-ingress"], (
+        "the monitoring rule was returned to admitting every source and the "
+        "allow-all census would still have passed"
+    )
+
+
+def test_the_monitoring_gate_reddens_when_its_own_lookup_finds_nothing():
+    """THE GATE'S OWN RED CASE: a census that examines nothing must not pass.
+
+    This mutates the TEST rather than the chart. `assert_monitoring_rule_admits_only`
+    is handed the empty list — precisely what `rules_admitting` returns if the port
+    constant is wrong, if the rule is deleted outright, or if the render stops
+    producing the policy — and must go red rather than finding no counter-example
+    among zero rules and reporting a pass.
+
+    This estate has shipped the vacuous-census defect four times. Asserting the
+    COUNT before reading the rule is what closes it, and this case is what proves
+    the count assertion is actually there.
+    """
+    rendered = adopter_render(CHART, "--namespace", SENTINEL_NAMESPACE)
+    policy = by_name(rendered, "NetworkPolicy", "nats-ingress")
+
+    # The lookup that finds nothing is a REAL one: no rule names this port.
+    absent = rules_admitting(policy, 9999)
+    assert absent == [], f"9999 was expected to name no rule, got {absent}"
+
+    try:
+        assert_monitoring_rule_admits_only(absent, SENTINEL_NAMESPACE)
+    except AssertionError as failure:
+        assert "expected exactly ONE ingress rule" in str(failure), (
+            f"the gate reddened on an empty lookup for the wrong reason: {failure}"
+        )
+    else:
+        raise AssertionError(
+            "the monitoring gate passed over an EMPTY rule list, so it asserts a "
+            "property of every rule it found while finding none — the vacuous "
+            "census this suite exists to not ship"
+        )
 
 
 def test_a_moved_subchart_label_reddens_the_nats_policy_gate(tmp_path):
