@@ -26,23 +26,38 @@ this probe, recorded with its reason, and never a silent downgrade — which is 
 `Programmed` is a literal here rather than a values key, and why
 `test_the_probe_waits_for_programmed_and_never_for_accepted` refuses the swap.
 
-WHAT THE CONDITION READING CAN AND CANNOT SEE, stated rather than left to be
-discovered. The matcher is `condition_matches`, copied from the preflight Job rather
-than re-derived (ADR-0679), and it searches the WHOLE response — which on a Gateway
-carries the object's own conditions AND its listener's. Both are written by the
-controller and by nothing else, and the object is FRESH, so neither can be a stale
-condition from an earlier reconcile: the scaled-to-zero case this probe exists for
-reddens under either reading. Narrowing the search to `status.conditions` alone
-would mean cutting the body at a key position, which depends on the order the API
-server marshals the status struct in — and a probe that reds on a HEALTHY cluster
-because a field moved is the fail-for-the-wrong-reason class this chart refuses.
+A GATEWAY CARRIES TWO CONDITIONS NAMED `Programmed`, AND THEY ARE DIFFERENT FACTS.
+The OBJECT's means an address was assigned and the proxy replicas are available;
+each LISTENER's means its configuration was translated and sent to the data plane.
+Measured on kind-yadgar: `Programmed` appears FOUR times in one Gateway's status.
+The matcher searches the whole response, so `Programmed=True` on its own is
+satisfied by EITHER — and the two come apart on exactly the cluster this probe is
+installed for. `gatewayListener.envoyProxy.serviceType` defaults to `LoadBalancer`
+and the adopter values do not restate it, so with no load-balancer controller no
+address is ever assigned and the OBJECT's `Programmed` goes False; the listener
+still translates, and a probe keyed on the condition alone would report SUCCESS
+while the real `edge` Gateway stalls.
 
-IT IS ITS OWN JOB WITH ITS OWN DENOMINATOR. `PROBES` is built from the blocks this
-template renders and `EXPECTED_PROBES` from the `probes.*` keys the values resolve,
-scoped to the POST-INSTALL set — the pre-install Job's denominator is its own and
-counts none of this. The two are compared AT THE TOP LEVEL, because inside a
-function reached through `$( )` the exit status is discarded and `set -e` never sees
-it, and a pipeline reports only its last element's status.
+SO THE PROBE REQUIRES THE OPERATOR'S OWN MESSAGE TOO, and that is the rule
+`mariadb.validationMessage` already set: a probe keys on wording the operator
+writes, so an upgrade that rewords it turns the probe RED rather than silently
+weakening it. `preflight.envoyGateway.programmedMessage` records the STABLE PREFIX
+and never the `2/2 replicas` tail, which varies. This is NOT a narrowing of the
+search to `status.conditions`: cutting the body at a key position depends on the
+order the API server marshals the status struct in, and a probe that reds on a
+HEALTHY cluster because a field moved is the fail-for-the-wrong-reason class this
+chart refuses. Requiring a substring is order-independent and stays `grep`-only.
+
+IT IS ITS OWN JOB WITH ITS OWN DENOMINATOR, and the denominator half is the
+separate one. `PROBES` is the list of probes the rendered script carries and
+`EXPECTED_PROBES` is the count the values resolve — both scoped to the POST-INSTALL
+set, so the pre-install Job's denominator counts none of this. The two are NOT
+independent derivations of the list: both come from `$probes`, and the per-probe
+blocks are GATED on that same list. What the equality catches is a `PROBES` line
+edited away from the count beside it — which is the failure this Job's own red case
+exercises — and it is checked AT THE TOP LEVEL, because inside a function reached
+through `$( )` the exit status is discarded and `set -e` never sees it, and a
+pipeline reports only its last element's status.
 
 THE PROBE GATEWAY IS CLEANED UP ON EVERY EXIT PATH, AND `hook-delete-policy` DOES
 NOT DO IT. `before-hook-creation` deletes the JOB before the next hook run; it never
@@ -120,17 +135,23 @@ spec:
               body=/tmp/answer
 
               # ── THE LIST, AND THE DENOMINATOR IT IS ASSERTED AGAINST ──────
-              # TWO SEPARATE DERIVATIONS, and both are the POST-INSTALL set's.
-              # `PROBES` is built from the blocks this template renders;
-              # `EXPECTED_PROBES` is the count of post-install `probes.*` keys the
-              # values resolve. A probe added to this Job that no key enables moves
-              # the first and not the second.
+              # BOTH ARE THE POST-INSTALL SET'S, and both resolve from `$probes` —
+              # so this is one source read twice rather than two derivations that
+              # agree. `PROBES` is the list the rendered script carries;
+              # `EXPECTED_PROBES` is its count. What the equality catches is a
+              # `PROBES` line edited away from the count beside it: a probe added to
+              # this Job that no key enables moves the first and not the second.
               PROBES="{{ join " " $probes }}"
               EXPECTED_PROBES={{ len $probes }}
 
               TIMEOUT_SECONDS={{ $probe.timeoutSeconds }}
               POLL_SECONDS={{ $preflight.pollSeconds }}
               PROBE_NAME={{ $probe.probeName }}
+
+              # THE OPERATOR'S OWN WORDING, REQUIRED ALONGSIDE `Programmed=True`.
+              # `squote` rather than bare, as the preflight's three strings are: the
+              # value carries spaces and is a message read off the operator.
+              PROGRAMMED_MESSAGE={{ $probe.programmedMessage | squote }}
 
               # THE PATHS THE CLEANUP WALKS. Appended as each object is created, so
               # a probe that dies half-way still leaves its cleanup a complete list
@@ -209,38 +230,62 @@ spec:
                 CREATED="$CREATED $1"
               }
 
-              # WHETHER A CONDITION OF TYPE $2 CARRIES A STATUS MATCHING $3. Copied
-              # from the preflight Job rather than re-derived (ADR-0679): the answer
-              # is one long line, so it is split on the boundary BETWEEN condition
-              # objects first — `grep` is a line matcher and an unsplit body would
-              # match a type from one condition against a status from another.
+              # WHETHER A CONDITION OF TYPE $1 CARRIES A STATUS MATCHING $2 AND A
+              # MESSAGE CONTAINING $3. The split and the first two stages are the
+              # preflight Job's matcher, taken rather than re-derived (ADR-0679):
+              # the answer is one long line, so it is split on the boundary BETWEEN
+              # condition objects first, because `grep` is a line matcher.
+              #
+              # THE THIRD STAGE IS THIS PROBE'S OWN, AND IT IS WHY THE TWO MATCHERS
+              # DIFFER. A Gateway carries two conditions named `Programmed` — the
+              # object's and each listener's — so the first two stages alone are
+              # satisfied by EITHER, and the one that matters here is the object's.
+              # The preflight's bodies are `metav1.Status`, which carries no such
+              # pair, so the stage is added here rather than in both.
+              #
+              # WHAT THE SPLIT ACTUALLY GUARANTEES, stated to the letter because
+              # overclaiming it is how the wider reading survived review once. `sed`
+              # splits on `},{` and on nothing else, so at an array boundary — the
+              # text `}],"listeners":[{` — there is no split at all: the object's
+              # LAST condition shares a segment with the listener array's FIRST. So
+              # the three stages are not three readings of one condition object.
+              # WHAT DISCRIMINATES IS THE MESSAGE: at the pinned version the prefix
+              # `preflight.envoyGateway.programmedMessage` records is written by the
+              # object's `Programmed` and by no other condition, so a segment
+              # carrying it carries that condition. A version that wrote the same
+              # prefix on a second condition would weaken this; one that reworded it
+              # turns the probe RED, which is the direction step 0(e) asks for.
               condition_matches() {
                 sed 's/},{/}\n{/g' "$body" \
                   | grep '"type":"'"$1"'"' \
-                  | grep -Eq '"status":"('"$2"')"'
+                  | grep -E '"status":"('"$2"')"' \
+                  | grep -qF "$3"
               }
 
-              # WAIT FOR $1 TO CARRY CONDITION $2 MATCHING $3, OR FAIL AT THE BOUND
-              # NAMING THE OPERATOR. The bound is what makes this a probe rather
-              # than a hang: a controller that is absent produces an object that
-              # simply never gains a condition, which is indistinguishable from a
-              # slow one until the clock says otherwise.
+              # WAIT FOR $1 TO CARRY CONDITION $2 MATCHING $3 WITH MESSAGE $4, OR
+              # FAIL AT THE BOUND NAMING THE OPERATOR. The bound is what makes this
+              # a probe rather than a hang: a controller that is absent produces an
+              # object that simply never gains a condition, which is
+              # indistinguishable from a slow one until the clock says otherwise.
               await() {
                 path="$1"
                 kind="$2"
                 wanted="$3"
-                operator="$4"
+                message="$4"
+                operator="$5"
                 waited=0
                 while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
                   request GET "$path" ""
-                  if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted"; then
+                  if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted" "$message"; then
                     return 0
                   fi
                   sleep "$POLL_SECONDS"
                   waited=$((waited + POLL_SECONDS))
                 done
-                echo "envoy-gateway-probe: $operator did not set $kind on $path within ${waited}s." >&2
-                echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running." >&2
+                echo "envoy-gateway-probe: $operator did not set $kind on $path within ${waited}s, or set it without the message it writes when the Gateway is programmed." >&2
+                echo "envoy-gateway-probe: expected a $kind condition with status $wanted whose message contains: $message" >&2
+                cat "$body" >&2
+                echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running, or it is running and could not program this Gateway." >&2
                 return 1
               }
 {{- if has "envoy-gateway" $probes }}
@@ -282,7 +327,7 @@ spec:
               )
                 create "$gateways/$PROBE_NAME" "$gateways" "$gateway_body"
 
-                await "$gateways/$PROBE_NAME" Programmed True "Envoy Gateway"
+                await "$gateways/$PROBE_NAME" Programmed True "$PROGRAMMED_MESSAGE" "Envoy Gateway"
               }
 {{- end }}
 

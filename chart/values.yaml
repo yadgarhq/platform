@@ -702,13 +702,27 @@ preflight:
   # check that refuses a cluster with no Envoy Gateway is the separate one on
   # `gateway.envoyproxy.io/v1alpha1`, recorded under `gatewayListener` above.
   #
-  # WHY THE CONDITION IS NOT A KEY HERE. The probe waits for `Programmed` and the
-  # template carries that word as a LITERAL. `Accepted=True` means the controller
-  # validated the Gateway against its class; `Programmed=True` means the data
-  # plane for it exists, and a controller that accepts and never programs is the
-  # half-dead case this probe is for. A key would make the weaker condition a
-  # values edit nothing catches; as a literal, weakening it is a template change
+  # WHY THE CONDITION NAME IS NOT A KEY HERE, AND WHY ITS MESSAGE IS. The two are
+  # different kinds of thing, and this block holds one of each.
+  #
+  # WHICH CONDITION TO DEMAND IS A DESIGN DECISION, so the probe waits for
+  # `Programmed` and the template carries that word as a LITERAL. `Accepted=True`
+  # means the controller validated the Gateway against its class;
+  # `Programmed=True` means the data plane for it exists, and a controller that
+  # accepts and never programs is the half-dead case this probe is for. A key
+  # would make the weaker condition a values edit nothing catches; as a literal,
+  # weakening it is a template change
   # `test_the_probe_waits_for_programmed_and_never_for_accepted` refuses.
+  #
+  # THE MESSAGE TEXT IS AN OPERATOR STRING, so `programmedMessage` below is a key
+  # and sits with the other operator strings this file records. It is not a choice
+  # between two conditions; it is wording read off the operator, which an upgrade
+  # can reword and a reader cannot guess. A literal would hide it in the template
+  # where the strings it belongs beside are not. Its own weakening direction —
+  # an EMPTY value, which `grep -F` matches against every line — is closed by
+  # behaviour rather than by a literal: `test_the_probe_refuses_a_body_carrying_
+  # only_the_listeners_programmed` runs the RENDERED matcher against a body and
+  # requires a refusal, which an empty needle cannot produce.
   envoyGateway:
     # MEASURED 2026-09-24 against kind-yadgar, running
     # docker.io/envoyproxy/gateway:v1.9.1: `gateways.gateway.networking.k8s.io`
@@ -718,6 +732,38 @@ preflight:
     # served version turns the probe RED rather than silently weakening it.
     apiVersion: gateway.networking.k8s.io/v1
     operatorImage: docker.io/envoyproxy/gateway:v1.9.1
+
+    # ── THE MESSAGE THE OBJECT-LEVEL `Programmed` CARRIES ──────────────────
+    # WHY A MESSAGE IS REQUIRED AT ALL, AND NOT `Programmed=True` ALONE. A
+    # Gateway's status carries TWO conditions named `Programmed` — the OBJECT's,
+    # which means an address was assigned and the proxy replicas are available,
+    # and each LISTENER's, which means its configuration was translated and sent
+    # to the data plane. Measured on kind-yadgar 2026-09-24: `Programmed` appears
+    # FOUR times in one Gateway's status. The matcher greps the whole response, so
+    # `Programmed=True` on its own is satisfied by EITHER.
+    #
+    # THAT IS NOT A HYPOTHETICAL SPLIT. `gatewayListener.envoyProxy.serviceType`
+    # above defaults to `LoadBalancer`, and neither `example/values.yaml` nor the
+    # parent chart's adopter values restate it. On a cluster with no
+    # load-balancer controller no address is ever assigned, so the OBJECT's
+    # `Programmed` goes False with reason `AddressNotAssigned` — and the probe
+    # inherits that same EnvoyProxy, so it inherits that same failure. A probe
+    # keyed on `Programmed=True` alone would then report SUCCESS off the
+    # listener's condition while the real `edge` Gateway stalls, which is the
+    # diagnostic failing to fire on exactly the cluster it was installed for.
+    #
+    # THE PREFIX ONLY, NEVER THE `2/2 replicas` TAIL, which varies with the
+    # replica count and would make this string a second place the count is
+    # written. This is the same rule `mariadb.validationMessage` follows: require
+    # the operator's OWN wording, so an upgrade that rewords it turns the probe
+    # RED rather than silently weakening it.
+    #
+    # STIPULATED, NOT MEASURED, and stated as such: that v1.9.1 sets the
+    # LISTENER's `Programmed=True` while address assignment fails is the reading
+    # this key is aimed at, and it was not reproduced — doing so needs a Gateway
+    # created on a cluster with no load-balancer controller, which no read-only
+    # observation can stand in for.
+    programmedMessage: Address assigned to the Gateway
 
     # ITS OWN IDENTITY, NOT THE PRE-INSTALL PREFLIGHT'S. `create`, `get` and
     # `delete` on GATEWAYS, where that Role holds none — sharing one would give
@@ -738,6 +784,28 @@ preflight:
     # different wait from a cert-manager reconcile, and no measurement of a cold
     # one on this estate exists. `preflight.pollSeconds` is shared, because how
     # often a status is read has nothing to do with which status it is.
+    #
+    # THIS BOUND AND HELM'S `--timeout` ARE ONE CONSTRAINT WITH TWO KNOBS, and a
+    # Job whose bound outlives helm's patience reports nothing. Measured on both
+    # pins — helm 3.18.4 and 4.3.0 — `--timeout` defaults to `5m0s` and is
+    # documented as "time to wait for any individual Kubernetes operation (like
+    # Jobs for hooks)". Helm's clock starts when the hook Job is CREATED, so it
+    # covers pod scheduling and image pull before this script's own clock starts.
+    #
+    # AND THE SCRIPT'S WORST CASE IS TWICE THIS NUMBER, not once. `create()` calls
+    # `remove()` first, and `remove()` loops to this same bound before `await()`
+    # begins its own — so two bounded loops compose, plus the request time of the
+    # calls themselves, which no value here bounds.
+    #
+    # SO THE INSTALL MUST BE GIVEN A BUDGET, and `README.md` and
+    # `example/values.yaml` both state it. At 300 here the composed bound is 600s,
+    # and the documented `--timeout 15m` leaves 300s over it for scheduling, image
+    # pull and request time — a stated CEILING, not a measurement, because this
+    # estate has measured none of the three. The number is NOT lowered instead:
+    # `Programmed` includes replica availability, so a cold cluster may genuinely
+    # need this long, and a bound cut to fit helm's default would reintroduce
+    # red-on-healthy. `test_the_documented_install_budget_covers_the_probes_bound`
+    # is what keeps the two from diverging in silence.
     timeoutSeconds: 300
 
   keda:

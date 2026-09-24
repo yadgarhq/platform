@@ -63,12 +63,14 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
+README = REPO / "README.md"
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
 # ── EVERY GROUP THE CHART'S RENDER CHECKS ASK FOR ────────────────────────────
@@ -202,11 +204,12 @@ POST_INSTALL = "post-install,post-upgrade"
 # Read off the RENDERED script rather than the template source, so a value reaches
 # these gates as the value resolves it.
 
-# The list the script iterates, and the denominator it is asserted against. TWO
-# SEPARATE DERIVATIONS ON PURPOSE: the list is built from the per-probe blocks the
-# template renders, the denominator from the count of enabled keys. A probe added
-# to the template that no `probes.*` key enables moves the list and not the
-# denominator, which is the register row's own red case.
+# The list the script iterates, and the denominator it is asserted against. NOT TWO
+# INDEPENDENT DERIVATIONS — both resolve from the same `$probes`, and the per-probe
+# blocks are GATED on that same list, so the denominator half is separate and the
+# list half is not. What the equality catches is the `PROBES` line edited away from
+# the count beside it: a probe added to the template that no `probes.*` key enables
+# moves the list and not the denominator, which is the register row's own red case.
 PROBE_LIST = re.compile(r'^PROBES="(?P<probes>[^"]*)"$', re.MULTILINE)
 DENOMINATOR = re.compile(r"^EXPECTED_PROBES=(?P<count>\d+)$", re.MULTILINE)
 
@@ -1751,16 +1754,25 @@ def test_the_preflight_and_its_triple_are_hooks_at_ordered_weights():
 # at zero.
 
 # The `await` call the probe makes, read off the RENDERED script: which condition it
-# waits for, which status it accepts, and which operator it names when it gives up.
+# waits for, which status it accepts, which MESSAGE it requires alongside them, and
+# which operator it names when it gives up.
 AWAIT_CALL = re.compile(
     r'^\s*await\s+"(?P<path>[^"]+)"\s+(?P<condition>\w+)\s+(?P<status>\S+)\s+'
-    r'(?P<operator>.+?)\s*$',
+    r'"(?P<message>[^"]*)"\s+"(?P<operator>[^"]+)"\s*$',
     re.MULTILINE,
 )
 
 # The condition the probe must take, and the weaker one it must never take.
 THE_PROGRAMMED_CONDITION = "Programmed"
 THE_WEAKER_CONDITION = "Accepted"
+
+# The matcher itself, and the needle the probe hands it. Both read off the RENDERED
+# script, because the gate below RUNS them rather than reading them.
+CONDITION_MATCHER = re.compile(
+    r"^(?P<indent>[ ]*)condition_matches\(\) \{\n(?:.*\n)*?(?P=indent)\}$",
+    re.MULTILINE,
+)
+PROGRAMMED_MESSAGE_ASSIGNMENT = re.compile(r"^[ ]*PROGRAMMED_MESSAGE=.*$", re.MULTILINE)
 
 # `trap cleanup EXIT` at the TOP LEVEL. Inside a function it is scoped to that
 # function's shell and never fires for the Job.
@@ -1906,8 +1918,8 @@ def await_call(script: str):
     return match
 
 
-def test_the_probe_waits_for_programmed_and_never_for_accepted():
-    """`Programmed`, NOT `Accepted`, AND THE DIFFERENCE IS THE WHOLE PROBE.
+def condition_choice_failures(script: str) -> list[str]:
+    """`Programmed`, NOT `Accepted`, AND THE DIFFERENCE IS THE WHOLE PROBE. PURE.
 
     `Accepted=True` means the controller validated the Gateway's spec against its
     GatewayClass; `Programmed=True` means the data plane for it exists. A controller
@@ -1916,24 +1928,42 @@ def test_the_probe_waits_for_programmed_and_never_for_accepted():
     THE WEAKER CONDITION IS REFUSED BY NAME rather than left out of the check, so a
     silent downgrade to `Accepted` fails here instead of shipping as a probe that
     still says it proves a running data plane.
+
+    A HELPER RATHER THAN A TEST BODY, so the red case below can CALL THIS GATE and
+    assert the message it produces. A red case that only re-reads the mutation it
+    applied proves the mutation landed and says nothing about whether anything would
+    have caught it — which is the shape the denominator and RBAC gates in this file
+    already avoid.
     """
-    script = post_install_probe_script(adopter_render())
+    failures = []
     call = await_call(script)
-    assert call.group("condition") == THE_PROGRAMMED_CONDITION, (
-        f"the probe waits for {call.group('condition')!r}; it must wait for "
-        f"{THE_PROGRAMMED_CONDITION!r}. If that condition turns out not to be set at "
-        f"the pinned Envoy Gateway version, that is a measurement that changes this "
-        f"probe and is recorded with its reason — never a silent downgrade"
-    )
-    assert call.group("status") == "True", call.group(0)
-    assert THE_WEAKER_CONDITION not in script, (
-        f"the probe script mentions {THE_WEAKER_CONDITION!r}, which a Gateway carries "
-        f"with the controller at zero replicas once it has ever been reconciled"
-    )
-    assert "Envoy Gateway" in call.group("operator"), (
-        f"the probe's timeout names {call.group('operator')!r} rather than the "
-        f"operator, so a failure would report a condition instead of an absent controller"
-    )
+    if call.group("condition") != THE_PROGRAMMED_CONDITION:
+        failures.append(
+            f"the probe waits for {call.group('condition')!r}; it must wait for "
+            f"{THE_PROGRAMMED_CONDITION!r}. If that condition turns out not to be set "
+            f"at the pinned Envoy Gateway version, that is a measurement that changes "
+            f"this probe and is recorded with its reason — never a silent downgrade"
+        )
+    if call.group("status") != "True":
+        failures.append(f"the probe accepts status {call.group('status')!r}: {call.group(0)}")
+    if THE_WEAKER_CONDITION in script:
+        failures.append(
+            f"the probe script mentions {THE_WEAKER_CONDITION!r}, which a Gateway "
+            f"carries with the controller at zero replicas once it has ever been "
+            f"reconciled"
+        )
+    if "Envoy Gateway" not in call.group("operator"):
+        failures.append(
+            f"the probe's timeout names {call.group('operator')!r} rather than the "
+            f"operator, so a failure would report a condition instead of an absent "
+            f"controller"
+        )
+    return failures
+
+
+def test_the_probe_waits_for_programmed_and_never_for_accepted():
+    failures = condition_choice_failures(post_install_probe_script(adopter_render()))
+    assert failures == [], "\n".join(failures)
 
 
 def chart_whose_probe_waits_for_accepted(destination: Path) -> Path:
@@ -1942,24 +1972,25 @@ def chart_whose_probe_waits_for_accepted(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     job = copy / "templates" / "envoy-gateway-probe.yaml"
     text = job.read_text()
-    line = 'await "$gateways/$PROBE_NAME" Programmed True "Envoy Gateway"'
+    line = 'await "$gateways/$PROBE_NAME" Programmed True "$PROGRAMMED_MESSAGE" "Envoy Gateway"'
     assert line in text, "the await call moved; this red case is now testing nothing"
-    job.write_text(
-        text.replace(line, 'await "$gateways/$PROBE_NAME" Accepted True "Envoy Gateway"', 1)
-    )
+    swapped = 'await "$gateways/$PROBE_NAME" Accepted True "$PROGRAMMED_MESSAGE" "Envoy Gateway"'
+    job.write_text(text.replace(line, swapped, 1))
     return copy
 
 
 def test_waiting_for_accepted_reddens_the_condition_gate(tmp_path):
-    script = post_install_probe_script(adopter_render(chart_whose_probe_waits_for_accepted(tmp_path)))
-    call = await_call(script)
-    assert call.group("condition") == THE_WEAKER_CONDITION, (
-        "the probe was changed to wait for the weaker condition and it still reads as "
-        "Programmed, so this red case is now testing nothing"
+    """THE GATE IS CALLED, not the mutation re-read."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_probe_waits_for_accepted(tmp_path))
     )
+    failures = condition_choice_failures(script)
+    message = "\n".join(failures)
+    assert failures, "the probe was changed to wait for the weaker condition and the gate passed"
+    assert "the probe waits for 'Accepted'" in message, message
 
 
-def test_the_probe_removes_any_prior_gateway_before_creating_its_own():
+def freshness_failures(script: str) -> list[str]:
     """FRESHNESS IS WHAT MAKES THE SCALED-TO-ZERO CASE RED, and it is a line of shell.
 
     A Gateway left behind by a killed run carries a status a PREVIOUS reconcile
@@ -1968,20 +1999,32 @@ def test_the_probe_removes_any_prior_gateway_before_creating_its_own():
     side: with the controller at zero the probe would read a stale `Programmed=True`
     and report a pass. So the script deletes any object of its fixed name and waits
     for it to be GONE before creating its own.
+
+    A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
+    states: the red case below calls this and asserts the message. PURE.
     """
-    script = post_install_probe_script(adopter_render())
+    failures = []
     match = CREATE_FUNCTION.search(script)
     assert match, "the probe script defines no `create()`, so there is nothing to place"
     body = match.group("body")
-    assert 'remove "$1"' in body, (
-        "the probe's `create()` does not remove the object of its fixed name first, "
-        "so a Gateway left by a killed run is read back with the status an earlier "
-        f"reconcile wrote: {body}"
-    )
-    assert body.index('remove "$1"') < body.index("request POST"), (
-        f"the probe removes AFTER it creates, which collides with the leftover rather "
-        f"than replacing it: {body}"
-    )
+    if 'remove "$1"' not in body:
+        failures.append(
+            "the probe's `create()` does not remove the object of its fixed name "
+            "first, so a Gateway left by a killed run is read back with the status an "
+            f"earlier reconcile wrote: {body}"
+        )
+        return failures
+    if body.index('remove "$1"') >= body.index("request POST"):
+        failures.append(
+            f"the probe removes AFTER it creates, which collides with the leftover "
+            f"rather than replacing it: {body}"
+        )
+    return failures
+
+
+def test_the_probe_removes_any_prior_gateway_before_creating_its_own():
+    failures = freshness_failures(post_install_probe_script(adopter_render()))
+    assert failures == [], "\n".join(failures)
 
 
 def chart_whose_probe_does_not_remove_first(destination: Path) -> Path:
@@ -1997,19 +2040,18 @@ def chart_whose_probe_does_not_remove_first(destination: Path) -> Path:
 
 
 def test_dropping_the_remove_before_create_reddens_the_freshness_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
     script = post_install_probe_script(
         adopter_render(chart_whose_probe_does_not_remove_first(tmp_path))
     )
-    match = CREATE_FUNCTION.search(script)
-    assert match, "the probe script defines no `create()` at all after the mutation"
-    assert 'remove "$1"' not in match.group("body"), (
-        "the remove-before-create was deleted and it is still in `create()`, so this "
-        "red case is now testing nothing"
-    )
+    failures = freshness_failures(script)
+    message = "\n".join(failures)
+    assert failures, "the remove-before-create was deleted and the freshness gate passed"
+    assert "does not remove the object of its fixed name first" in message, message
 
 
-def test_the_probe_deletes_its_gateway_on_every_exit_path():
-    """`hook-delete-policy` DOES NOT DO THIS, and a Gateway is not inert.
+def cleanup_failures(script: str) -> list[str]:
+    """`hook-delete-policy` DOES NOT DO THIS, and a Gateway is not inert. PURE.
 
     `before-hook-creation` deletes the JOB before the next hook run; it never touches
     objects that Job created. Envoy Gateway provisions a Deployment and a Service per
@@ -2017,20 +2059,32 @@ def test_the_probe_deletes_its_gateway_on_every_exit_path():
     infrastructure standing. The trap runs on EXIT — success and failure alike — and
     it runs at the TOP LEVEL, because a trap set inside a function is scoped to that
     function's shell and never fires for the Job.
+
+    A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
+    states: the red case below calls this and asserts the message.
     """
-    script = post_install_probe_script(adopter_render())
-    assert CLEANUP_TRAP.search(script), (
-        "the probe script carries no top-level `trap cleanup EXIT`, so a probe that "
-        "times out leaves its Gateway — and the proxy Deployment and Service Envoy "
-        "Gateway provisioned for it — standing"
-    )
-    assert 'request DELETE "$path" ""' in script, (
-        "the probe's cleanup issues no DELETE, so the trap fires and removes nothing"
-    )
-    assert 'CREATED="$CREATED $1"' in script, (
-        "the probe never records what it created, so the cleanup walks an empty list "
-        "and passes having deleted nothing"
-    )
+    failures = []
+    if not CLEANUP_TRAP.search(script):
+        failures.append(
+            "the probe script carries no top-level `trap cleanup EXIT`, so a probe "
+            "that times out leaves its Gateway — and the proxy Deployment and Service "
+            "Envoy Gateway provisioned for it — standing"
+        )
+    if 'request DELETE "$path" ""' not in script:
+        failures.append(
+            "the probe's cleanup issues no DELETE, so the trap fires and removes nothing"
+        )
+    if 'CREATED="$CREATED $1"' not in script:
+        failures.append(
+            "the probe never records what it created, so the cleanup walks an empty "
+            "list and passes having deleted nothing"
+        )
+    return failures
+
+
+def test_the_probe_deletes_its_gateway_on_every_exit_path():
+    failures = cleanup_failures(post_install_probe_script(adopter_render()))
+    assert failures == [], "\n".join(failures)
 
 
 def chart_without_the_probe_cleanup_trap(destination: Path) -> Path:
@@ -2046,17 +2100,18 @@ def chart_without_the_probe_cleanup_trap(destination: Path) -> Path:
 
 
 def test_deleting_the_cleanup_trap_reddens_the_cleanup_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
     script = post_install_probe_script(
         adopter_render(chart_without_the_probe_cleanup_trap(tmp_path))
     )
-    assert not CLEANUP_TRAP.search(script), (
-        "the trap was deleted and the script still carries one, so this red case is "
-        "now testing nothing"
-    )
+    failures = cleanup_failures(script)
+    message = "\n".join(failures)
+    assert failures, "the trap was deleted and the cleanup gate passed"
+    assert "carries no top-level `trap cleanup EXIT`" in message, message
 
 
-def test_the_probe_gateway_binds_to_the_class_and_the_infrastructure_this_chart_renders():
-    """THE CLASS IS WHAT MAKES THIS ENVOY GATEWAY'S PROBE, not the API group.
+def probe_gateway_failures(documents: list[dict]) -> list[str]:
+    """THE CLASS IS WHAT MAKES THIS ENVOY GATEWAY'S PROBE, not the API group. PURE.
 
     A Gateway is `gateway.networking.k8s.io`, a SPECIFICATION every implementation
     registers. What names the operator is the GatewayClass, whose `controllerName` is
@@ -2069,37 +2124,50 @@ def test_the_probe_gateway_binds_to_the_class_and_the_infrastructure_this_chart_
     and exposed exactly as the estate's own edge is. A probe provisioned from the
     controller's defaults could fail where the real Gateway succeeds, which would be
     a probe reporting on a Gateway nobody installed.
+
+    A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
+    states: the two red cases below call this and assert the message each produces.
     """
-    documents = adopter_render()
+    failures = []
     body = probe_gateway_body(post_install_probe_script(documents))
 
     classes = of_kind(documents, "GatewayClass")
     assert len(classes) == 1, f"expected 1 rendered GatewayClass, found {classes}"
-    assert body["spec"]["gatewayClassName"] == name_of(classes[0]), (
-        f"the probe Gateway binds to class {body['spec']['gatewayClassName']!r} and "
-        f"this chart renders {name_of(classes[0])!r}. A class nothing created leaves "
-        f"the probe `Accepted=False` forever, with no controller ever looking at it"
-    )
+    if body["spec"]["gatewayClassName"] != name_of(classes[0]):
+        failures.append(
+            f"the probe Gateway binds to class {body['spec']['gatewayClassName']!r} "
+            f"and this chart renders {name_of(classes[0])!r}. A class nothing created "
+            f"leaves the probe `Accepted=False` forever, with no controller ever "
+            f"looking at it"
+        )
 
     proxies = of_kind(documents, "EnvoyProxy")
     assert len(proxies) == 1, f"expected 1 rendered EnvoyProxy, found {proxies}"
     reference = body["spec"]["infrastructure"]["parametersRef"]
-    assert reference == {
+    if reference != {
         "group": "gateway.envoyproxy.io",
         "kind": "EnvoyProxy",
         "name": name_of(proxies[0]),
-    }, (
-        f"the probe Gateway's parametersRef is {reference}; it must name the "
-        f"EnvoyProxy this chart renders, {name_of(proxies[0])!r}, so that whether a "
-        f"Gateway can be programmed on this cluster is one question rather than two"
-    )
+    }:
+        failures.append(
+            f"the probe Gateway's parametersRef is {reference}; it must name the "
+            f"EnvoyProxy this chart renders, {name_of(proxies[0])!r}, so that whether "
+            f"a Gateway can be programmed on this cluster is one question rather than two"
+        )
 
     listeners = body["spec"]["listeners"]
-    assert len(listeners) == 1 and listeners[0]["protocol"] == "HTTP", (
-        f"the probe Gateway's listeners are {listeners}; one plain HTTP listener is "
-        f"what keeps the probe free of a TLS Secret, a ReferenceGrant and "
-        f"cert-manager, so that a red here is Envoy Gateway and nothing else"
-    )
+    if len(listeners) != 1 or listeners[0]["protocol"] != "HTTP":
+        failures.append(
+            f"the probe Gateway's listeners are {listeners}; one plain HTTP listener "
+            f"is what keeps the probe free of a TLS Secret, a ReferenceGrant and "
+            f"cert-manager, so that a red here is Envoy Gateway and nothing else"
+        )
+    return failures
+
+
+def test_the_probe_gateway_binds_to_the_class_and_the_infrastructure_this_chart_renders():
+    failures = probe_gateway_failures(adopter_render())
+    assert failures == [], "\n".join(failures)
 
 
 def chart_whose_probe_binds_to_another_class(destination: Path) -> Path:
@@ -2115,13 +2183,13 @@ def chart_whose_probe_binds_to_another_class(destination: Path) -> Path:
 
 
 def test_a_probe_bound_to_another_class_reddens_the_class_gate(tmp_path):
-    documents = adopter_render(chart_whose_probe_binds_to_another_class(tmp_path))
-    body = probe_gateway_body(post_install_probe_script(documents))
-    classes = of_kind(documents, "GatewayClass")
-    assert body["spec"]["gatewayClassName"] != name_of(classes[0]), (
-        "the probe was bound to another class and it still names the rendered one, "
-        "so this red case is now testing nothing"
+    """THE GATE IS CALLED, not the mutation re-read."""
+    failures = probe_gateway_failures(
+        adopter_render(chart_whose_probe_binds_to_another_class(tmp_path))
     )
+    message = "\n".join(failures)
+    assert failures, "the probe was bound to another class and the gate passed"
+    assert "binds to class 'istio'" in message, message
 
 
 def chart_whose_probe_names_no_infrastructure(destination: Path) -> Path:
@@ -2137,13 +2205,432 @@ def chart_whose_probe_names_no_infrastructure(destination: Path) -> Path:
 
 
 def test_a_probe_whose_infrastructure_names_nothing_reddens_the_gate(tmp_path):
-    documents = adopter_render(chart_whose_probe_names_no_infrastructure(tmp_path))
-    body = probe_gateway_body(post_install_probe_script(documents))
-    proxies = of_kind(documents, "EnvoyProxy")
-    assert body["spec"]["infrastructure"]["parametersRef"]["name"] != name_of(proxies[0]), (
-        "the parametersRef was pointed at nothing and it still names the rendered "
-        "EnvoyProxy, so this red case is now testing nothing"
+    """THE GATE IS CALLED, not the mutation re-read."""
+    failures = probe_gateway_failures(
+        adopter_render(chart_whose_probe_names_no_infrastructure(tmp_path))
     )
+    message = "\n".join(failures)
+    assert failures, "the parametersRef was pointed at nothing and the gate passed"
+    assert "'name': 'no-such-envoyproxy'" in message, message
+
+
+# ── THE CONDITION READING, RUN RATHER THAN READ ──────────────────────────────
+# A GATEWAY CARRIES TWO CONDITIONS NAMED `Programmed`, AND THEY ARE DIFFERENT FACTS.
+# The OBJECT's means an address was assigned and the proxy replicas are available;
+# each LISTENER's means its configuration was translated and sent to the data plane.
+# Measured on kind-yadgar against `docker.io/envoyproxy/gateway:v1.9.1`, read-only:
+#
+#   object-level     Programmed=True  "Address assigned to the Gateway, 2/2 envoy
+#                                      replicas available"
+#   listener-level   Programmed=True  "Sending translated listener configuration to
+#                                      the data plane"
+#
+# and `Programmed` appears four times in one Gateway's status. The matcher greps the
+# whole response, so `Programmed=True` ALONE is satisfied by either.
+#
+# THE TWO COME APART ON THE PROOF'S OWN CLUSTER. `envoyProxy.serviceType` defaults to
+# `LoadBalancer`, `example/values.yaml` deliberately does not restate it, and the
+# bare-install proof runs where no load-balancer controller exists — so the OBJECT's
+# `Programmed` goes False with reason `AddressNotAssigned`, the probe inherits that
+# same EnvoyProxy and so inherits that same failure, and the listener still
+# translates. A probe keyed on the condition alone reports SUCCESS there while the
+# real `edge` Gateway stalls.
+#
+# THESE GATES RUN THE RENDERED MATCHER rather than reading it. A Python restatement
+# of `sed | grep | grep | grep` is a second implementation, and a gate that agrees
+# with its own restatement proves nothing about the shell that ships. So the function
+# is lifted out of the rendered script verbatim, handed the needles the rendered
+# `await` call hands it, and executed against constructed bodies.
+#
+# STIPULATED RATHER THAN MEASURED, and stated here as well as in the values file:
+# that v1.9.1 sets the LISTENER's `Programmed=True` while address assignment fails
+# was NOT reproduced. Closing it needs a Gateway created on a cluster with no
+# load-balancer controller, which no read-only observation can stand in for. What IS
+# measured is that both conditions exist under one name with the two messages above.
+
+
+def gateway_body(
+    object_status: str, object_message: str, listener_status: str, listener_message: str
+) -> str:
+    """The bytes `curl` writes to `$body` for a Gateway carrying these conditions. PURE.
+
+    COMPACT JSON, as the API server writes it — `separators=(",", ":")` — because the
+    matcher's first step splits on the literal `},{` and a body with spaces in it
+    would not split at all. Same reasoning as `api_server_body` above.
+    """
+    return json.dumps(
+        {
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "envoy-gateway-probe", "namespace": "yadgar"},
+            "spec": {"gatewayClassName": "eg"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Accepted",
+                        "status": "True",
+                        "reason": "Accepted",
+                        "message": "The Gateway has been scheduled by Envoy Gateway",
+                    },
+                    {
+                        "type": "Programmed",
+                        "status": object_status,
+                        "reason": "Programmed" if object_status == "True" else "AddressNotAssigned",
+                        "message": object_message,
+                    },
+                ],
+                "listeners": [
+                    {
+                        "name": "probe",
+                        "attachedRoutes": 0,
+                        "conditions": [
+                            {
+                                "type": "Accepted",
+                                "status": "True",
+                                "reason": "Accepted",
+                                "message": "Listener is accepted",
+                            },
+                            {
+                                "type": "Programmed",
+                                "status": listener_status,
+                                "reason": "Programmed",
+                                "message": listener_message,
+                            },
+                        ],
+                    }
+                ],
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+ADDRESS_ASSIGNED = "Address assigned to the Gateway, 2/2 envoy replicas available"
+LISTENER_TRANSLATED = "Sending translated listener configuration to the data plane"
+NO_ADDRESS = "No addresses have been assigned to the Gateway"
+
+# A FRESH GATEWAY WITH THE CONTROLLER AT ZERO: admitted, and never given a status.
+FRESH_GATEWAY_BODY = json.dumps(
+    {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "Gateway",
+        "metadata": {"name": "envoy-gateway-probe", "namespace": "yadgar"},
+        "spec": {"gatewayClassName": "eg"},
+        "status": {},
+    },
+    separators=(",", ":"),
+)
+
+# Each case is (name, body, must the matcher ACCEPT it, why it is here).
+CONDITION_READING_CASES = (
+    (
+        "programmed",
+        gateway_body("True", ADDRESS_ASSIGNED, "True", LISTENER_TRANSLATED),
+        True,
+        "the status a healthy cluster writes. A matcher that refuses this is red on a "
+        "healthy cluster, which is the class this chart refuses",
+    ),
+    (
+        "listener-only",
+        gateway_body("False", NO_ADDRESS, "True", LISTENER_TRANSLATED),
+        False,
+        "the OBJECT's `Programmed` False for want of an address and the LISTENER's "
+        "True. `envoyProxy.serviceType` defaults to `LoadBalancer` and the proof runs "
+        "where nothing provides one, so this is the proof's own configuration — a "
+        "matcher that accepts it reports success while the real `edge` Gateway stalls",
+    ),
+    (
+        "no-status",
+        FRESH_GATEWAY_BODY,
+        False,
+        "the scaled-to-zero case: a fresh Gateway the controller never touched. A "
+        "matcher that accepts it is the whole probe reading green with no controller",
+    ),
+)
+
+
+def matcher_harness(script: str) -> str:
+    """The rendered matcher, the needle the rendered script hands it, and nothing else.
+
+    THE NEEDLES ARE TAKEN FROM THE `await` CALL SITE rather than retyped here, so a
+    probe changed to demand something else is exercised as changed. PURE.
+    """
+    call = await_call(script)
+    function = CONDITION_MATCHER.search(script)
+    assert function, (
+        "the rendered script defines no `condition_matches()`, so there is nothing to "
+        "run and this gate would pass having executed nothing"
+    )
+    assignment = PROGRAMMED_MESSAGE_ASSIGNMENT.search(script)
+    assert assignment, (
+        "the rendered script assigns no PROGRAMMED_MESSAGE, so the probe requires no "
+        "message and this gate would run a matcher the probe does not use"
+    )
+    return "\n".join(
+        [
+            "set -u",
+            'body="$1"',
+            assignment.group(0).strip(),
+            textwrap.dedent(function.group(0)),
+            " ".join(
+                [
+                    "condition_matches",
+                    call.group("condition"),
+                    call.group("status"),
+                    '"' + call.group("message") + '"',
+                ]
+            ),
+            "",
+        ]
+    )
+
+
+def matcher_verdict(harness: Path, body: Path) -> int:
+    """Whether the rendered matcher ACCEPTS `body`: its exit status, 0 for yes."""
+    binary = shutil.which("sh")
+    # NOT A SKIP, and ADR-0650 is why — the same decision `helm()` above makes.
+    assert binary, (
+        "no POSIX shell is on PATH. This gate RUNS the probe's own matcher, and the "
+        "probe's container runs it under `sh` too — install one rather than letting "
+        "this report a pass it did not earn"
+    )
+    return subprocess.run(
+        [binary, str(harness), str(body)], capture_output=True, text=True
+    ).returncode
+
+
+def condition_reading_failures(script: str, tmp_path: Path) -> list[str]:
+    """Every constructed body the rendered matcher reads the wrong way."""
+    harness = tmp_path / "matcher.sh"
+    harness.write_text(matcher_harness(script))
+    failures = []
+    for name, body, must_accept, why in CONDITION_READING_CASES:
+        path = tmp_path / f"body-{name}.json"
+        path.write_text(body)
+        accepted = matcher_verdict(harness, path) == 0
+        if accepted == must_accept:
+            continue
+        verb = "ACCEPTS" if accepted else "REFUSES"
+        failures.append(
+            f"the rendered matcher {verb} the {name} body and must not: {why}. The "
+            f"body it read was {body}"
+        )
+    return failures
+
+
+def test_the_probe_refuses_a_body_carrying_only_the_listeners_programmed(tmp_path):
+    """R2: the three readings, through the shell the probe actually ships."""
+    failures = condition_reading_failures(post_install_probe_script(adopter_render()), tmp_path)
+    assert failures == [], "\n".join(failures)
+
+
+def chart_whose_matcher_drops_the_message_stage(destination: Path) -> Path:
+    """The reading gate's red case, and NOT AN INVENTED MUTATION.
+
+    This restores the matcher exactly as it stood when the review found the defect:
+    `Programmed=True` with no message required. It is at once the permanent red case
+    and the demonstration against the real bug.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    three_stage = (
+        "                  | grep -E '\"status\":\"('\"$2\"')\"' \\\n"
+        '                  | grep -qF "$3"\n'
+    )
+    assert three_stage in text, "the matcher moved; this red case is now testing nothing"
+    two_stage = "                  | grep -Eq '\"status\":\"('\"$2\"')\"'\n"
+    job.write_text(text.replace(three_stage, two_stage, 1))
+    return copy
+
+
+def test_a_matcher_without_the_message_stage_reddens_the_reading_gate(tmp_path):
+    """The wide matcher put back: it accepts the body the real cluster produces."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_matcher_drops_the_message_stage(tmp_path))
+    )
+    failures = condition_reading_failures(script, tmp_path)
+    message = "\n".join(failures)
+    assert failures, (
+        "the message stage was deleted and the reading gate passed, so a probe that "
+        "reports success off the listener's condition would ship again"
+    )
+    assert "ACCEPTS the listener-only body" in message, message
+
+
+def chart_with_an_empty_programmed_message(destination: Path) -> Path:
+    """The key's own weakening direction: `grep -F ""` matches every line.
+
+    A VALUES EDIT, NOT A TEMPLATE ONE, which is the objection to making a message a
+    key at all. The gate answers it by BEHAVIOUR rather than by a literal: an empty
+    needle cannot refuse anything, so the reading gate reddens on the same three
+    bodies it always reads.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    values = copy / "values.yaml"
+    text = values.read_text()
+    line = "    programmedMessage: Address assigned to the Gateway\n"
+    assert line in text, (
+        "`preflight.envoyGateway.programmedMessage` moved; this red case is now "
+        "testing nothing"
+    )
+    values.write_text(text.replace(line, '    programmedMessage: ""\n', 1))
+    return copy
+
+
+def test_an_empty_programmed_message_reddens_the_reading_gate(tmp_path):
+    script = post_install_probe_script(
+        adopter_render(chart_with_an_empty_programmed_message(tmp_path))
+    )
+    failures = condition_reading_failures(script, tmp_path)
+    message = "\n".join(failures)
+    assert failures, (
+        "`programmedMessage` was emptied and the reading gate passed, so the third "
+        "stage can be turned into a no-op by a values edit nothing catches"
+    )
+    assert "ACCEPTS the listener-only body" in message, message
+
+
+# ── THE PROBE'S BOUND AND HELM'S HOOK BUDGET, WHICH ARE ONE CONSTRAINT ────────
+# MEASURED ON BOTH PINS — helm 3.18.4 and 4.3.0 — `--timeout` is documented as "time
+# to wait for any individual Kubernetes operation (like Jobs for hooks)" and defaults
+# to `5m0s`. Helm's clock starts when the hook Job is CREATED, so scheduling and
+# image pull come out of the same budget before the script's own clock starts.
+#
+# AND THE SCRIPT'S WORST CASE IS TWICE ITS BOUND. `create()` calls `remove()` first,
+# and `remove()` loops to the SAME `TIMEOUT_SECONDS` that `await()` then loops to. So
+# two bounded loops compose, plus the request time of the calls themselves, which no
+# value bounds.
+#
+# WHAT IS LOST WHEN HELM GIVES UP FIRST IS THE MESSAGE, NOT THE GATEWAY. The Job
+# carries `backoffLimit: 0` and no `activeDeadlineSeconds`, so the pod runs on and
+# the trap still deletes what it made. The operator reads `timed out waiting for the
+# condition` instead of the probe naming Envoy Gateway, which is exactly what ruling
+# 10 asks the probe to do.
+#
+# THE BOUND IS NOT LOWERED TO FIT. `Programmed` includes replica availability, so a
+# cold cluster may genuinely need 300s, and a bound cut to fit helm's default would
+# reintroduce red-on-healthy. The budget is documented instead, and this gate is what
+# stops the two diverging in silence.
+BOUNDED_LOOPS_PER_RUN = 2
+INSTALL_BUDGET_MARGIN_SECONDS = 300
+
+# The bound, read off the RENDERED script, never off the values literal beside it.
+PROBE_BOUND = re.compile(r"^\s*TIMEOUT_SECONDS=(?P<seconds>\d+)\s*$", re.MULTILINE)
+
+# `--timeout <duration>` as helm takes it. A bare `--timeout` with no duration after
+# it — the prose mentioning the flag — is not a statement of a budget and is skipped.
+TIMEOUT_FLAG = re.compile(r"--timeout\s+(?P<budget>\d+)(?P<unit>[smh])\b")
+SECONDS_PER_UNIT = {"s": 1, "m": 60, "h": 3600}
+
+# Where the budget must be stated, and the least number of statements each file must
+# carry. A MINIMUM rather than an equality, so prose may repeat it — but zero is
+# refused, because a gate that found no statement would pass having compared nothing.
+BUDGET_IS_STATED_IN = {"README.md": 1, "example/values.yaml": 1}
+
+
+def install_budget_failures(script: str, stated: dict[str, str]) -> list[str]:
+    """Whether every documented `--timeout` covers the probe's composed bound. PURE.
+
+    `stated` maps each file's name to its text, so the red cases below can hand this
+    a mutated document without writing one to disk.
+    """
+    failures = []
+    bound = PROBE_BOUND.search(script)
+    assert bound, (
+        "the rendered probe script sets no TIMEOUT_SECONDS, so it carries no bound "
+        "and this gate would pass having compared nothing"
+    )
+    seconds = int(bound.group("seconds"))
+    required = BOUNDED_LOOPS_PER_RUN * seconds + INSTALL_BUDGET_MARGIN_SECONDS
+
+    for name, minimum in BUDGET_IS_STATED_IN.items():
+        found = list(TIMEOUT_FLAG.finditer(stated[name]))
+        if len(found) < minimum:
+            failures.append(
+                f"{name} states `--timeout <duration>` {len(found)} times and must "
+                f"state it at least {minimum}. The probe bounds itself at {seconds}s "
+                f"and helm's own default is 300s, so an install that is handed no "
+                f"budget aborts before the probe can name Envoy Gateway"
+            )
+            continue
+        for match in found:
+            budget = int(match.group("budget")) * SECONDS_PER_UNIT[match.group("unit")]
+            if budget >= required:
+                continue
+            failures.append(
+                f"{name} documents `--timeout {match.group('budget')}"
+                f"{match.group('unit')}` = {budget}s, and the probe needs "
+                f"{required}s: {BOUNDED_LOOPS_PER_RUN} composed loops of {seconds}s "
+                f"plus {INSTALL_BUDGET_MARGIN_SECONDS}s for scheduling, image pull "
+                f"and request time. Helm aborts first, and the operator reads `timed "
+                f"out waiting for the condition` instead of the probe's diagnostic"
+            )
+    return failures
+
+
+def documented_budgets() -> dict[str, str]:
+    """The two files the budget is stated in, as they stand."""
+    return {
+        "README.md": README.read_text(),
+        "example/values.yaml": ADOPTER_VALUES.read_text(),
+    }
+
+
+def test_the_documented_install_budget_covers_the_probes_bound():
+    """R2: the bound off the rendered script, the budget off the two documents."""
+    failures = install_budget_failures(
+        post_install_probe_script(adopter_render()), documented_budgets()
+    )
+    assert failures == [], "\n".join(failures)
+
+
+def test_documenting_helms_own_default_reddens_the_budget_gate():
+    """The red case: the budget cut to the default the measurement says is too small."""
+    stated = documented_budgets()
+    stated["README.md"] = stated["README.md"].replace("--timeout 15m", "--timeout 5m")
+    failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
+    message = "\n".join(failures)
+    assert failures, "the documented budget was cut to helm's default and the gate passed"
+    assert "README.md documents `--timeout 5m` = 300s" in message, message
+
+
+def test_a_budget_stated_nowhere_reddens_the_budget_gate():
+    """The gate cannot pass having found no statement."""
+    stated = documented_budgets()
+    stated["example/values.yaml"] = stated["example/values.yaml"].replace("--timeout 15m", "")
+    failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
+    message = "\n".join(failures)
+    assert failures, "the budget was deleted from example/values.yaml and the gate passed"
+    assert "example/values.yaml states `--timeout <duration>` 0 times" in message, message
+
+
+def chart_whose_probe_outlives_the_documented_budget(destination: Path) -> Path:
+    """The other knob: the bound raised past what the documented budget covers."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    values = copy / "values.yaml"
+    text = values.read_text()
+    line = "    timeoutSeconds: 300\n"
+    assert line in text, (
+        "`preflight.envoyGateway.timeoutSeconds` moved; this red case is now testing "
+        "nothing"
+    )
+    values.write_text(text.replace(line, "    timeoutSeconds: 600\n", 1))
+    return copy
+
+
+def test_raising_the_bound_past_the_documented_budget_reddens_the_gate(tmp_path):
+    """THE CONSTRAINT HAS TWO KNOBS, and moving either one alone must redden."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_probe_outlives_the_documented_budget(tmp_path))
+    )
+    failures = install_budget_failures(script, documented_budgets())
+    message = "\n".join(failures)
+    assert failures, "the probe's bound was doubled and the documented budget still passed"
+    assert "the probe needs 1500s" in message, message
 
 
 def post_install_rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
