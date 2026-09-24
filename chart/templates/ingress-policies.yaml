@@ -174,10 +174,15 @@ spec:
     # one. These four kinds hold AUTHORED objects, which is why this number belongs
     # in a chart comment: a later reader re-running the same narrow sweep should
     # still get two, and a re-run that disagrees is a finding rather than drift.
-    # A wider sweep across every resource kind also returns only the broker's own
-    # objects and the machinery that deploys it, but it returns controller-derived
-    # names that churn, so that measurement lives in this PR's body rather than
-    # here, where it would go stale silently.
+    # A WIDER SWEEP ACROSS EVERY RESOURCE KIND RETURNS MORE THAN TWO, and that is
+    # expected rather than a sign this comment has gone stale. The additional
+    # objects are the broker's own and the machinery that deploys it, reached
+    # through controller-derived names — a ControllerRevision's hash suffix, an
+    # EndpointSlice's random suffix — that change on ordinary operation. A number
+    # built on those drifts, so it is not written into a file that ships.
+    # ADR-0769 IS THE DURABLE RECORD of this rule, of the three things measured
+    # before any such narrowing lands, and of the CNI limit stated further down;
+    # the full enumeration belongs to the change that introduced it.
     #
     # THE TWO QUESTIONS ARE NOT THE SAME QUESTION, because a text-match census
     # counts comments. "Objects whose text contains 8222" includes prose that
