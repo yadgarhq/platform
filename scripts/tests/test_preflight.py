@@ -2590,7 +2590,12 @@ def test_the_documented_install_budget_covers_the_probes_bound():
 def test_documenting_helms_own_default_reddens_the_budget_gate():
     """The red case: the budget cut to the default the measurement says is too small."""
     stated = documented_budgets()
-    stated["README.md"] = stated["README.md"].replace("--timeout 15m", "--timeout 5m")
+    original = stated["README.md"]
+    stated["README.md"] = original.replace("--timeout 15m", "--timeout 5m")
+    assert stated["README.md"] != original, (
+        "README.md no longer spells the budget `--timeout 15m`, so this red case "
+        "replaced nothing and is now testing whatever the unmutated file says"
+    )
     failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
     message = "\n".join(failures)
     assert failures, "the documented budget was cut to helm's default and the gate passed"
@@ -2600,7 +2605,12 @@ def test_documenting_helms_own_default_reddens_the_budget_gate():
 def test_a_budget_stated_nowhere_reddens_the_budget_gate():
     """The gate cannot pass having found no statement."""
     stated = documented_budgets()
-    stated["example/values.yaml"] = stated["example/values.yaml"].replace("--timeout 15m", "")
+    original = stated["example/values.yaml"]
+    stated["example/values.yaml"] = original.replace("--timeout 15m", "")
+    assert stated["example/values.yaml"] != original, (
+        "example/values.yaml no longer spells the budget `--timeout 15m`, so this red "
+        "case deleted nothing and is now testing whatever the unmutated file says"
+    )
     failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
     message = "\n".join(failures)
     assert failures, "the budget was deleted from example/values.yaml and the gate passed"
