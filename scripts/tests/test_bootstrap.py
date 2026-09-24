@@ -558,6 +558,26 @@ GENERATES = re.compile(
 # for its Secret have to match — see `generation_failures`.
 INTERPOLATED = re.compile(r"\$(?P<variable>[A-Za-z_][A-Za-z0-9_]*)")
 
+# The assignment that carries one draw out of `mint` and into a name of its own,
+# `<variable>="$value"`. `mint` leaves every draw in the single variable `value`,
+# so a Secret carrying two of them has to copy the first aside before the second
+# overwrites it. `generation_failures` reads these to decide whether a variable a
+# body names traces to a draw of that Secret.
+#
+# THE MATCHER IS DELIBERATELY NARROW, AND THAT IS THE POINT. It accepts the exact
+# text `="$value"` and nothing else — not `="${value}"`, not a copy through a
+# third name. A refactor to either reddens this gate rather than quietly widening
+# what counts as a draw, and whoever widens it has to say why in this comment.
+DRAW_ASSIGNED = re.compile(
+    r'^\s*(?P<variable>[A-Za-z_][A-Za-z0-9_]*)="\$value"\s*$', re.MULTILINE
+)
+
+# The two maps a request body can carry key material in. BOTH are read, because a
+# body holding one value under two names is the same defect whichever field holds
+# it — `iam_key_set_failures` is where the CHOICE between the two fields is the
+# subject, and this is not that question.
+BODY_VALUE_FIELDS = ("data", "stringData")
+
 # The length check on what the generator produced, and the arm it takes when the
 # length is wrong.
 LENGTH_CHECK = re.compile(
@@ -597,14 +617,47 @@ def generation_failures(
     ONE SECRET MAY CARRY MORE THAN ONE GENERATED VALUE, WHICH IS WHY THE ORDERING
     COMPARISON DEDUPLICATES. `iam-keys` holds TWO key files and so takes two `mint`
     statements against one `create`, and a strict `generated == created` would have
-    called that a disagreement. Deduplicating IN ORDER keeps everything that
-    comparison bought — a `mint` label renamed away from the body it feeds, a
-    `mint` dropped entirely, two Secrets generated in the wrong order — and gives up
-    only multiplicity, which the check below replaces with something stronger:
-    EVERY VARIABLE A BODY INTERPOLATES IS COUNTED AGAINST THE `mint` STATEMENTS FOR
-    THAT SECRET. Drop one of the two `iam-keys` draws and the body still names two
-    variables while the script generates one, so the count disagrees and this list
-    reports it.
+    called that a disagreement — on the SHIPPED chart, which is why it was not a
+    usable gate for a multi-draw Secret. Deduplicating IN ORDER keeps everything
+    that comparison bought — a `mint` label renamed away from the body it feeds, a
+    `mint` dropped entirely, two Secrets generated in the wrong order — and gives
+    up multiplicity.
+
+    THREE CLAUSES STAND IN FOR THE MULTIPLICITY, AND NONE OF THEM SUBSUMES
+    ANOTHER. Each is the only witness for its own mutation, so deleting one as
+    redundant reopens exactly one hole:
+
+    1. THE COUNT. Every variable a body interpolates is counted against the `mint`
+       statements for that Secret. Drop one of the two `iam-keys` draws and the
+       body still names two variables while the script generates one.
+    2. THE VALUES ARE PAIRWISE DISTINCT, over `data` and `stringData` together.
+       This is a comparison of RENDERED TEXT. It sees one draw feeding both key
+       fields — the body then reads `"$encryption_key"` twice — and it is the only
+       clause that does, because one draw for one body agrees with clause 1's
+       count and leaves the ordering comparison silent.
+    3. EVERY VARIABLE TRACES TO A DRAW OF THIS SECRET. A body may name `value`, or
+       a variable assigned `="$value"` between the previous body and this
+       `create`. This is the only clause that sees `blind_index_key="$encryption_key"`
+       with both draws left in place: the body still names two textually distinct
+       variables, so clauses 1 and 2 both stay silent, and the two key files land
+       BYTE-IDENTICAL.
+
+    WHAT NO CLAUSE HERE ASSERTS, stated as a limit rather than hedged. None of
+    them proves the two draws produce DIFFERENT BYTES. Nothing available at render
+    time can: the bytes do not exist until the Job runs, and two calls to the same
+    `mint` are the same text. What the three assert together is weaker and exact —
+    EVERY VALUE A BODY CARRIES TRACES TO A `mint` STATEMENT OF ITS OWN FOR THAT
+    SECRET. The aliasing hazard `chart/templates/bootstrap-secrets.yaml` names in
+    prose beside the two draws is closed at the level of the SOURCE OF EACH VALUE,
+    not of the values themselves.
+
+    THE ALIAS IS WORTH THIS MUCH MACHINERY BECAUSE IT HAS NO RUNTIME SIGNAL.
+    `encryption.key` and `blind-index.key` would both be valid 32-byte keys, `iam`
+    would boot, and `iam` v0.8.43's fingerprint covers both keys while both ARE the
+    same key. The blind index would share material with the ciphertext key and
+    nothing would redden, on any cluster, at any time. Contrast a body that names
+    `$ns`: the API server refuses `yadgar` as invalid base64 and the Job fails
+    loudly. Only the alias is silent, so only the alias needs the gate.
     """
     failures = []
     scripts = job_scripts(documents)
@@ -648,12 +701,56 @@ def generation_failures(
                 )
 
         draws = Counter(generated)
+        # Where the previous body ended. The span from here to the next body's
+        # start is the region that Secret's own draws live in — the `mint` calls
+        # and the assignments that carry them out of `value`. Scoping the region
+        # per body is what makes clause 3 a statement about THIS Secret rather
+        # than about the script, which would accept a body fed by the Secret
+        # before it.
+        read_from = 0
         for name, match in zip(created, BODY.finditer(script)):
             bodies += 1
             body = match.group("body")
+            drawn_here = {
+                found.group("variable")
+                for found in DRAW_ASSIGNED.finditer(script[read_from : match.start()])
+            }
+            read_from = match.end()
             variables = {
                 found.group("variable") for found in INTERPOLATED.finditer(body)
             }
+            untraced = sorted(variables - {"value"} - drawn_here)
+            if untraced:
+                failures.append(
+                    f"{job}: {name}'s request body names {untraced}, which no draw "
+                    f"of this Secret assigns. A body variable has to be `value` or "
+                    f"be assigned `=\"$value\"` between the previous body and this "
+                    f"`create`; the draws in that region assign "
+                    f"{sorted(drawn_here)}. A body that reaches ACROSS to another "
+                    f"variable posts material this Secret never drew — two key "
+                    f"files aliased onto one draw are both valid, `iam` boots, and "
+                    f"nothing reddens on any cluster at any time"
+                )
+            posted = json.loads(body)
+            repeated = sorted(
+                value
+                for value, seen in Counter(
+                    str(value)
+                    for field in BODY_VALUE_FIELDS
+                    for value in (posted.get(field) or {}).values()
+                ).items()
+                if seen > 1
+            )
+            if repeated:
+                failures.append(
+                    f"{job}: {name}'s request body carries {repeated} under more "
+                    f"than one key. Every key of one Secret has to hold material "
+                    f"of its own — `iam`'s fingerprint covers `encryption.key` and "
+                    f"`blind-index.key` BOTH, so a pair sharing one draw passes "
+                    f"that fingerprint while the blind index shares material with "
+                    f"the ciphertext key. It is a weaker key set that looks healthy "
+                    f"on every cluster forever"
+                )
             if len(variables) != draws.get(name, 0):
                 failures.append(
                     f"{job}: {name}'s request body interpolates "
@@ -706,6 +803,12 @@ def test_the_data_bearing_keys_are_generated_the_same_way_the_passwords_are():
     assert failures == [], "\n".join(failures)
 
 
+# THE SECOND DRAW'S OWN TEXT. All three red cases below perturb this same two
+# lines, so it is stated ONCE rather than as three spellings that drift apart —
+# each case then guards on the one constant and fails loudly when the draw moves.
+THE_BLIND_INDEX_DRAW = '              mint iam-keys 32\n              blind_index_key="$value"\n'
+
+
 def chart_with_one_iam_key_draw_dropped(destination: Path) -> Path:
     """One of the two `mint iam-keys 32` statements deleted, its body left alone.
 
@@ -718,9 +821,10 @@ def chart_with_one_iam_key_draw_dropped(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     template = copy / "templates" / "bootstrap-secrets.yaml"
     text = template.read_text()
-    draw = '              mint iam-keys 32\n              blind_index_key="$value"\n'
-    assert draw in text, "the blind-index draw moved; this red case is now testing nothing"
-    template.write_text(text.replace(draw, ""))
+    assert THE_BLIND_INDEX_DRAW in text, (
+        "the blind-index draw moved; this red case is now testing nothing"
+    )
+    template.write_text(text.replace(THE_BLIND_INDEX_DRAW, ""))
     return copy
 
 
@@ -737,6 +841,123 @@ def test_dropping_one_iam_key_draw_reddens_the_generation_gate(tmp_path):
     assert "expected at least one `mint" not in message, (
         f"the ordering clause fired, so this case is not witnessing the per-body "
         f"count it was built for: {message}"
+    )
+
+
+def chart_that_aliases_the_two_iam_keys(destination: Path) -> Path:
+    """Both draws kept, the second one thrown away: `blind_index_key="$encryption_key"`.
+
+    THE MUTATION WITH NO RUNTIME SIGNAL, WHICH IS WHY IT NEEDS A RENDER-TIME GATE.
+    `encryption.key` and `blind-index.key` land BYTE-IDENTICAL. Both are valid
+    32-byte keys, so `iam` boots; `iam` v0.8.43's fingerprint covers both keys, but
+    both ARE the same key, so it passes. The blind index then shares material with
+    the ciphertext key and nothing reddens on any cluster at any time.
+
+    IT IS INVISIBLE TO EVERY OTHER CLAUSE AND EVERY OTHER GATE HERE. Two `mint`
+    statements still run, so the ordering comparison agrees and the per-body count
+    reads two variables against two draws. The body's two values are textually
+    DISTINCT — `"$encryption_key"` and `"$blind_index_key"` — so the pairwise-
+    distinctness clause cannot see it either. `iam_key_set_failures` reads the key
+    NAMES and the field, both unchanged; `minted_set_failures` reads the Secret
+    names, unchanged. Only the clause that traces each variable to a draw of its
+    own sees it.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    assert THE_BLIND_INDEX_DRAW in text, (
+        "the blind-index draw moved; this red case is now testing nothing"
+    )
+    template.write_text(
+        text.replace(
+            THE_BLIND_INDEX_DRAW,
+            '              mint iam-keys 32\n'
+            '              blind_index_key="$encryption_key"\n',
+        )
+    )
+    return copy
+
+
+def test_aliasing_the_two_iam_keys_reddens_the_generation_gate(tmp_path):
+    """The traceability clause's red case, and the other two clauses stay silent."""
+    failures = generation_failures(
+        bootstrap_render(chart_that_aliases_the_two_iam_keys(tmp_path), *IAM_KEYS_ON),
+        expected_bodies=EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS,
+    )
+    message = "\n".join(failures)
+    assert failures, (
+        "the two key files were aliased onto one draw and the gate passed. The "
+        "pair would land byte-identical on every cluster with no runtime signal"
+    )
+    assert "iam-keys's request body names ['blind_index_key']" in message, message
+    assert "which no draw of this Secret assigns" in message, message
+    assert "expected at least one `mint" not in message, (
+        f"the ordering clause fired, so this case is not witnessing the "
+        f"traceability clause it was built for: {message}"
+    )
+    assert "generated value(s)" not in message, (
+        f"the per-body count fired, so this case is not witnessing the "
+        f"traceability clause it was built for: {message}"
+    )
+    assert "under more than one key" not in message, (
+        f"the pairwise-distinctness clause fired, so this case is not witnessing "
+        f"the traceability clause it was built for: {message}"
+    )
+
+
+def chart_with_one_draw_behind_both_iam_keys(destination: Path) -> Path:
+    """One `mint`, and BOTH key fields read `$encryption_key`.
+
+    THE HOLE THAT PREDATES THE DEDUPLICATION rather than being opened by it: the
+    strict `generated == created` comparison missed this shape too. One draw for
+    one `create` agrees with the ordering comparison, and the body names ONE
+    variable against ONE `mint`, so the per-body count agrees as well. The variable
+    it names IS assigned `="$value"`, so the traceability clause is silent. Only
+    the pairwise-distinctness clause sees the body carry one value twice.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    assert THE_BLIND_INDEX_DRAW in text, (
+        "the blind-index draw moved; this red case is now testing nothing"
+    )
+    aliased = '"blind-index.key":"$blind_index_key"'
+    assert aliased in text, "the blind-index body value moved; this red case is now testing nothing"
+    template.write_text(
+        text.replace(THE_BLIND_INDEX_DRAW, "").replace(
+            aliased, '"blind-index.key":"$encryption_key"'
+        )
+    )
+    return copy
+
+
+def test_one_draw_behind_both_iam_keys_reddens_the_generation_gate(tmp_path):
+    """The pairwise-distinctness clause's red case, alone among the three."""
+    failures = generation_failures(
+        bootstrap_render(chart_with_one_draw_behind_both_iam_keys(tmp_path), *IAM_KEYS_ON),
+        expected_bodies=EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS,
+    )
+    message = "\n".join(failures)
+    assert failures, (
+        "one draw fed both key files and the gate passed. This shape is older than "
+        "the deduplication — the strict ordering comparison missed it too"
+    )
+    assert "iam-keys's request body carries ['$encryption_key'] under more than one key" in message, (
+        message
+    )
+    assert "expected at least one `mint" not in message, (
+        f"the ordering clause fired, so this case is not witnessing the "
+        f"distinctness clause it was built for: {message}"
+    )
+    assert "generated value(s)" not in message, (
+        f"the per-body count fired, so this case is not witnessing the "
+        f"distinctness clause it was built for: {message}"
+    )
+    assert "which no draw of this Secret assigns" not in message, (
+        f"the traceability clause fired, so this case is not witnessing the "
+        f"distinctness clause it was built for: {message}"
     )
 
 
