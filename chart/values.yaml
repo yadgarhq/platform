@@ -477,13 +477,17 @@ nats:
 # from it. Before this, a clone and an install against an empty cluster did not
 # come up, because each of them was a step in a runbook somebody had to notice.
 #
-# THREE SECRETS AND A TOKEN — AND NOT `iam-keys`. ADR-0753 keeps the data-bearing
-# key out until the `iam` binary can REFUSE A WRONG ONE. Generate it today and a
-# cluster whose Secret is gone but whose database survived gets an `iam` that
-# starts HEALTHY and cannot decrypt the rows it already has; leave it out and the
-# same cluster gets a pod that will not start and names the missing file. There is
-# no `iamKeys` toggle in this file, and adding one before the marker ships is the
-# ordering ADR-0753 forbids rather than an omission to fill in.
+# THREE SECRETS AND A TOKEN ALWAYS, AND `iam-keys` AS AN OPT-IN FOURTH. This file
+# used to say there was no `iamKeys` toggle and that adding one was the ordering
+# ADR-0753 forbids. THE PROHIBITION IS LIFTED AND THE REASONING IS NOT WITHDRAWN.
+# ADR-0753 never refused the fourth `create` outright — it ORDERED it behind a
+# key-identity marker in the `iam` binary, in a change of its own, first. That
+# marker has shipped: `iam` v0.8.43 records WHICH key set encrypted the rows and
+# REFUSES TO KEEP RUNNING under a different one. So the failure the refusal
+# existed to prevent — a cluster whose Secret is gone but whose database survived
+# getting an `iam` that starts HEALTHY and cannot decrypt the rows it already has
+# — is now a loud refusal instead of a silent one. The toggle below is that
+# ordering satisfied, not that ordering ignored.
 #
 # WHY THE THREE NAMES ARE NOT KEYS HERE. They are read by the charts that MOUNT
 # them, each of which names its Secret in its own values. A name configurable here
@@ -494,9 +498,47 @@ nats:
 # WHAT AN ADOPTER WITH THEIR OWN SECRET MANAGER DOES. Leave `create` false, create
 # the same four Secret names through Vault, External Secrets, SOPS or whatever
 # else, and change no service: every consumer takes a FILE PATH and knows nothing
-# about how the file arrived (D80).
+# about how the file arrived (D80). `iam-keys` is the fifth name on that list when
+# `iamKeys.create` is on, and it is the one name an adopter most likely already
+# holds somewhere else.
 bootstrap:
   create: false
+
+  # THE DATA-BEARING KEY, OFF BY DEFAULT AND OPT-IN ON PURPOSE (ADR-0750,
+  # ADR-0753). Turn it on and the bootstrap Job mints a FOURTH Secret, `iam-keys`,
+  # carrying the two key files `iam` reads at boot: `encryption.key` and
+  # `blind-index.key`. Every stored name is AES-256-GCM ciphertext under the first,
+  # and every username is found through an HMAC blind index under the second.
+  #
+  # IT DEFAULTS FALSE BECAUSE THE DEFAULT IS THE ANSWER FOR AN ESTATE THAT ALREADY
+  # HAS THESE KEYS. This organisation mints them by hand, out of 1Password, in
+  # `yadgarhq/deploy`'s `make secrets`, and a Job that minted a second pair beside
+  # them would be the hazard rather than the convenience. An adopter installing
+  # against an EMPTY database has no such pair and nothing to transcribe, which is
+  # the case this toggle exists for.
+  #
+  # TURNING IT ON IS SAFE ONLY BECAUSE `iam` CAN NOW REFUSE A WRONG KEY, and that
+  # refusal is a property of the BINARY rather than of this chart. `iam` v0.8.43
+  # stores a fingerprint over both keys and refuses to keep running when the key
+  # set it is given does not match the one the rows were written under.
+  #
+  # THE GAP THIS CHART DOES NOT CLOSE, STATED HERE RATHER THAN ONLY IN THE PLAN.
+  # NOTHING TIES THIS TOGGLE TO AN `iam` THAT CARRIES THAT MARKER. An adopter who
+  # sets this true while overriding `iam`'s tag BACKWARDS to a digest from before
+  # v0.8.43 gets a Job-minted key and an `iam` with no marker check — which is
+  # exactly the failure the marker exists to prevent, a service that starts healthy
+  # and cannot decrypt its rows. It is mitigated rather than closed: the parent
+  # chart pins every module together, so an adopter reaches this only by
+  # deliberately overriding one module's tag backwards. The cheap fix is named so
+  # nobody has to invent it — a `required`/`fail` beside this key tying it to a
+  # minimum `iam` appVersion, refusing at render when the pinned `iam` is older
+  # than the release that shipped the marker. It is filed, not built.
+  #
+  # THE SECRET'S NAME IS A LITERAL FOR THE SAME REASON THE OTHER THREE ARE. `iam`
+  # mounts it under a name in its own values, so a name configurable here and fixed
+  # there would be a knob that breaks the estate rather than one that adapts it.
+  iamKeys:
+    create: false
 
   # ONE IDENTITY FOR BOTH JOBS, with `create` on secrets and nothing else — see
   # `templates/bootstrap-rbac.yaml` for why a second one would narrow nothing.
