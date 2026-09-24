@@ -180,9 +180,10 @@ spec:
     # through controller-derived names — a ControllerRevision's hash suffix, an
     # EndpointSlice's random suffix — that change on ordinary operation. A number
     # built on those drifts, so it is not written into a file that ships.
-    # ADR-0769 IS THE DURABLE RECORD of this rule, of the three things measured
-    # before any such narrowing lands, and of the CNI limit stated further down;
-    # the full enumeration belongs to the change that introduced it.
+    # ADR-0770 IS THE DURABLE RECORD of this rule, of the three things measured
+    # before any such narrowing lands, and of the CNI limit stated further down.
+    # It also carries the full enumeration, which is where a dated snapshot
+    # belongs. It supersedes ADR-0769 — cite 0770, not 0769.
     #
     # THE TWO QUESTIONS ARE NOT THE SAME QUESTION, because a text-match census
     # counts comments. "Objects whose text contains 8222" includes prose that
