@@ -1166,24 +1166,29 @@ def test_a_duplicate_body_name_reddens_the_minted_set(tmp_path):
     census reddens only because the helper counts the name twice. That is the one
     property a list has here, and until this case it had no red.
 
-    MEASURED BOTH WAYS, on d14753e's chart with this fixture. Deduplicated —
-    `list(dict.fromkeys(...))` — `minted_set_failures` returns `[]` and this case
-    fails on `assert failures`. Returned as a bare `set` instead it fails on the
-    census message, because `sorted(a_set)` then equals the literal and the only
-    clause left is `token != [ADMIN_TOKEN_SECRET]`, which a set can never satisfy.
+    MEASURED, at this branch's head, on both helm binaries. Deduplicate
+    `minted_secret_names_in` — `list(dict.fromkeys(...))` — and THE WHOLE SUITE
+    GOES `1 failed, 107 passed`, the one failure being this case. Every other gate
+    reads the SHIPPED chart, which carries no duplicate, so that mutation is silent
+    everywhere else. This case is the only thing standing between the helper and a
+    set.
 
-    SO THE MESSAGE ASSERTIONS ARE NOT DECORATION. `assert failures` alone passes
-    under the bare-`set` mutation, on a failure about the OTHER Job.
+    AND IT IS ASSERTED ON THE MESSAGE, NOT ONLY ON `failures` BEING NON-EMPTY.
+    Return a bare `set` rather than deduplicating and `failures` is STILL non-empty
+    here, on a failure about the OTHER Job: `sorted(a_set)` equals the literal so
+    the census clause goes quiet, while `token != [ADMIN_TOKEN_SECRET]` compares a
+    set against a list and can never be equal. A lone `assert failures` would pass
+    under that mutation, so the duplicate name is asserted directly and early.
     """
     failures = minted_set_failures(bootstrap_render(chart_with_a_duplicate_body_name(tmp_path)))
     message = "\n".join(failures)
     assert failures, "a Secret was POSTed twice under one name and the gate passed"
-    assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
-    assert "found 4" in message, message
     assert "'nats-auth', 'nats-auth'" in message, (
         f"the census reported the duplicate name once, so it is counting NAMES "
         f"rather than BODIES and a set would read the same: {message}"
     )
+    assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
+    assert "found 4" in message, message
 
 
 def data_bearing_key_failures(rendered: str) -> list[str]:
