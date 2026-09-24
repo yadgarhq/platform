@@ -191,6 +191,22 @@ spec:
     # number" rather than "no code could reach the port". Measured 2026-09-24
     # against the `kind-yadgar` cluster.
     #
+    # AND A TEXT-MATCH CENSUS COUNTS COMMENTS, which is why the two questions are
+    # separated above rather than run together. "Objects whose text contains 8222"
+    # is NINE and includes the Argo Application, which matches on a sentence of
+    # PROSE. "Workloads that read port 8222" is the claim that actually bears on
+    # security, and outside this namespace it is ZERO. Only the second number
+    # licenses the narrowing; the first is the sweep that found it.
+    #
+    # WHICH OF THE TWO NUMBERS TO RE-DERIVE, because they age differently. TWO is
+    # the stable figure: Deployment, StatefulSet, DaemonSet and ConfigMap are
+    # AUTHORED objects, so a later reader re-running that narrow sweep should still
+    # get two. NINE is a dated snapshot and is expected to drift — the
+    # ControllerRevision's hash suffix and the EndpointSlice's random suffix both
+    # change on ordinary churn, and a retained second ControllerRevision would make
+    # it ten without anything being wrong. A re-run that disagrees with NINE is
+    # drift; a re-run that disagrees with TWO is a finding.
+    #
     # NAMESPACE SCOPE IS LOOSER THAN THAT CENSUS LICENSES, and one sentence here
     # saves the next reviewer from re-deriving it. Since nothing reads this port,
     # DELETING this rule outright would deny 8222 to every pod — a policy denies
@@ -219,9 +235,13 @@ spec:
     # supporting sentence. ADR-0592's consequences say of the exemption: "It holds
     # on any CNI, so it survives the ledger 614 CNI decision whichever way that
     # goes." This file declines that generality. The exemption is what Kubernetes
-    # INTENDS, and it is measured here on kindnet — but some CNIs do subject
-    # host-sourced traffic to pod-selector ingress rules, so "any CNI" over-claims,
-    # and a chart that ships to adopters cannot rest on it. ADR-0592's DECISION is
+    # INTENDS, and it is measured here — but it is measured on KINDNET ONLY, and no
+    # measurement in this estate covers any other CNI. "Any CNI" therefore asserts a
+    # generality that nothing here established, and a chart shipping to adopters
+    # cannot rest on it. Note the shape of this objection: it is that the claim is
+    # UNMEASURED, not that a counter-example was measured — stating it the stronger
+    # way would repeat, in the correction, the fault being corrected. ADR-0592's
+    # DECISION is
     # untouched and is relied on above: a passing probe is no evidence that a
     # policy is absent. It is one sentence of its consequences that is declined,
     # not the ruling.
