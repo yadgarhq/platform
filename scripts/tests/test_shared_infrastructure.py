@@ -233,6 +233,42 @@ def from_less_rules(policy: dict) -> list[dict]:
     return [rule for rule in policy["spec"]["ingress"] if not rule.get("from")]
 
 
+def minted_secret_names_in(script: str) -> list[str]:
+    """Every Secret name one bootstrap script CREATES, in order, off the request body. PURE.
+
+    THE MATCHER ITSELF, LIFTED OUT SO THE SIBLING SUITE SHARES IT RATHER THAN
+    RESTATES IT, and ADR-0679 is why. `test_bootstrap.py` answered the same
+    question — what does this render create — from the `create <name>` shell
+    ARGUMENT, which reaches the Job's log lines and never the POSTed body. That is
+    the defect the docstring below records, re-derived in a second file. It calls
+    this function now.
+
+    A LIST RATHER THAN A SET, AND MULTIPLICITY IS THE WHOLE REASON: two request
+    bodies carrying ONE name is a real failure that a set reports as a pass. The
+    Job POSTs both, is answered 201 then 409, and reports both created, while the
+    second body's `stringData` never lands.
+
+    WITNESSED RATHER THAN ASSERTED HERE, by
+    `test_bootstrap.py::test_a_duplicate_body_name_reddens_the_minted_set`. That
+    case adds a fourth `create` under a name the Job already mints. On this list the
+    ADR-0753 census reddens; deduplicate this function and the census returns an
+    EMPTY failure list on the same chart. It is the ONLY case in the suite that
+    moves — deduplicating here leaves `1 failed, 107 passed` on both helm binaries —
+    because every other gate reads the shipped chart, which carries no duplicate.
+    The sibling case beside it adds a NEW name,
+    `test_a_fourth_create_reddens_the_minted_set`, and so cannot tell a list from a
+    set at all.
+
+    ORDER IS NOT A REASON, and this docstring claimed it was. `minted_set_failures`
+    applies `sorted()` to BOTH sides, so `sorted(a_set)` would compare fine there;
+    what that comparison actually needs from a list is the repeated element. The two
+    `!= [literal]` comparisons in `test_bootstrap.py` do require a list, but that is
+    the code as written rather than a correctness argument for one: a set never
+    equals a list, so those gates would fail ALWAYS and LOUDLY, not silently.
+    """
+    return [match.group("name") for match in MINTED_SECRET.finditer(script)]
+
+
 def minted_secret_names(rendered: list[dict]) -> set[str]:
     """Every Secret name a bootstrap Job actually CREATES, read off the request body. PURE.
 
@@ -255,10 +291,7 @@ def minted_secret_names(rendered: list[dict]) -> set[str]:
         for container in job["spec"]["template"]["spec"]["containers"]
         for part in (container.get("command") or []) + (container.get("args") or [])
     )
-    return {
-        match.group("name")
-        for match in MINTED_SECRET.finditer(script)
-    }
+    return set(minted_secret_names_in(script))
 
 
 def secret_names(workload: dict) -> set[str]:
