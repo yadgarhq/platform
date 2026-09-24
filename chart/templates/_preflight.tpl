@@ -81,8 +81,8 @@ across renders and a diff of two renders shows a probe entering or leaving rathe
 than the whole line moving.
 
 `probes.envoyGateway` IS NOT HERE, and its absence is the design rather than an
-omission. It enables the POST-INSTALL Job, which `platform.preflight.postInstall
-Probes` below resolves — a pre-install Envoy Gateway probe cannot go red, because
+omission. It enables the POST-INSTALL Job, and the definition below this one
+resolves it — a pre-install Envoy Gateway probe cannot go red, because
 `Accepted=True` on a GatewayClass is a condition already persisted in etcd and
 stays there with the controller at zero replicas. The denominator each Job asserts
 is ITS OWN phase's probe set, so a key that enables one may never be counted by the
