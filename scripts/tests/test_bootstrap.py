@@ -1124,6 +1124,68 @@ def test_a_fourth_create_reddens_the_minted_set(tmp_path):
     assert THE_DATA_BEARING_KEY in message, message
 
 
+def chart_with_a_duplicate_body_name(destination: Path) -> Path:
+    """A fourth `create` whose body carries a name the Job ALREADY mints.
+
+    THE RED CASE FOR THE ONE PROPERTY A LIST HAS AND A SET DOES NOT. The fixture
+    above adds a fourth Secret under a NEW name, which a set and a list both
+    report. This one adds a second body under `nats-auth`, and the set of names is
+    then still the three this chart is allowed to mint — so the census reddens only
+    because `minted_secret_names_in` counts the name twice.
+
+    IT IS A SHAPE THE CHART CAN REACH. The blocks are copy-pasted from each other
+    and the name appears in the block four times; a fourth credential added by
+    copying the `nats-auth` block and renaming three of them leaves a Job that
+    POSTs `nats-auth` twice, is answered 201 then 409, and reports both created.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    anchor = "              create nats-auth-gateway <<JSON\n"
+    assert anchor in text, "the third mint moved; this red case is now testing nothing"
+    template.write_text(
+        text.replace(
+            anchor,
+            "              create nats-auth <<JSON\n"
+            '              {"apiVersion":"v1","kind":"Secret","type":"Opaque",\n'
+            '               "metadata":{"name":"nats-auth"},\n'
+            '               "stringData":{"password":"$value"}}\n'
+            "              JSON\n" + anchor,
+        )
+    )
+    return copy
+
+
+def test_a_duplicate_body_name_reddens_the_minted_set(tmp_path):
+    """THE WITNESS THAT `minted_secret_names_in` RETURNS A LIST RATHER THAN A SET.
+
+    The fixture above this one adds a fourth Secret under a NEW name, which a set
+    and a list both report. This case adds a SECOND BODY under a name the Job
+    already mints, so the set of names stays the three ADR-0753 allows and the
+    census reddens only because the helper counts the name twice. That is the one
+    property a list has here, and until this case it had no red.
+
+    MEASURED BOTH WAYS, on d14753e's chart with this fixture. Deduplicated —
+    `list(dict.fromkeys(...))` — `minted_set_failures` returns `[]` and this case
+    fails on `assert failures`. Returned as a bare `set` instead it fails on the
+    census message, because `sorted(a_set)` then equals the literal and the only
+    clause left is `token != [ADMIN_TOKEN_SECRET]`, which a set can never satisfy.
+
+    SO THE MESSAGE ASSERTIONS ARE NOT DECORATION. `assert failures` alone passes
+    under the bare-`set` mutation, on a failure about the OTHER Job.
+    """
+    failures = minted_set_failures(bootstrap_render(chart_with_a_duplicate_body_name(tmp_path)))
+    message = "\n".join(failures)
+    assert failures, "a Secret was POSTed twice under one name and the gate passed"
+    assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
+    assert "found 4" in message, message
+    assert "'nats-auth', 'nats-auth'" in message, (
+        f"the census reported the duplicate name once, so it is counting NAMES "
+        f"rather than BODIES and a set would read the same: {message}"
+    )
+
+
 def data_bearing_key_failures(rendered: str) -> list[str]:
     """Whether the data-bearing key reaches the render at all. PURE.
 
