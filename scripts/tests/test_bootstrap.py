@@ -9,13 +9,22 @@ that neither Helm nor Argo tracks. A template cannot hold this: D54 measured
 `lookup` returning empty under template-only rendering, which is how Argo renders,
 so a generate-if-absent template regenerates the key on every sync.
 
-THREE SECRETS, NOT FOUR, AND THAT IS ADR-0753 RATHER THAN AN OMISSION. `iam-keys`
-is DATA-BEARING — AES-256-GCM ciphertext plus an HMAC blind index — so a cluster
-whose Secret is gone but whose database survived would get an `iam` that starts
-HEALTHY and cannot decrypt the rows it already has. ADR-0753 orders the
-generation behind a key-identity marker in the `iam` binary that refuses the wrong
-key, and the marker lands FIRST, in its own change. `test_no_data_bearing_key_is_minted_yet`
-is that ordering written down: `iam-keys` must appear nowhere in this chart.
+THREE SECRETS ALWAYS, AND `iam-keys` AS AN OPT-IN FOURTH. This paragraph used to
+read "THREE SECRETS, NOT FOUR" and to require that `iam-keys` appear nowhere in
+this chart. THAT REQUIREMENT IS DISCHARGED, NOT ABANDONED. `iam-keys` is
+DATA-BEARING — AES-256-GCM ciphertext plus an HMAC blind index — so a cluster whose
+Secret is gone but whose database survived used to get an `iam` that starts HEALTHY
+and cannot decrypt the rows it already has. ADR-0753 never refused the fourth
+`create` outright; it ORDERED it behind a key-identity marker in the `iam` binary,
+in a change of its own, first. `iam` v0.8.43 shipped that marker, so the fourth
+`create` is legal now, and it sits behind `bootstrap.iamKeys.create`, which
+DEFAULTS FALSE.
+
+BOTH ARMS ARE GATED, AND NEITHER ONE ALONE WOULD BE A PROPERTY. With the toggle off
+the Job mints THREE Secrets and the render never names `iam-keys`. With it on the
+Job mints FOUR, and the fourth carries exactly the two key files `make secrets`
+mints. A gate on the off arm alone would pass a chart whose toggle did nothing, and
+a gate on the on arm alone would pass a chart that minted the key by default.
 
 THE FOUR PROPERTIES, AND WHICH HALF OF EACH IS CONSTRUCTIBLE HERE. ADR-0750
 requires four properties of such a Job, and this suite renders — it does not
@@ -108,9 +117,11 @@ Run: python3 -m pytest scripts/tests/ -q
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -152,9 +163,10 @@ RELEASE_NAMESPACE = "yadgar"
 
 # ── THE EXPECTED NUMBERS, AND THEY ARE LITERALS ──────────────────────────────
 
-# The three machine-only credentials, named rather than counted, because a count
-# alone would not notice one name being swapped for another. ADR-0753: three, and
-# `iam-keys` is not among them until the `iam` binary can refuse a wrong key.
+# The three machine-only credentials the Job mints at EVERY render, named rather
+# than counted, because a count alone would not notice one name being swapped for
+# another. `iam-keys` is NOT among them: it is minted only when
+# `bootstrap.iamKeys.create` is on, and that toggle defaults FALSE.
 MACHINE_ONLY_SECRETS = {"valkey-password", "nats-auth", "nats-auth-gateway"}
 
 # The human-facing one (ADR-0517's third category), minted by its own Job so that
@@ -166,10 +178,37 @@ ADMIN_TOKEN_SECRET = "admin-bootstrap-token"
 
 EVERY_MINTED_SECRET = MACHINE_ONLY_SECRETS | {ADMIN_TOKEN_SECRET}
 
-# The key whose generation ADR-0753 ORDERS BEHIND a change to the `iam` binary.
-# It is absent from this chart on purpose, and this name is here so the absence is
-# asserted rather than merely true.
+# The key whose generation ADR-0753 ORDERED BEHIND a change to the `iam` binary.
+# That change shipped in `iam` v0.8.43, so the fourth `create` exists — behind
+# `bootstrap.iamKeys.create`, off by default. The name is here so BOTH arms are
+# asserted rather than merely true: absent at the default render, present when the
+# toggle is on.
 THE_DATA_BEARING_KEY = "iam-keys"
+
+# The values path that turns it on, and the `--set` that renders the on arm.
+IAM_KEYS_TOGGLE = "bootstrap.iamKeys.create"
+IAM_KEYS_ON = ("--set", f"{IAM_KEYS_TOGGLE}=true")
+
+# WHAT `make secrets` MINTS INTO `iam-keys`, AND IT IS THE WHOLE COMPARISON. This
+# organisation creates the Secret by hand in `yadgarhq/deploy`'s `Makefile`, with
+# `--from-file=encryption.key=` and `--from-file=blind-index.key=` and nothing
+# else. A Job-minted `iam-keys` that carried a different key set would hand `iam` a
+# mount the hand-minted path never produces, so a cluster bootstrapped by the chart
+# and a cluster bootstrapped by hand would not be the same cluster. Two, and both
+# names, because a count alone would not notice one name swapped for another and a
+# name list alone would not notice a third key added.
+MAKE_SECRETS_IAM_KEYS = {"encryption.key", "blind-index.key"}
+EXPECTED_IAM_KEYS = 2
+
+# THE FIELD THAT CARRIES THEM, WHICH IS PART OF THE COMPARISON RATHER THAN A STYLE
+# CHOICE. `make secrets` uses `--from-file=`, so each file holds RAW BYTES — 32 of
+# them, which is the only length `iam`'s `read_key` accepts. `data` is the field
+# the API server base64-DECODES, so a 44-character base64 value lands as 32 raw
+# bytes. `stringData` would store those 44 characters AS the file, and `iam` would
+# refuse to start on a wrong-length key. A gate that read whichever map the body
+# carried would pass that body and ship a key `iam` rejects.
+IAM_KEYS_FIELD = "data"
+THE_WRONG_FIELD = "stringData"
 
 # THE BOOTSTRAP'S OWN TWO JOBS, and the one triple they share. Every gate below
 # that reads a script, an image or the RBAC wiring is scoped to the three templates
@@ -480,21 +519,64 @@ def test_deleting_the_409_arm_reddens_the_idempotence_gate(tmp_path):
 
 # ── THE GENERATOR'S FAILURE HAS TO REACH THE JOB'S EXIT STATUS ───────────────
 
-# 33 random bytes of base64 is 44 characters and carries no `=` padding, which is
-# why 33 was chosen. An EXACT length rather than a minimum, for the same reason.
+# ONE LENGTH FOR TWO WIDTHS, AND THAT IS WHY THE CHECK STAYS SINGLE. 33 random
+# bytes as base64 is 44 characters with no `=` padding, which is why 33 was chosen
+# for a password. 32 random bytes as base64 is 44 characters with one `=` of
+# padding, and 32 is the only length `iam` accepts for a key file. So both widths
+# check against the same number, and the script needs ONE length check rather than
+# one per width. An EXACT length rather than a minimum, as before.
 EXPECTED_CREDENTIAL_LENGTH = 44
 
-# Four request bodies across the two scripts, one per minted Secret. Asserted,
-# because a body regex that silently matched none would make the check below
-# vacuous — which is the defect this whole gate exists to stop repeating.
+# Four request bodies across the two scripts at the DEFAULT render, one per minted
+# Secret. Asserted, because a body regex that silently matched none would make the
+# check below vacuous — which is the defect this whole gate exists to stop
+# repeating. The on arm of the toggle adds a fifth, and `generation_failures` takes
+# the number it expects as an argument rather than reading this constant, so the
+# two renders are counted against their own numbers instead of one of them being
+# excused.
 EXPECTED_REQUEST_BODIES = len(EVERY_MINTED_SECRET)
+EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS = EXPECTED_REQUEST_BODIES + 1
 
 # The JSON body of each POST, read between its heredoc delimiters.
 BODY = re.compile(r"<<JSON\s*\n(?P<body>.*?)\n\s*JSON\s*$", re.MULTILINE | re.DOTALL)
 
-# `mint <name>` — the generator, called as a STATEMENT so its exit status is the
-# script's. One per `create <name>`, and in the same order.
-GENERATES = re.compile(r"^\s*mint\s+(?P<name>[a-z0-9][a-z0-9.-]*)\s*$", re.MULTILINE)
+# `mint <name> <bytes>` — the generator, called as a STATEMENT so its exit status is
+# the script's. At least one per `create <name>`, and in the same order.
+#
+# THE WIDTH IS AN ARGUMENT NOW, and this matcher had to widen with it. The script
+# mints two kinds of thing: a 33-byte password and a 32-byte key file, and `iam`
+# refuses any key length but 32. A matcher still anchored on `mint <name>$` would
+# have matched NOTHING after that change and reported every Secret ungenerated —
+# loudly, which is why the widening is safe, but it is stated here so the next
+# reader does not narrow it back.
+GENERATES = re.compile(
+    r"^\s*mint\s+(?P<name>[a-z0-9][a-z0-9.-]*)\s+(?P<width>\d+)\s*$", re.MULTILINE
+)
+
+# Every shell variable a request body interpolates. The count of DISTINCT ones is
+# how many generated values that body carries, which is what the `mint` statements
+# for its Secret have to match — see `generation_failures`.
+INTERPOLATED = re.compile(r"\$(?P<variable>[A-Za-z_][A-Za-z0-9_]*)")
+
+# The assignment that carries one draw out of `mint` and into a name of its own,
+# `<variable>="$value"`. `mint` leaves every draw in the single variable `value`,
+# so a Secret carrying two of them has to copy the first aside before the second
+# overwrites it. `generation_failures` reads these to decide whether a variable a
+# body names traces to a draw of that Secret.
+#
+# THE MATCHER IS DELIBERATELY NARROW, AND THAT IS THE POINT. It accepts the exact
+# text `="$value"` and nothing else — not `="${value}"`, not a copy through a
+# third name. A refactor to either reddens this gate rather than quietly widening
+# what counts as a draw, and whoever widens it has to say why in this comment.
+DRAW_ASSIGNED = re.compile(
+    r'^\s*(?P<variable>[A-Za-z_][A-Za-z0-9_]*)="\$value"\s*$', re.MULTILINE
+)
+
+# The two maps a request body can carry key material in. BOTH are read, because a
+# body holding one value under two names is the same defect whichever field holds
+# it — `iam_key_set_failures` is where the CHOICE between the two fields is the
+# subject, and this is not that question.
+BODY_VALUE_FIELDS = ("data", "stringData")
 
 # The length check on what the generator produced, and the arm it takes when the
 # length is wrong.
@@ -505,7 +587,9 @@ LENGTH_CHECK = re.compile(
 )
 
 
-def generation_failures(documents: list[dict]) -> list[str]:
+def generation_failures(
+    documents: list[dict], expected_bodies: int = EXPECTED_REQUEST_BODIES
+) -> list[str]:
     """Every way a degraded image could mint an EMPTY credential and report success. PURE.
 
     THE DEFECT THIS CLOSES, MEASURED RATHER THAN SUPPOSED. With `base64` absent
@@ -529,6 +613,56 @@ def generation_failures(documents: list[dict]) -> list[str]:
 
     It does not fire as shipped — `curlimages/curl` is Alpine and busybox provides
     `base64`. `bootstrap.image` is a value, which is the exposure.
+
+    ONE SECRET MAY CARRY MORE THAN ONE GENERATED VALUE, WHICH IS WHY THE ORDERING
+    COMPARISON DEDUPLICATES. `iam-keys` holds TWO key files and so takes two `mint`
+    statements against one `create`, and a strict `generated == created` would have
+    called that a disagreement — on the SHIPPED chart, which is why it was not a
+    usable gate for a multi-draw Secret. Deduplicating IN ORDER keeps everything
+    that comparison bought — a `mint` label renamed away from the body it feeds, a
+    `mint` dropped entirely, two Secrets generated in the wrong order — and gives
+    up multiplicity.
+
+    THREE CLAUSES STAND IN FOR THE MULTIPLICITY, AND NONE OF THEM SUBSUMES
+    ANOTHER. Each is the only witness for its own mutation, so deleting one as
+    redundant reopens exactly one hole:
+
+    1. THE COUNT. Every variable a body interpolates is counted against the `mint`
+       statements for that Secret. The shape only THIS clause reports is a body
+       that DROPS A KEY FIELD while both draws remain — one variable against two
+       `mint` statements, with clauses 2 and 3 both silent. Dropping one of the
+       two DRAWS instead reddens this clause and clause 3 TOGETHER, measured, so
+       that mutation is not this clause's sole witness and the red case below
+       asserts the message this clause writes rather than the mere presence of a
+       failure.
+    2. THE VALUES ARE PAIRWISE DISTINCT, over `data` and `stringData` together.
+       This is a comparison of RENDERED TEXT. It sees one draw feeding both key
+       fields — the body then reads `"$encryption_key"` twice — and it is the only
+       clause that does, because one draw for one body agrees with clause 1's
+       count and leaves the ordering comparison silent.
+    3. EVERY VARIABLE TRACES TO A DRAW OF THIS SECRET. A body may name `value`, or
+       a variable assigned `="$value"` between the previous body and this
+       `create`. This is the only clause that sees `blind_index_key="$encryption_key"`
+       with both draws left in place: the body still names two textually distinct
+       variables, so clauses 1 and 2 both stay silent, and the two key files land
+       BYTE-IDENTICAL.
+
+    WHAT NO CLAUSE HERE ASSERTS, stated as a limit rather than hedged. None of
+    them proves the two draws produce DIFFERENT BYTES. Nothing available at render
+    time can: the bytes do not exist until the Job runs, and two calls to the same
+    `mint` are the same text. What the three assert together is weaker and exact —
+    EVERY VALUE A BODY CARRIES TRACES TO A `mint` STATEMENT OF ITS OWN FOR THAT
+    SECRET. The aliasing hazard `chart/templates/bootstrap-secrets.yaml` names in
+    prose beside the two draws is closed at the level of the SOURCE OF EACH VALUE,
+    not of the values themselves.
+
+    THE ALIAS IS WORTH THIS MUCH MACHINERY BECAUSE IT HAS NO RUNTIME SIGNAL.
+    `encryption.key` and `blind-index.key` would both be valid 32-byte keys, `iam`
+    would boot, and `iam` v0.8.43's fingerprint covers both keys while both ARE the
+    same key. The blind index would share material with the ciphertext key and
+    nothing would redden, on any cluster, at any time. Contrast a body that names
+    `$ns`: the API server refuses `yadgar` as invalid base64 and the Job fails
+    loudly. Only the alias is silent, so only the alias needs the gate.
     """
     failures = []
     scripts = job_scripts(documents)
@@ -537,14 +671,14 @@ def generation_failures(documents: list[dict]) -> list[str]:
     for job, script in sorted(scripts.items()):
         generated = [match.group("name") for match in GENERATES.finditer(script)]
         created = minted_by(script)
-        if generated != created:
+        if list(dict.fromkeys(generated)) != created:
             failures.append(
-                f"{job}: expected one `mint <name>` statement per POSTed Secret, in "
-                f"the same order — the script creates {created} and generates "
-                f"{generated}. A credential built anywhere but a statement cannot "
-                f"fail the run. `created` is read off the REQUEST BODY, so a `mint` "
-                f"label that no longer names the Secret its body makes is a "
-                f"disagreement this list reports too"
+                f"{job}: expected at least one `mint <name> <bytes>` statement per "
+                f"POSTed Secret, in the same order — the script creates {created} "
+                f"and generates {generated}. A credential built anywhere but a "
+                f"statement cannot fail the run. `created` is read off the REQUEST "
+                f"BODY, so a `mint` label that no longer names the Secret its body "
+                f"makes is a disagreement this list reports too"
             )
 
         checks = list(LENGTH_CHECK.finditer(script))
@@ -561,7 +695,9 @@ def generation_failures(documents: list[dict]) -> list[str]:
                     f"{job}: expected the generated credential checked against "
                     f"{EXPECTED_CREDENTIAL_LENGTH} characters, found "
                     f"{check.group('length')}. 33 random bytes as base64 is "
-                    f"{EXPECTED_CREDENTIAL_LENGTH} characters with no padding"
+                    f"{EXPECTED_CREDENTIAL_LENGTH} characters with no padding, and "
+                    f"32 is {EXPECTED_CREDENTIAL_LENGTH} characters with one `=` — "
+                    f"both widths this script mints check against the same number"
                 )
             if "exit 1" not in check.group("arm"):
                 failures.append(
@@ -569,9 +705,67 @@ def generation_failures(documents: list[dict]) -> list[str]:
                     f"The arm reads:{check.group('arm')}"
                 )
 
-        for match in BODY.finditer(script):
+        draws = Counter(generated)
+        # Where the previous body ended. The span from here to the next body's
+        # start is the region that Secret's own draws live in — the `mint` calls
+        # and the assignments that carry them out of `value`. Scoping the region
+        # per body is what makes clause 3 a statement about THIS Secret rather
+        # than about the script, which would accept a body fed by the Secret
+        # before it.
+        read_from = 0
+        for name, match in zip(created, BODY.finditer(script)):
             bodies += 1
             body = match.group("body")
+            drawn_here = {
+                found.group("variable")
+                for found in DRAW_ASSIGNED.finditer(script[read_from : match.start()])
+            }
+            read_from = match.end()
+            variables = {
+                found.group("variable") for found in INTERPOLATED.finditer(body)
+            }
+            untraced = sorted(variables - {"value"} - drawn_here)
+            if untraced:
+                failures.append(
+                    f"{job}: {name}'s request body names {untraced}, which no draw "
+                    f"of this Secret assigns. A body variable has to be `value` or "
+                    f"be assigned `=\"$value\"` between the previous body and this "
+                    f"`create`; the draws in that region assign "
+                    f"{sorted(drawn_here)}. A body that reaches ACROSS to another "
+                    f"variable posts material this Secret never drew — two key "
+                    f"files aliased onto one draw are both valid, `iam` boots, and "
+                    f"nothing reddens on any cluster at any time"
+                )
+            posted = json.loads(body)
+            repeated = sorted(
+                value
+                for value, seen in Counter(
+                    str(value)
+                    for field in BODY_VALUE_FIELDS
+                    for value in (posted.get(field) or {}).values()
+                ).items()
+                if seen > 1
+            )
+            if repeated:
+                failures.append(
+                    f"{job}: {name}'s request body carries {repeated} under more "
+                    f"than one key. Every key of one Secret has to hold material "
+                    f"of its own — `iam`'s fingerprint covers `encryption.key` and "
+                    f"`blind-index.key` BOTH, so a pair sharing one draw passes "
+                    f"that fingerprint while the blind index shares material with "
+                    f"the ciphertext key. It is a weaker key set that looks healthy "
+                    f"on every cluster forever"
+                )
+            if len(variables) != draws.get(name, 0):
+                failures.append(
+                    f"{job}: {name}'s request body interpolates "
+                    f"{len(variables)} generated value(s), {sorted(variables)}, and "
+                    f"the script mints {draws.get(name, 0)} for it. Every value a "
+                    f"body carries has to come from a `mint` statement whose failure "
+                    f"stops the run — a body naming one the script never generated "
+                    f"POSTs an empty string under `set -u`'s nose or, worse, a value "
+                    f"left over from the Secret before it"
+                )
             if "$(" in body:
                 failures.append(
                     f"{job}: a request body interpolates a command substitution: "
@@ -583,9 +777,9 @@ def generation_failures(documents: list[dict]) -> list[str]:
                     f"because `create` is the only verb and a 409 is success"
                 )
 
-    if bodies != EXPECTED_REQUEST_BODIES:
+    if bodies != expected_bodies:
         failures.append(
-            f"expected {EXPECTED_REQUEST_BODIES} request bodies across the two "
+            f"expected {expected_bodies} request bodies across the two "
             f"scripts, found {bodies}. A body this gate did not read is a body it "
             f"did not check, and a zero here would be vacuous rather than a property"
         )
@@ -596,6 +790,180 @@ def test_an_empty_credential_stops_the_job_instead_of_being_posted():
     """The generator's failure reaches the exit status, on both Jobs."""
     failures = generation_failures(bootstrap_render())
     assert failures == [], "\n".join(failures)
+
+
+def test_the_data_bearing_keys_are_generated_the_same_way_the_passwords_are():
+    """The same gate over the on arm, where the fifth body and its two draws live.
+
+    THE ON ARM NEEDS ITS OWN RUN BECAUSE THE DEFAULT RENDER CANNOT SEE IT. The
+    `iam-keys` block is inside `{{- if .Values.bootstrap.iamKeys.create }}`, so at
+    the default render it is not in the script at all and every clause above reads
+    three bodies and three draws. This call is what puts the fourth body, its two
+    `mint` statements and its two interpolated variables under the same checks.
+    """
+    failures = generation_failures(
+        bootstrap_render(CHART, *IAM_KEYS_ON),
+        expected_bodies=EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS,
+    )
+    assert failures == [], "\n".join(failures)
+
+
+# THE SECOND DRAW'S OWN TEXT. All three red cases below perturb this same two
+# lines, so it is stated ONCE rather than as three spellings that drift apart —
+# each case then guards on the one constant and fails loudly when the draw moves.
+THE_BLIND_INDEX_DRAW = '              mint iam-keys 32\n              blind_index_key="$value"\n'
+
+
+def chart_with_one_iam_key_draw_dropped(destination: Path) -> Path:
+    """One of the two `mint iam-keys 32` statements deleted, its body left alone.
+
+    THE MUTATION THE DEDUPLICATED ORDERING COMPARISON CANNOT SEE, which is why the
+    per-body variable count exists beside it. Delete one draw and the generated
+    list still deduplicates to the created list, so the ordering clause stays
+    quiet — while the body goes on naming a variable nothing assigns.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    assert THE_BLIND_INDEX_DRAW in text, (
+        "the blind-index draw moved; this red case is now testing nothing"
+    )
+    template.write_text(text.replace(THE_BLIND_INDEX_DRAW, ""))
+    return copy
+
+
+def test_dropping_one_iam_key_draw_reddens_the_generation_gate(tmp_path):
+    """The per-body variable count's red case, and the ordering clause stays silent."""
+    failures = generation_failures(
+        bootstrap_render(chart_with_one_iam_key_draw_dropped(tmp_path), *IAM_KEYS_ON),
+        expected_bodies=EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS,
+    )
+    message = "\n".join(failures)
+    assert failures, "a generated value lost its `mint` statement and the gate passed"
+    assert "iam-keys's request body interpolates 2 generated value(s)" in message, message
+    assert "the script mints 1 for it" in message, message
+    assert "expected at least one `mint" not in message, (
+        f"the ordering clause fired, so this case is not witnessing the per-body "
+        f"count it was built for: {message}"
+    )
+
+
+def chart_that_aliases_the_two_iam_keys(destination: Path) -> Path:
+    """Both draws kept, the second one thrown away: `blind_index_key="$encryption_key"`.
+
+    THE MUTATION WITH NO RUNTIME SIGNAL, WHICH IS WHY IT NEEDS A RENDER-TIME GATE.
+    `encryption.key` and `blind-index.key` land BYTE-IDENTICAL. Both are valid
+    32-byte keys, so `iam` boots; `iam` v0.8.43's fingerprint covers both keys, but
+    both ARE the same key, so it passes. The blind index then shares material with
+    the ciphertext key and nothing reddens on any cluster at any time.
+
+    IT IS INVISIBLE TO EVERY OTHER CLAUSE AND EVERY OTHER GATE HERE. Two `mint`
+    statements still run, so the ordering comparison agrees and the per-body count
+    reads two variables against two draws. The body's two values are textually
+    DISTINCT — `"$encryption_key"` and `"$blind_index_key"` — so the pairwise-
+    distinctness clause cannot see it either. `iam_key_set_failures` reads the key
+    NAMES and the field, both unchanged; `minted_set_failures` reads the Secret
+    names, unchanged. Only the clause that traces each variable to a draw of its
+    own sees it.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    assert THE_BLIND_INDEX_DRAW in text, (
+        "the blind-index draw moved; this red case is now testing nothing"
+    )
+    template.write_text(
+        text.replace(
+            THE_BLIND_INDEX_DRAW,
+            '              mint iam-keys 32\n'
+            '              blind_index_key="$encryption_key"\n',
+        )
+    )
+    return copy
+
+
+def test_aliasing_the_two_iam_keys_reddens_the_generation_gate(tmp_path):
+    """The traceability clause's red case, and the other two clauses stay silent."""
+    failures = generation_failures(
+        bootstrap_render(chart_that_aliases_the_two_iam_keys(tmp_path), *IAM_KEYS_ON),
+        expected_bodies=EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS,
+    )
+    message = "\n".join(failures)
+    assert failures, (
+        "the two key files were aliased onto one draw and the gate passed. The "
+        "pair would land byte-identical on every cluster with no runtime signal"
+    )
+    assert "iam-keys's request body names ['blind_index_key']" in message, message
+    assert "which no draw of this Secret assigns" in message, message
+    assert "expected at least one `mint" not in message, (
+        f"the ordering clause fired, so this case is not witnessing the "
+        f"traceability clause it was built for: {message}"
+    )
+    assert "generated value(s)" not in message, (
+        f"the per-body count fired, so this case is not witnessing the "
+        f"traceability clause it was built for: {message}"
+    )
+    assert "under more than one key" not in message, (
+        f"the pairwise-distinctness clause fired, so this case is not witnessing "
+        f"the traceability clause it was built for: {message}"
+    )
+
+
+def chart_with_one_draw_behind_both_iam_keys(destination: Path) -> Path:
+    """One `mint`, and BOTH key fields read `$encryption_key`.
+
+    THE HOLE THAT PREDATES THE DEDUPLICATION rather than being opened by it: the
+    strict `generated == created` comparison missed this shape too. One draw for
+    one `create` agrees with the ordering comparison, and the body names ONE
+    variable against ONE `mint`, so the per-body count agrees as well. The variable
+    it names IS assigned `="$value"`, so the traceability clause is silent. Only
+    the pairwise-distinctness clause sees the body carry one value twice.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    assert THE_BLIND_INDEX_DRAW in text, (
+        "the blind-index draw moved; this red case is now testing nothing"
+    )
+    aliased = '"blind-index.key":"$blind_index_key"'
+    assert aliased in text, "the blind-index body value moved; this red case is now testing nothing"
+    template.write_text(
+        text.replace(THE_BLIND_INDEX_DRAW, "").replace(
+            aliased, '"blind-index.key":"$encryption_key"'
+        )
+    )
+    return copy
+
+
+def test_one_draw_behind_both_iam_keys_reddens_the_generation_gate(tmp_path):
+    """The pairwise-distinctness clause's red case, alone among the three."""
+    failures = generation_failures(
+        bootstrap_render(chart_with_one_draw_behind_both_iam_keys(tmp_path), *IAM_KEYS_ON),
+        expected_bodies=EXPECTED_REQUEST_BODIES_WITH_IAM_KEYS,
+    )
+    message = "\n".join(failures)
+    assert failures, (
+        "one draw fed both key files and the gate passed. This shape is older than "
+        "the deduplication — the strict ordering comparison missed it too"
+    )
+    assert "iam-keys's request body carries ['$encryption_key'] under more than one key" in message, (
+        message
+    )
+    assert "expected at least one `mint" not in message, (
+        f"the ordering clause fired, so this case is not witnessing the "
+        f"distinctness clause it was built for: {message}"
+    )
+    assert "generated value(s)" not in message, (
+        f"the per-body count fired, so this case is not witnessing the "
+        f"distinctness clause it was built for: {message}"
+    )
+    assert "which no draw of this Secret assigns" not in message, (
+        f"the traceability clause fired, so this case is not witnessing the "
+        f"distinctness clause it was built for: {message}"
+    )
 
 
 def chart_that_generates_inside_the_request_body(destination: Path) -> Path:
@@ -829,6 +1197,49 @@ def test_dropping_an_export_command_reddens_the_runbook_gate():
     assert failures, "an export command was dropped from the runbook and the gate passed"
     assert "expected 4 export commands beside the install command, found 3" in message, message
     assert ADMIN_TOKEN_SECRET in message, message
+
+
+def toggled_export_failures(readme: str) -> list[str]:
+    """Whether the runbook exports the key the toggle mints. PURE.
+
+    A SEPARATE GATE BECAUSE IT IS A SEPARATE CLAIM, and folding it into
+    `EVERY_MINTED_SECRET` would have been wrong in the other direction: that set is
+    what the Job mints at the DEFAULT render, and the minted-set census compares
+    against it. `iam-keys` is minted only when `bootstrap.iamKeys.create` is on, and
+    it is the one Secret here whose loss destroys data rather than costing a
+    rotation — so the runbook command for it is the one that matters most, and a
+    runbook line nothing asserted is a runbook line that rots.
+    """
+    sections = re.split(r"^## ", readme, flags=re.MULTILINE)
+    holding = [section for section in sections if INSTALL_COMMAND in section]
+    if len(holding) != 1:
+        return [
+            f"expected exactly 1 section of README.md to carry `{INSTALL_COMMAND}`, "
+            f"found {len(holding)}"
+        ]
+    if f"get secret {THE_DATA_BEARING_KEY} -o yaml" in holding[0]:
+        return []
+    return [
+        f"the install section states no export command for {THE_DATA_BEARING_KEY}. "
+        f"It is minted only when {IAM_KEYS_TOGGLE} is on, and it is the one Secret "
+        f"whose loss destroys data — a database that outlives it holds rows nothing "
+        f"can decrypt"
+    ]
+
+
+def test_the_readme_states_an_export_command_for_the_toggled_key():
+    failures = toggled_export_failures(README.read_text())
+    assert failures == [], "\n".join(failures)
+
+
+def test_dropping_the_toggled_export_command_reddens_its_gate():
+    without = README.read_text().replace(
+        f"get secret {THE_DATA_BEARING_KEY} -o yaml", "get pods"
+    )
+    failures = toggled_export_failures(without)
+    message = "\n".join(failures)
+    assert failures, "the data-bearing key's export command was dropped and the gate passed"
+    assert f"no export command for {THE_DATA_BEARING_KEY}" in message, message
 
 
 # ── PROPERTY 4 — THE ROLE GRANTS `create` AND NOTHING ELSE ───────────────────
@@ -1092,19 +1503,28 @@ def test_binding_to_cluster_admin_reddens_the_rbac_gate(tmp_path):
     assert "found 'cluster-admin'" in message, message
 
 
-# ── THREE SECRETS, AND THE FOURTH THAT ADR-0753 ORDERS BEHIND `iam` ──────────
+# ── THREE SECRETS, AND THE FOURTH THAT `bootstrap.iamKeys.create` ADMITS ─────
 
 
-def minted_set_failures(documents: list[dict]) -> list[str]:
-    """Every way the set of minted Secrets stops being the three plus the token. PURE."""
+def minted_set_failures(
+    documents: list[dict], expected: set[str] = MACHINE_ONLY_SECRETS
+) -> list[str]:
+    """Every way the set of minted Secrets stops being the expected one plus the token. PURE.
+
+    THE EXPECTED SET IS AN ARGUMENT BECAUSE THE TOGGLE MOVES IT, and passing it in
+    is what keeps both arms honest. At the default render it is the three
+    machine-only names; with `bootstrap.iamKeys.create` on it is those three and
+    `iam-keys`. A gate that read one constant would have to excuse the other render
+    rather than count it.
+    """
     failures = []
     scripts = job_scripts(documents)
 
     machine_only = minted_by(scripts.get("bootstrap-secrets", ""))
-    if sorted(machine_only) != sorted(MACHINE_ONLY_SECRETS):
+    if sorted(machine_only) != sorted(expected):
         failures.append(
-            f"expected bootstrap-secrets to mint {len(MACHINE_ONLY_SECRETS)} "
-            f"Secrets, {sorted(MACHINE_ONLY_SECRETS)}, found {len(machine_only)}: "
+            f"expected bootstrap-secrets to mint {len(expected)} "
+            f"Secrets, {sorted(expected)}, found {len(machine_only)}: "
             f"{sorted(machine_only)}"
         )
 
@@ -1122,31 +1542,50 @@ def test_the_jobs_mint_exactly_the_three_secrets_and_the_token():
     assert failures == [], "\n".join(failures)
 
 
-def chart_with_a_fourth_create(destination: Path) -> Path:
-    """The red case ADR-0753 exists to make impossible: a fourth `create` in the same Job."""
+def test_the_toggle_admits_the_data_bearing_key_as_a_fourth_create():
+    """The on arm's census: four minted, and `iam-keys` is the fourth.
+
+    THE COMPANION THE OFF ARM NEEDS. A suite that only asserted three-at-the-default
+    would pass a chart whose toggle rendered nothing at all, which is the failure
+    mode a default-false feature is most likely to ship with.
+    """
+    failures = minted_set_failures(
+        bootstrap_render(CHART, *IAM_KEYS_ON),
+        expected=MACHINE_ONLY_SECRETS | {THE_DATA_BEARING_KEY},
+    )
+    assert failures == [], "\n".join(failures)
+
+
+def chart_with_the_iam_keys_guard_stripped(destination: Path) -> Path:
+    """The fourth `create` with its `{{- if }}` removed, so it renders at the default.
+
+    THE RED CASE THAT REPLACES "A FOURTH `create` IS FORBIDDEN". A fourth `create`
+    is legal now — behind `bootstrap.iamKeys.create`. What is still forbidden is
+    minting the data-bearing key WITHOUT BEING ASKED, and this fixture constructs
+    exactly that: the block stays, its guard goes, and the DEFAULT render mints
+    four. It is an edit somebody could plausibly make while tidying a template, and
+    it is the one that turns an opt-in into an estate-wide default.
+    """
     copy = destination / "chart"
     shutil.copytree(CHART, copy)
     template = copy / "templates" / "bootstrap-secrets.yaml"
     text = template.read_text()
-    anchor = "              create nats-auth-gateway <<JSON\n"
-    assert anchor in text, "the third mint moved; this red case is now testing nothing"
+    guard = "{{- if $bootstrap.iamKeys.create }}\n"
+    closing = "              JSON\n{{- end }}\n          resources:\n"
+    assert guard in text, "the iamKeys guard moved; this red case is now testing nothing"
+    assert closing in text, "the guard's `end` moved; this red case is now testing nothing"
     template.write_text(
-        text.replace(
-            anchor,
-            "              create iam-keys <<JSON\n"
-            '              {"apiVersion":"v1","kind":"Secret","type":"Opaque",\n'
-            '               "metadata":{"name":"iam-keys"},\n'
-            '               "stringData":{"key":"$(password)"}}\n'
-            "              JSON\n" + anchor,
-        )
+        text.replace(guard, "").replace(closing, "              JSON\n          resources:\n")
     )
     return copy
 
 
-def test_a_fourth_create_reddens_the_minted_set(tmp_path):
-    failures = minted_set_failures(bootstrap_render(chart_with_a_fourth_create(tmp_path)))
+def test_minting_the_data_bearing_key_unguarded_reddens_the_minted_set(tmp_path):
+    failures = minted_set_failures(
+        bootstrap_render(chart_with_the_iam_keys_guard_stripped(tmp_path))
+    )
     message = "\n".join(failures)
-    assert failures, "a fourth Secret was minted and the gate passed"
+    assert failures, "a fourth Secret was minted at the default render and the gate passed"
     assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
     assert "found 4" in message, message
     assert THE_DATA_BEARING_KEY in message, message
@@ -1188,11 +1627,12 @@ def chart_with_a_duplicate_body_name(destination: Path) -> Path:
 def test_a_duplicate_body_name_reddens_the_minted_set(tmp_path):
     """THE WITNESS THAT `minted_secret_names_in` RETURNS A LIST RATHER THAN A SET.
 
-    The fixture above this one adds a fourth Secret under a NEW name, which a set
-    and a list both report. This case adds a SECOND BODY under a name the Job
-    already mints, so the set of names stays the three ADR-0753 allows and the
-    census reddens only because the helper counts the name twice. That is the one
-    property a list has here, and until this case it had no red.
+    The guard-stripping fixture above this one adds a fourth Secret under a NEW
+    name, which a set and a list both report. This case adds a SECOND BODY under a
+    name the Job already mints, so the set of names stays the three the default
+    render allows and the census reddens only because the helper counts the name
+    twice. That is the one property a list has here, and until this case it had no
+    red.
 
     MEASURED, at this branch's head, on both helm binaries. Deduplicate
     `minted_secret_names_in` — `list(dict.fromkeys(...))` — and THE WHOLE SUITE
@@ -1224,10 +1664,14 @@ def data_bearing_key_failures(rendered: str) -> list[str]:
 
     ASSERTED OVER THE RENDER RATHER THAN OVER THE SOURCE TEXT, and the difference
     matters in both directions. A gate reading the files would refuse the comments
-    that EXPLAIN the absence — `values.yaml` and `templates/bootstrap-secrets.yaml`
-    both argue at length why the fourth `create` is missing, and an absence nobody
-    explained is the one somebody fills in. What ADR-0753 forbids is the key being
-    MINTED, and what gets minted is what renders.
+    that EXPLAIN the toggle — `values.yaml` and `templates/bootstrap-secrets.yaml`
+    both argue at length about the fourth `create`, its ordering and the gap it
+    leaves open, and a default nobody explained is the one somebody flips. What the
+    default forbids is the key being MINTED, and what gets minted is what renders.
+
+    THE SAME FUNCTION READS BOTH ARMS, in opposite directions. The default render
+    must produce NO failures here; the render with `bootstrap.iamKeys.create` on
+    must produce one, or the toggle does nothing. Two callers, one measurement.
     """
     naming = [
         line.strip()
@@ -1238,32 +1682,186 @@ def data_bearing_key_failures(rendered: str) -> list[str]:
         return []
     return [
         f"the render names {THE_DATA_BEARING_KEY} on {len(naming)} lines: {naming}. "
-        f"ADR-0753 orders its generation behind a key-identity marker in the `iam` "
-        f"binary that refuses a wrong key, and that marker lands in its own change, "
-        f"first — until then a regenerated key gives an `iam` that starts healthy "
-        f"and cannot decrypt the rows it already has"
+        f"`bootstrap.iamKeys.create` defaults FALSE, and the data-bearing key is "
+        f"minted only when an adopter asks for it — a cluster whose Secret is gone "
+        f"but whose database survived gets a key that `iam` v0.8.43 refuses, and an "
+        f"estate that already mints the pair by hand must not get a second one"
     ]
 
 
-def test_no_data_bearing_key_is_minted_yet():
-    """ADR-0753's ORDERING, asserted rather than left as an intention.
+def test_the_data_bearing_key_is_absent_until_it_is_asked_for():
+    """The off arm: the adopter render never names the key.
 
-    A secret whose LOSS DESTROYS DATA is generated only once its consuming service
-    can REFUSE THE WRONG KEY. That refusal is a change to the `iam` binary, it ships
-    on its own, and it ships FIRST.
+    A secret whose LOSS DESTROYS DATA is minted only when an adopter asks for it.
+    ADR-0753 ordered the asking behind a key-identity marker in the `iam` binary
+    that refuses a wrong key; `iam` v0.8.43 shipped that marker, which is what makes
+    the toggle admissible at all. The DEFAULT stays false, and this is that default
+    asserted rather than left as an intention.
     """
     failures = data_bearing_key_failures(adopter_render_text())
     assert failures == [], "\n".join(failures)
 
 
-def test_minting_the_data_bearing_key_reddens_the_ordering_gate(tmp_path):
-    """The ordering's red case, on the same mutation the minted-set gate uses."""
+def test_turning_the_toggle_on_puts_the_data_bearing_key_in_the_render():
+    """The on arm, and it is what stops the off arm being vacuous.
+
+    A TOGGLE THAT RENDERED NOTHING WOULD PASS EVERY OTHER GATE IN THIS FILE. The
+    census above reads the Job's script; this reads the render as text, from the
+    same direction the off arm does, so the two answers cannot both come from a
+    template that ignores its own guard.
+    """
+    failures = data_bearing_key_failures(adopter_render_text(CHART, *IAM_KEYS_ON))
+    assert failures, (
+        f"{IAM_KEYS_TOGGLE} was set true and the render still never names "
+        f"{THE_DATA_BEARING_KEY}"
+    )
+
+
+def test_minting_the_data_bearing_key_unguarded_reddens_the_default(tmp_path):
+    """The default's red case: the guard stripped, so the key renders unasked."""
     failures = data_bearing_key_failures(
-        adopter_render_text(chart_with_a_fourth_create(tmp_path))
+        adopter_render_text(chart_with_the_iam_keys_guard_stripped(tmp_path))
     )
     message = "\n".join(failures)
-    assert failures, f"the render minted {THE_DATA_BEARING_KEY} and the ordering gate passed"
+    assert failures, f"the render minted {THE_DATA_BEARING_KEY} unasked and the gate passed"
     assert f"the render names {THE_DATA_BEARING_KEY} on" in message, message
+
+
+# ── THE KEY SET, AGAINST WHAT `make secrets` MINTS ───────────────────────────
+
+
+def body_of(script: str, secret: str) -> dict | None:
+    """The POSTed JSON body for one Secret, parsed. PURE.
+
+    PARSED RATHER THAN SEARCHED, because the question is about the body's SHAPE —
+    which map holds the key files, and which names it carries — and a substring
+    search cannot tell `"data"` from `"stringData"` in a body that contains both
+    strings. The bodies are ordinary JSON once the shell variables are left as the
+    string values they already are.
+    """
+    for name, match in zip(minted_by(script), BODY.finditer(script)):
+        if name == secret:
+            return json.loads(match.group("body"))
+    return None
+
+
+def iam_key_set_failures(documents: list[dict]) -> list[str]:
+    """Whether the Job-minted `iam-keys` carries what `make secrets` mints. PURE.
+
+    THE ONE PROPERTY THAT SPANS TWO WAYS OF CREATING THE SAME SECRET. `iam-keys`
+    can arrive two ways on this estate: by this Job, or by `make secrets` in
+    `yadgarhq/deploy`, which runs `kubectl create secret generic iam-keys` with
+    `--from-file=encryption.key=` and `--from-file=blind-index.key=`. `iam` reads
+    the mount and nothing tells it which path produced it. So a Job that minted a
+    different key set would give a cluster bootstrapped by the chart a mount the
+    hand-minted path never produces, and the service that refuses to start would
+    name a missing file rather than the chart that omitted it.
+
+    THE COUNT AS WELL AS THE NAMES. A name list alone would not notice a third key
+    added beside the two, and a count alone would not notice one name swapped for
+    another. Both are asserted, and both numbers reach the message.
+
+    THE FIELD IS PART OF THE COMPARISON. `make secrets` uses `--from-file=`, so
+    each key is RAW BYTES on disk — 32 of them, the only length `iam`'s `read_key`
+    accepts. `data` is the field the API server base64-DECODES, so a 44-character
+    base64 value lands as those 32 bytes. `stringData` would store the 44
+    characters themselves and `iam` would refuse to start on a wrong-length key. A
+    gate that read whichever map the body carried would pass that body, and the
+    defect would surface as a boot failure on a live cluster rather than here.
+    """
+    failures = []
+    body = body_of(job_scripts(documents).get("bootstrap-secrets", ""), THE_DATA_BEARING_KEY)
+    if body is None:
+        return [
+            f"the Job POSTs no body for {THE_DATA_BEARING_KEY}, so this gate read "
+            f"nothing. It is called on a render with {IAM_KEYS_TOGGLE} true, where "
+            f"the fourth `create` is the whole subject"
+        ]
+
+    if THE_WRONG_FIELD in body:
+        failures.append(
+            f"{THE_DATA_BEARING_KEY}'s body carries `{THE_WRONG_FIELD}`. `iam` reads "
+            f"each key file with `std::fs::read` and refuses any length but 32 "
+            f"BYTES, so `{THE_WRONG_FIELD}` would store the 44 base64 CHARACTERS as "
+            f"the file and `iam` would refuse to start. `{IAM_KEYS_FIELD}` is the "
+            f"field the API server decodes"
+        )
+    if IAM_KEYS_FIELD not in body:
+        return failures + [
+            f"{THE_DATA_BEARING_KEY}'s body carries no `{IAM_KEYS_FIELD}` map, so "
+            f"there is no key set to compare against `make secrets`"
+        ]
+
+    minted = set(body[IAM_KEYS_FIELD])
+    if minted != MAKE_SECRETS_IAM_KEYS:
+        failures.append(
+            f"expected {THE_DATA_BEARING_KEY} to carry the {EXPECTED_IAM_KEYS} keys "
+            f"`make secrets` mints, {sorted(MAKE_SECRETS_IAM_KEYS)}, found "
+            f"{len(minted)}: {sorted(minted)}. Missing "
+            f"{sorted(MAKE_SECRETS_IAM_KEYS - minted)}; unexpected "
+            f"{sorted(minted - MAKE_SECRETS_IAM_KEYS)}. A Job-minted key set that "
+            f"differs from the hand-minted one hands `iam` a mount `make secrets` "
+            f"never produces"
+        )
+    return failures
+
+
+def test_the_job_mints_the_key_set_make_secrets_mints():
+    """The register's key-set gate: the Job's JSON against `make secrets`."""
+    failures = iam_key_set_failures(bootstrap_render(CHART, *IAM_KEYS_ON))
+    assert failures == [], "\n".join(failures)
+
+
+def chart_with_one_iam_key_removed(destination: Path) -> Path:
+    """The register's red case: one key removed from the Job's JSON."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    key = '"encryption.key":"$encryption_key",'
+    assert key in text, "the key set moved; this red case is now testing nothing"
+    template.write_text(text.replace(key, ""))
+    return copy
+
+
+def test_removing_a_key_from_the_job_reddens_the_key_set_gate(tmp_path):
+    """The failure names the missing key AND both counts, which the register asks for."""
+    failures = iam_key_set_failures(
+        bootstrap_render(chart_with_one_iam_key_removed(tmp_path), *IAM_KEYS_ON)
+    )
+    message = "\n".join(failures)
+    assert failures, "a key was dropped from the Job's JSON and the key-set gate passed"
+    assert f"the {EXPECTED_IAM_KEYS} keys `make secrets` mints" in message, message
+    assert "found 1:" in message, message
+    assert "Missing ['encryption.key']" in message, message
+
+
+def chart_that_posts_the_keys_as_stringdata(destination: Path) -> Path:
+    """`data` swapped for `stringData`, which is the mutation that ships a dead `iam`.
+
+    IT IS SILENT EVERYWHERE ELSE. The Secret name is unchanged, the key names are
+    unchanged, the count is unchanged, and every other gate in this file reads one
+    of those three. The only symptom is on a live cluster: `iam` reads a
+    44-character file where it demands 32 bytes and refuses to start.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    field = '"data":{"encryption.key"'
+    assert field in text, "the key map moved; this red case is now testing nothing"
+    template.write_text(text.replace(field, '"stringData":{"encryption.key"'))
+    return copy
+
+
+def test_posting_the_keys_as_stringdata_reddens_the_key_set_gate(tmp_path):
+    failures = iam_key_set_failures(
+        bootstrap_render(chart_that_posts_the_keys_as_stringdata(tmp_path), *IAM_KEYS_ON)
+    )
+    message = "\n".join(failures)
+    assert failures, "the keys were POSTed as text and the key-set gate passed"
+    assert f"carries `{THE_WRONG_FIELD}`" in message, message
+    assert "refuses any length but 32 BYTES" in message, message
 
 
 # ── THE HOOKS, AND THE WEIGHTS THAT ORDER THEM ───────────────────────────────

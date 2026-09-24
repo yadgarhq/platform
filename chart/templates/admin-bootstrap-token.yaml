@@ -113,13 +113,17 @@ spec:
                 esac
               }
 
-              # 33 random bytes as base64, no trailing newline — the same shape
-              # `bootstrap-secrets`' `mint()` uses, for the same reason: 33 rather
-              # than 32 bytes so the base64 carries no `=` padding for an operator
-              # to trim by hand when they paste it, which is why 44 characters is
-              # an exact length here. The generated value never enters this
-              # container's process table — it reaches the request body as
-              # `$value` and the body reaches curl on stdin.
+              # `$2` random bytes as base64, no trailing newline — the same shape
+              # `bootstrap-secrets`' `mint()` uses, for the same reason. This Job
+              # always asks for 33 rather than 32 bytes, so the base64 carries no
+              # `=` padding for an operator to trim by hand when they paste it,
+              # which is why 44 characters is an exact length here. The width is an
+              # ARGUMENT only because the two `mint()` bodies are deliberately the
+              # same text, and `bootstrap-secrets` mints a 32-byte key file as well
+              # as 33-byte passwords; a shape that drifted between the two Jobs
+              # would be the thing a reader stops trusting. The generated value
+              # never enters this container's process table — it reaches the
+              # request body as `$value` and the body reaches curl on stdin.
               #
               # ASSIGNED AND CHECKED RATHER THAN CALLED AS `$(admin_token)` IN THE
               # HEREDOC, and `bootstrap-secrets` argues it at length: command
@@ -131,7 +135,7 @@ spec:
               # holds and a 409 is success. An empty administrative bootstrap
               # token is the credential ADR-0492's whole recovery path rests on.
               mint() {
-                value="$(head -c 33 /dev/urandom | base64 | tr -d '\n')"
+                value="$(head -c "$2" /dev/urandom | base64 | tr -d '\n')"
                 if [ "${#value}" -ne 44 ]; then
                   echo "$1: generated a ${#value}-character credential, expected 44" >&2
                   exit 1
@@ -140,7 +144,7 @@ spec:
 
               # `stringData`, not `data`: the API server stores exactly the bytes
               # given, so what lands is the token and nothing appended.
-              mint {{ $bootstrap.adminToken.secretName }}
+              mint {{ $bootstrap.adminToken.secretName }} 33
               create {{ $bootstrap.adminToken.secretName }} <<JSON
               {"apiVersion":"v1","kind":"Secret","type":"Opaque",
                "metadata":{"name":"{{ $bootstrap.adminToken.secretName }}"},

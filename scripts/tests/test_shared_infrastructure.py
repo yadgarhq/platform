@@ -266,13 +266,13 @@ def minted_secret_names_in(script: str) -> list[str]:
     WITNESSED RATHER THAN ASSERTED HERE, by
     `test_bootstrap.py::test_a_duplicate_body_name_reddens_the_minted_set`. That
     case adds a fourth `create` under a name the Job already mints. On this list the
-    ADR-0753 census reddens; deduplicate this function and the census returns an
+    minted-set census reddens; deduplicate this function and the census returns an
     EMPTY failure list on the same chart. It is the ONLY case in the suite that
-    moves — deduplicating here leaves `1 failed, 107 passed` on both helm binaries —
-    because every other gate reads the shipped chart, which carries no duplicate.
-    The sibling case beside it adds a NEW name,
-    `test_a_fourth_create_reddens_the_minted_set`, and so cannot tell a list from a
-    set at all.
+    moves — deduplicating here left `1 failed, 107 passed` on both helm binaries when
+    that was measured — because every other gate reads the shipped chart, which
+    carries no duplicate. The sibling case beside it adds a NEW name,
+    `test_minting_the_data_bearing_key_unguarded_reddens_the_minted_set`, and so
+    cannot tell a list from a set at all.
 
     ORDER IS NOT A REASON, and this docstring claimed it was. `minted_set_failures`
     applies `sorted()` to BOTH sides, so `sorted(a_set)` would compare fine there;
