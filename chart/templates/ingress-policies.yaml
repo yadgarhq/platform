@@ -167,45 +167,30 @@ spec:
     #
     # THE COUNT, WITH THE SCOPE THAT MAKES IT TRUE — because a count shipped
     # without its scope is the exact defect this rule's previous comment carried.
-    # Matching the literal `8222` across ALL 112 listable API resource kinds in the
-    # cluster returns NINE objects, and every one of them is the broker's own or the
-    # machinery that deploys it. Five are authored: StatefulSet `yadgar/nats`,
-    # ConfigMap `yadgar/nats-config`, Service `yadgar/nats-headless`, NetworkPolicy
-    # `yadgar/nats-ingress` (this file's live counterpart) and Pod `yadgar/nats-0`.
-    # Three are CONTROLLER-DERIVED from those five: ControllerRevision
-    # `yadgar/nats-5f6d5f5996`, and the `Endpoints` and `EndpointSlice` for
-    # `nats-headless`. The ninth is Argo `Application argocd/nats`, where 8222
-    # appears only in PROSE inside `spec.source.helm.values` rather than as a port.
-    # NARROWED TO THE FOUR KINDS a consumer would be written as — Deployment,
-    # StatefulSet, DaemonSet and ConfigMap — the count is TWO: the broker's own
-    # StatefulSet and ConfigMap. Two is true only with that qualifier attached, and
-    # an earlier draft of this comment stated it without one.
+    # ACROSS THE FOUR KINDS A CONSUMER WOULD BE WRITTEN AS — Deployment,
+    # StatefulSet, DaemonSet and ConfigMap — exactly TWO objects name 8222: the
+    # broker's own StatefulSet and its ConfigMap. Two is true only with that
+    # qualifier attached, and an earlier draft of this comment stated it without
+    # one. These four kinds hold AUTHORED objects, which is why this number belongs
+    # in a chart comment: a later reader re-running the same narrow sweep should
+    # still get two, and a re-run that disagrees is a finding rather than drift.
+    # A wider sweep across every resource kind also returns only the broker's own
+    # objects and the machinery that deploys it, but it returns controller-derived
+    # names that churn, so that measurement lives in this PR's body rather than
+    # here, where it would go stale silently.
     #
-    # HOW IT WAS MEASURED, AND WHAT THE MEASUREMENT CANNOT SEE (ADR-0591). Every
-    # one of the 112 kinds listed SUCCESSFULLY — none was skipped on an error — so
-    # the census is not vacuous, which is the failure class this estate has hit
-    # before. It is a literal string match, so a consumer dialling the headless
-    # Service's NAMED `monitor` port would carry no `8222` for it to find; that
-    # Service is itself in the census and nothing but the broker selects it, so
-    # there is no gap in practice, but the census proves "no object names the
-    # number" rather than "no code could reach the port". Measured 2026-09-24
-    # against the `kind-yadgar` cluster.
+    # THE TWO QUESTIONS ARE NOT THE SAME QUESTION, because a text-match census
+    # counts comments. "Objects whose text contains 8222" includes prose that
+    # merely mentions the port. "WORKLOADS THAT READ PORT 8222" is the claim that
+    # bears on security, and outside this namespace it is ZERO. Only the second
+    # licenses this narrowing; the first is the sweep that found it.
     #
-    # AND A TEXT-MATCH CENSUS COUNTS COMMENTS, which is why the two questions are
-    # separated above rather than run together. "Objects whose text contains 8222"
-    # is NINE and includes the Argo Application, which matches on a sentence of
-    # PROSE. "Workloads that read port 8222" is the claim that actually bears on
-    # security, and outside this namespace it is ZERO. Only the second number
-    # licenses the narrowing; the first is the sweep that found it.
-    #
-    # WHICH OF THE TWO NUMBERS TO RE-DERIVE, because they age differently. TWO is
-    # the stable figure: Deployment, StatefulSet, DaemonSet and ConfigMap are
-    # AUTHORED objects, so a later reader re-running that narrow sweep should still
-    # get two. NINE is a dated snapshot and is expected to drift — the
-    # ControllerRevision's hash suffix and the EndpointSlice's random suffix both
-    # change on ordinary churn, and a retained second ControllerRevision would make
-    # it ten without anything being wrong. A re-run that disagrees with NINE is
-    # drift; a re-run that disagrees with TWO is a finding.
+    # AND WHAT THE MEASUREMENT CANNOT SEE (ADR-0591). It is a LITERAL STRING MATCH,
+    # so a consumer dialling the headless Service's NAMED `monitor` port would carry
+    # no `8222` for it to find. That Service is itself in the census and nothing but
+    # the broker selects it, so there is no gap in practice — but the census proves
+    # "no object names the number" rather than "no code could reach the port", and
+    # a later reader should not ask more of it than that.
     #
     # NAMESPACE SCOPE IS LOOSER THAN THAT CENSUS LICENSES, and one sentence here
     # saves the next reviewer from re-deriving it. Since nothing reads this port,
