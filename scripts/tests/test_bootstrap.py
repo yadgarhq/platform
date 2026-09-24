@@ -326,11 +326,6 @@ def bootstrap_objects(documents: list[dict]) -> list[dict]:
 
 # ── THE JOB SCRIPTS, READ OFF THE RENDER ─────────────────────────────────────
 
-# `create <name> <<JSON` — the one call in either script that mints a Secret. Read
-# from the RENDERED script rather than from the template source, so a name that
-# arrives through a value is read as the value resolves it.
-MINTS = re.compile(r"^\s*create\s+(?P<name>[a-z0-9][a-z0-9.-]*)\s+<<JSON\s*$", re.MULTILINE)
-
 # The `case` arm for each HTTP status the POST can answer with.
 ARM = re.compile(r"^\s*(?P<code>201|409|\*)\)(?P<body>.*?);;\s*$", re.MULTILINE | re.DOTALL)
 
@@ -351,7 +346,33 @@ def job_scripts(documents: list[dict]) -> dict[str, str]:
 
 
 def minted_by(script: str) -> list[str]:
-    return [match.group("name") for match in MINTS.finditer(script)]
+    """Every Secret name this script CREATES, in order, read off the request body. PURE.
+
+    NOT OFF THE `create <name>` ARGUMENT, and that argument is where this used to
+    read. `$1` reaches the Job's LOG LINES and nothing else — `echo "$1: created"`,
+    `"$1: already exists, left untouched"`, `"$1: refused with HTTP $code"` and the
+    credential-length message — while the object the API server actually makes
+    carries its name INDEPENDENTLY, inside the heredoc, as
+    `"metadata":{"name":"..."}`. So a body renamed while the `create` line stayed
+    put left every gate below answering a question about a log label.
+
+    MEASURED RATHER THAN ARGUED, on d14753e: renaming the admin token's body name
+    to `admin-bootstrap-token-typo` and touching neither the `mint` line nor the
+    `create` line left THE WHOLE SUITE AT 107 PASSED, while
+    `test_the_jobs_mint_exactly_the_three_secrets_and_the_token` reported
+    `admin-bootstrap-token`. The install would hang: the gateway mounts a Secret
+    nothing creates.
+
+    THE MATCHER IS `test_shared_infrastructure.py`'s, SHARED RATHER THAN RESTATED,
+    which is ADR-0679. That file hardened this exact question against this exact
+    mutation one round ago; a second regex here would be the same matcher
+    re-derived a third time in three rounds. Imported inside the function,
+    following this file's existing precedent for `declared_checks`, so the suites
+    stay free of a module-level dependency on each other.
+    """
+    from test_shared_infrastructure import minted_secret_names_in
+
+    return minted_secret_names_in(script)
 
 
 # ── PROPERTY 1 — IT GENERATES ONLY WHEN THE SECRET IS ABSENT ─────────────────
@@ -490,10 +511,12 @@ def generation_failures(documents: list[dict]) -> list[str]:
         created = minted_by(script)
         if generated != created:
             failures.append(
-                f"{job}: expected one `mint <name>` statement before each `create "
-                f"<name>`, in the same order — the script creates {created} and "
-                f"generates {generated}. A credential built anywhere but a "
-                f"statement cannot fail the run"
+                f"{job}: expected one `mint <name>` statement per POSTed Secret, in "
+                f"the same order — the script creates {created} and generates "
+                f"{generated}. A credential built anywhere but a statement cannot "
+                f"fail the run. `created` is read off the REQUEST BODY, so a `mint` "
+                f"label that no longer names the Secret its body makes is a "
+                f"disagreement this list reports too"
             )
 
         checks = list(LENGTH_CHECK.finditer(script))
@@ -1099,6 +1122,73 @@ def test_a_fourth_create_reddens_the_minted_set(tmp_path):
     assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
     assert "found 4" in message, message
     assert THE_DATA_BEARING_KEY in message, message
+
+
+def chart_with_a_duplicate_body_name(destination: Path) -> Path:
+    """A fourth `create` whose body carries a name the Job ALREADY mints.
+
+    THE RED CASE FOR THE ONE PROPERTY A LIST HAS AND A SET DOES NOT. The fixture
+    above adds a fourth Secret under a NEW name, which a set and a list both
+    report. This one adds a second body under `nats-auth`, and the set of names is
+    then still the three this chart is allowed to mint — so the census reddens only
+    because `minted_secret_names_in` counts the name twice.
+
+    IT IS A SHAPE THE CHART CAN REACH. The blocks are copy-pasted from each other
+    and the name appears in the block four times; a fourth credential added by
+    copying the `nats-auth` block and renaming three of them leaves a Job that
+    POSTs `nats-auth` twice, is answered 201 then 409, and reports both created.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "bootstrap-secrets.yaml"
+    text = template.read_text()
+    anchor = "              create nats-auth-gateway <<JSON\n"
+    assert anchor in text, "the third mint moved; this red case is now testing nothing"
+    template.write_text(
+        text.replace(
+            anchor,
+            "              create nats-auth <<JSON\n"
+            '              {"apiVersion":"v1","kind":"Secret","type":"Opaque",\n'
+            '               "metadata":{"name":"nats-auth"},\n'
+            '               "stringData":{"password":"$value"}}\n'
+            "              JSON\n" + anchor,
+        )
+    )
+    return copy
+
+
+def test_a_duplicate_body_name_reddens_the_minted_set(tmp_path):
+    """THE WITNESS THAT `minted_secret_names_in` RETURNS A LIST RATHER THAN A SET.
+
+    The fixture above this one adds a fourth Secret under a NEW name, which a set
+    and a list both report. This case adds a SECOND BODY under a name the Job
+    already mints, so the set of names stays the three ADR-0753 allows and the
+    census reddens only because the helper counts the name twice. That is the one
+    property a list has here, and until this case it had no red.
+
+    MEASURED, at this branch's head, on both helm binaries. Deduplicate
+    `minted_secret_names_in` — `list(dict.fromkeys(...))` — and THE WHOLE SUITE
+    GOES `1 failed, 107 passed`, the one failure being this case. Every other gate
+    reads the SHIPPED chart, which carries no duplicate, so that mutation is silent
+    everywhere else. This case is the only thing standing between the helper and a
+    set.
+
+    AND IT IS ASSERTED ON THE MESSAGE, NOT ONLY ON `failures` BEING NON-EMPTY.
+    Return a bare `set` rather than deduplicating and `failures` is STILL non-empty
+    here, on a failure about the OTHER Job: `sorted(a_set)` equals the literal so
+    the census clause goes quiet, while `token != [ADMIN_TOKEN_SECRET]` compares a
+    set against a list and can never be equal. A lone `assert failures` would pass
+    under that mutation, so the duplicate name is asserted directly and early.
+    """
+    failures = minted_set_failures(bootstrap_render(chart_with_a_duplicate_body_name(tmp_path)))
+    message = "\n".join(failures)
+    assert failures, "a Secret was POSTed twice under one name and the gate passed"
+    assert "'nats-auth', 'nats-auth'" in message, (
+        f"the census reported the duplicate name once, so it is counting NAMES "
+        f"rather than BODIES and a set would read the same: {message}"
+    )
+    assert "expected bootstrap-secrets to mint 3 Secrets" in message, message
+    assert "found 4" in message, message
 
 
 def data_bearing_key_failures(rendered: str) -> list[str]:
