@@ -326,11 +326,6 @@ def bootstrap_objects(documents: list[dict]) -> list[dict]:
 
 # ── THE JOB SCRIPTS, READ OFF THE RENDER ─────────────────────────────────────
 
-# `create <name> <<JSON` — the one call in either script that mints a Secret. Read
-# from the RENDERED script rather than from the template source, so a name that
-# arrives through a value is read as the value resolves it.
-MINTS = re.compile(r"^\s*create\s+(?P<name>[a-z0-9][a-z0-9.-]*)\s+<<JSON\s*$", re.MULTILINE)
-
 # The `case` arm for each HTTP status the POST can answer with.
 ARM = re.compile(r"^\s*(?P<code>201|409|\*)\)(?P<body>.*?);;\s*$", re.MULTILINE | re.DOTALL)
 
@@ -351,7 +346,33 @@ def job_scripts(documents: list[dict]) -> dict[str, str]:
 
 
 def minted_by(script: str) -> list[str]:
-    return [match.group("name") for match in MINTS.finditer(script)]
+    """Every Secret name this script CREATES, in order, read off the request body. PURE.
+
+    NOT OFF THE `create <name>` ARGUMENT, and that argument is where this used to
+    read. `$1` reaches the Job's LOG LINES and nothing else — `echo "$1: created"`,
+    `"$1: already exists, left untouched"`, `"$1: refused with HTTP $code"` and the
+    credential-length message — while the object the API server actually makes
+    carries its name INDEPENDENTLY, inside the heredoc, as
+    `"metadata":{"name":"..."}`. So a body renamed while the `create` line stayed
+    put left every gate below answering a question about a log label.
+
+    MEASURED RATHER THAN ARGUED, on d14753e: renaming the admin token's body name
+    to `admin-bootstrap-token-typo` and touching neither the `mint` line nor the
+    `create` line left THE WHOLE SUITE AT 107 PASSED, while
+    `test_the_jobs_mint_exactly_the_three_secrets_and_the_token` reported
+    `admin-bootstrap-token`. The install would hang: the gateway mounts a Secret
+    nothing creates.
+
+    THE MATCHER IS `test_shared_infrastructure.py`'s, SHARED RATHER THAN RESTATED,
+    which is ADR-0679. That file hardened this exact question against this exact
+    mutation one round ago; a second regex here would be the same matcher
+    re-derived a third time in three rounds. Imported inside the function,
+    following this file's existing precedent for `declared_checks`, so the suites
+    stay free of a module-level dependency on each other.
+    """
+    from test_shared_infrastructure import minted_secret_names_in
+
+    return minted_secret_names_in(script)
 
 
 # ── PROPERTY 1 — IT GENERATES ONLY WHEN THE SECRET IS ABSENT ─────────────────
@@ -490,10 +511,12 @@ def generation_failures(documents: list[dict]) -> list[str]:
         created = minted_by(script)
         if generated != created:
             failures.append(
-                f"{job}: expected one `mint <name>` statement before each `create "
-                f"<name>`, in the same order — the script creates {created} and "
-                f"generates {generated}. A credential built anywhere but a "
-                f"statement cannot fail the run"
+                f"{job}: expected one `mint <name>` statement per POSTed Secret, in "
+                f"the same order — the script creates {created} and generates "
+                f"{generated}. A credential built anywhere but a statement cannot "
+                f"fail the run. `created` is read off the REQUEST BODY, so a `mint` "
+                f"label that no longer names the Secret its body makes is a "
+                f"disagreement this list reports too"
             )
 
         checks = list(LENGTH_CHECK.finditer(script))

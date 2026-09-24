@@ -233,6 +233,23 @@ def from_less_rules(policy: dict) -> list[dict]:
     return [rule for rule in policy["spec"]["ingress"] if not rule.get("from")]
 
 
+def minted_secret_names_in(script: str) -> list[str]:
+    """Every Secret name one bootstrap script CREATES, in order, off the request body. PURE.
+
+    THE MATCHER ITSELF, LIFTED OUT SO THE SIBLING SUITE SHARES IT RATHER THAN
+    RESTATES IT, and ADR-0679 is why. `test_bootstrap.py` answered the same
+    question — what does this render create — from the `create <name>` shell
+    ARGUMENT, which reaches the Job's log lines and never the POSTed body. That is
+    the defect the docstring below records, re-derived in a second file. It calls
+    this function now.
+
+    A LIST RATHER THAN A SET, because the caller in `test_bootstrap.py` needs both
+    halves a set would throw away: it compares against a sorted literal, and two
+    bodies carrying ONE name is a real failure that a set reports as a pass.
+    """
+    return [match.group("name") for match in MINTED_SECRET.finditer(script)]
+
+
 def minted_secret_names(rendered: list[dict]) -> set[str]:
     """Every Secret name a bootstrap Job actually CREATES, read off the request body. PURE.
 
@@ -255,10 +272,7 @@ def minted_secret_names(rendered: list[dict]) -> set[str]:
         for container in job["spec"]["template"]["spec"]["containers"]
         for part in (container.get("command") or []) + (container.get("args") or [])
     )
-    return {
-        match.group("name")
-        for match in MINTED_SECRET.finditer(script)
-    }
+    return set(minted_secret_names_in(script))
 
 
 def secret_names(workload: dict) -> set[str]:
