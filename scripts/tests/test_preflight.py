@@ -2293,6 +2293,32 @@ def test_the_probe_image_is_pinned_by_digest_and_is_the_preflights_own():
     ), "the two probe Jobs no longer read one image key, so a digest bump moves one of them"
 
 
+def test_preflight_enabled_false_drops_both_jobs(tmp_path):
+    """ONE KEY DROPS BOTH, and `README.md` and `example/values.yaml` both say so.
+
+    A CLAIM IN PROSE THAT NO RENDER CHECKS IS THE SHAPE THIS REPOSITORY EXISTS TO
+    CATCH. `preflight.enabled` guards the pre-install Job, its triple, the
+    post-install Job and its triple, and an adopter reading either file is told that
+    setting it false is how the diagnostic is dropped. Asserted over R2, where both
+    Jobs otherwise render, so the zero here is the key's doing and not the tie's.
+
+    ITS RED CASE IS THE KEY AT ITS DEFAULT, which every other case in this file
+    renders: `test_the_two_probe_jobs_own_disjoint_object_sets` requires both sets
+    NON-EMPTY over exactly this render with the key untouched, so a guard that
+    stopped gating either Job reddens there.
+    """
+    values = overrides(tmp_path / "preflight-off.yaml", "preflight:\n  enabled: false\n")
+    documents = adopter_render(CHART, "-f", str(values))
+    assert preflight_objects(documents) == [], (
+        "`preflight.enabled: false` left pre-install preflight objects in the render: "
+        f"{sorted((document.get('kind'), name_of(document)) for document in preflight_objects(documents))}"
+    )
+    assert post_install_probe_objects(documents) == [], (
+        "`preflight.enabled: false` left post-install probe objects in the render: "
+        f"{sorted((document.get('kind'), name_of(document)) for document in post_install_probe_objects(documents))}"
+    )
+
+
 def chart_with_the_gateway_tie_hardcoded_true(destination: Path) -> Path:
     """The second pair's red case: the tie stops following `gatewayListener.create`."""
     copy = destination / "chart"
