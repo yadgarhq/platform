@@ -1,4 +1,14 @@
-"""THE PREFLIGHT JOB'S GATES: the probe set, the denominator it asserts, and the tie.
+"""THE PROBE JOBS' GATES: each phase's probe set, the denominator it asserts, and the tie.
+
+TWO JOBS, AND EACH ASSERTS ITS OWN DENOMINATOR. The PRE-INSTALL preflight carries
+cert-manager, KEDA and mariadb-operator. The POST-INSTALL `envoy-gateway-probe`
+carries Envoy Gateway alone, because a pre-install probe of it cannot go red:
+`Accepted=True` on a GatewayClass is a condition already persisted in etcd and stays
+there with the controller at zero replicas, and on a fresh install the class the
+probe binds to does not exist yet. The two sets are DISJOINT and
+`test_the_two_probe_jobs_own_disjoint_object_sets` asserts it, because every gate
+below that says "the preflight" would silently mean both the day they overlapped.
+
 
 WHAT THE PREFLIGHT IS FOR, AND WHAT THE RENDER CHECK CANNOT DO. A render check
 answers "is this API registered on the target"; it NEVER answers "is a controller
@@ -34,6 +44,10 @@ a count means nothing without the render it is taken over:
   R3  R2 with whatever the case needs stated explicitly. R3 IS A FAMILY rather than
       one render, so every case below NAMES ITS VARIANT in its docstring.
 
+R2 CARRIES THE POST-INSTALL PROBE TOO, because `gatewayListener.create` is true
+there and `probes.envoyGateway` ties to it — one probe in each Job, one denominator
+each.
+
 WHAT THIS SUITE DOES NOT PROVE, stated so nobody reads more into a green run. Every
 assertion here is taken over `helm template` output. That the probes actually go
 red against a cluster whose operator is scaled to zero is a RUN-TIME verdict, and
@@ -49,12 +63,14 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
+README = REPO / "README.md"
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
 # ── EVERY GROUP THE CHART'S RENDER CHECKS ASK FOR ────────────────────────────
@@ -102,33 +118,54 @@ EXPECTED_PREFLIGHT_OBJECTS_AT_R1 = 0
 EXPECTED_PROBES_AT_R2 = 1
 EXPECTED_OPERATORS_AT_R2 = ["cert-manager"]
 
+# ── THE POST-INSTALL JOB, WHOSE NUMBERS ARE ITS OWN ──────────────────────────
+# A SEPARATE DENOMINATOR RATHER THAN A FOURTH ENTRY IN THE ONE ABOVE. The two Jobs
+# run in different phases and each counts only what its own phase enables, so a
+# probe counted by the wrong Job is a Job reporting a pass over a number that was
+# never its own.
+#
+# ONE PROBE AT R2, because `gatewayListener.create` is true there and
+# `probes.envoyGateway` ties to it. ZERO at R1, where that toggle is false — and at
+# R1 no Job renders at all, exactly as the pre-install one does not.
+EXPECTED_POST_INSTALL_PROBES_AT_R2 = 1
+EXPECTED_POST_INSTALL_OPERATORS_AT_R2 = ["envoy-gateway"]
+EXPECTED_POST_INSTALL_OBJECTS_AT_R1 = 0
+
+# The probe Gateway's own triple: `create`, `get` and `delete` on GATEWAYS and
+# nothing else. A DIFFERENT KIND from the preflight Role's, which is why this Job
+# has a triple rather than sharing one.
+POST_INSTALL_PROBE_RULES = {"envoy-gateway": {"gateway.networking.k8s.io": ["gateways"]}}
+EXPECTED_POST_INSTALL_PROBE_OBJECTS_AT_R2 = 4  # the Job, and its SA, Role and RoleBinding
+
 # R3 with `probes.keda` and `probes.mariadb` true — the variant step 4's KEDA and
 # mariadb cases need, because under the probe-default rule those two resolve false
 # when `platform` renders alone and a case built at R2 would never run them.
 EXPECTED_PROBES_AT_R3_BOTH = 3
 EXPECTED_OPERATORS_AT_R3_BOTH = ["cert-manager", "keda", "mariadb-operator"]
 
-# The probe/toggle agreement test at R2, AT STEP 4. One pair — `probes.certManager`
-# against the toggles that render what it probes — plus the two default-false
-# assertions for `probes.keda` and `probes.mariadb`. The second pair arrives with
-# the post-install Envoy Gateway probe at step 5b; the register's row is qualified
-# "R2 at step 4" and "R2 from step 5b" for exactly that reason.
-EXPECTED_AGREEMENT_PAIRS_AT_R2 = 1
+# The probe/toggle agreement test at R2, FROM STEP 5b. TWO pairs —
+# `probes.certManager` against the three toggles that render what it probes, and
+# `probes.envoyGateway` against `gatewayListener.create` — plus the two
+# default-false assertions for `probes.keda` and `probes.mariadb`. The register's
+# row is qualified "R2 at step 4" and "R2 from step 5b", and this is the second of
+# those two numbers.
+EXPECTED_AGREEMENT_PAIRS_AT_R2 = 2
 EXPECTED_DEFAULT_FALSE_PROBES = ["keda", "mariadb"]
 
-# The explicit-`true` outcomes at step 4: `probes.keda` and `probes.mariadb`
-# HONOURED, `probes.certManager` REFUSED beside its own false toggle. The
-# register's row names a second refused probe, `probes.envoyGateway`, whose key
-# does not exist until step 5b builds the probe it enables.
+# The explicit-`true` outcomes from step 5b: `probes.keda` and `probes.mariadb`
+# HONOURED, `probes.certManager` and `probes.envoyGateway` REFUSED beside their own
+# false toggles. The honoured number does NOT move with this step — the fourth probe
+# ties to one of this chart's own toggles, so its explicit `true` is refused rather
+# than honoured.
 EXPECTED_HONOURED_EXPLICIT_TRUES = 2
-EXPECTED_REFUSED_EXPLICIT_TRUES = 1
+EXPECTED_REFUSED_EXPLICIT_TRUES = 2
 
 # The explicit-`false` override, and only where it DISCRIMINATES. `probes.keda` and
 # `probes.mariadb` cannot: their tie is the hard constant false, so an explicit
-# `false` and the broken Sprig-`default` produce the SAME observation. Only
-# `probes.certManager`, whose tie resolves TRUE at R2, can tell them apart — and
-# `probes.envoyGateway`, the second discriminating case, arrives at step 5b.
-EXPECTED_DISCRIMINATING_OVERRIDES = 1
+# `false` and the broken Sprig-`default` produce the SAME observation. The two whose
+# ties resolve TRUE at R2 can tell them apart — `probes.certManager` and, from step
+# 5b, `probes.envoyGateway`.
+EXPECTED_DISCRIMINATING_OVERRIDES = 2
 
 # The preflight Role's verb set, as the plan states it: `create`, `get` and
 # `delete`, and NEVER `list`. A different verb set on a different kind from the
@@ -153,15 +190,26 @@ RBAC_API_GROUP = "rbac.authorization.k8s.io"
 
 PREFLIGHT_JOB = "preflight"
 
+# The post-install Job and its triple all carry this one name. It shares no prefix
+# with the preflight's, which is what keeps `preflight_objects` and
+# `post_install_probe_objects` disjoint — asserted rather than left to naming luck
+# by `test_the_two_probe_jobs_own_disjoint_object_sets`.
+POST_INSTALL_PROBE_JOB = "envoy-gateway-probe"
+
+# The two phases this chart renders hooks in.
+PRE_INSTALL = "pre-install,pre-upgrade"
+POST_INSTALL = "post-install,post-upgrade"
+
 # ── THE RENDERED SCRIPT'S CONTRACT ───────────────────────────────────────────
 # Read off the RENDERED script rather than the template source, so a value reaches
 # these gates as the value resolves it.
 
-# The list the script iterates, and the denominator it is asserted against. TWO
-# SEPARATE DERIVATIONS ON PURPOSE: the list is built from the per-probe blocks the
-# template renders, the denominator from the count of enabled keys. A probe added
-# to the template that no `probes.*` key enables moves the list and not the
-# denominator, which is the register row's own red case.
+# The list the script iterates, and the denominator it is asserted against. NOT TWO
+# INDEPENDENT DERIVATIONS — both resolve from the same `$probes`, and the per-probe
+# blocks are GATED on that same list, so the denominator half is separate and the
+# list half is not. What the equality catches is the `PROBES` line edited away from
+# the count beside it: a probe added to the template that no `probes.*` key enables
+# moves the list and not the denominator, which is the register row's own red case.
 PROBE_LIST = re.compile(r'^PROBES="(?P<probes>[^"]*)"$', re.MULTILINE)
 DENOMINATOR = re.compile(r"^EXPECTED_PROBES=(?P<count>\d+)$", re.MULTILINE)
 
@@ -320,18 +368,55 @@ def annotations_of(document: dict) -> dict:
 
 
 def preflight_objects(documents: list[dict]) -> list[dict]:
-    """The preflight's own objects: the Job and the triple that serves it.
+    """The PRE-INSTALL preflight's own objects: the Job and the triple that serves it.
 
     READ OFF THE NAME rather than off the hook annotation, because the hook
     annotation is shared with the bootstrap triple and the two Jobs beside it — and
     because the preflight's own hook shape is itself under test below, so a filter
     written on it would drop exactly the objects whose annotation went wrong.
+
+    THE POST-INSTALL PROBE'S OBJECTS ARE NOT HERE, and that is load-bearing rather
+    than a side effect of what they happen to be called. Half the gates in this file
+    read "the preflight's objects" and assert exactly one ServiceAccount, one Role
+    and one RoleBinding among them; a second triple swept in here would redden them
+    all for a reason none of their messages would name.
+    `test_the_two_probe_jobs_own_disjoint_object_sets` asserts the separation instead
+    of trusting the prefix.
     """
     return [
         document
         for document in documents
         if name_of(document) == PREFLIGHT_JOB or name_of(document).startswith("preflight-")
     ]
+
+
+def post_install_probe_objects(documents: list[dict]) -> list[dict]:
+    """The POST-INSTALL Envoy Gateway probe's objects: its Job and its own triple."""
+    return [document for document in documents if name_of(document) == POST_INSTALL_PROBE_JOB]
+
+
+def post_install_probe_job(documents: list[dict]) -> dict | None:
+    jobs = [
+        job for job in of_kind(documents, "Job") if name_of(job) == POST_INSTALL_PROBE_JOB
+    ]
+    return jobs[0] if len(jobs) == 1 else None
+
+
+def post_install_probe_script(documents: list[dict]) -> str:
+    """The shell script the post-install probe Job's single container runs. PURE."""
+    job = post_install_probe_job(documents)
+    assert job is not None, (
+        "the render carries no single post-install probe Job to read a script off"
+    )
+    containers = (((job.get("spec") or {}).get("template") or {}).get("spec") or {}).get(
+        "containers"
+    ) or []
+    assert len(containers) == 1, (
+        f"expected 1 container on the post-install probe Job, found {containers}"
+    )
+    arguments = containers[0].get("args") or []
+    assert len(arguments) == 1, f"expected 1 script argument, found {arguments}"
+    return str(arguments[0])
 
 
 def preflight_job(documents: list[dict]) -> dict | None:
@@ -365,7 +450,24 @@ def denominator(script: str) -> int:
 
 
 def probe_set_failures(documents: list[dict], expected: list[str]) -> list[str]:
-    """How the rendered probe list disagrees with its own denominator, or with `expected`. PURE.
+    """The PRE-INSTALL Job's probe set, against its own denominator. PURE."""
+    return script_probe_set_failures(preflight_script(documents), expected)
+
+
+def post_install_probe_set_failures(documents: list[dict], expected: list[str]) -> list[str]:
+    """The POST-INSTALL Job's probe set, against ITS own denominator. PURE.
+
+    THE SAME HARDENED CHECK, NOT A SECOND ONE (ADR-0679). Both Jobs derive a list
+    from the blocks their template renders and a denominator from the keys their
+    phase's values resolve, and both compare the two at the top level — so a
+    re-derivation here would be a second implementation of a gate this repository
+    has already hardened once, and the two would drift.
+    """
+    return script_probe_set_failures(post_install_probe_script(documents), expected)
+
+
+def script_probe_set_failures(script: str, expected: list[str]) -> list[str]:
+    """How a rendered probe list disagrees with its own denominator, or with `expected`. PURE.
 
     THREE CLAIMS, NOT ONE. That the list holds what this render should enable; that
     the denominator equals the list's length; and that the script CARRIES the
@@ -373,7 +475,6 @@ def probe_set_failures(documents: list[dict], expected: list[str]) -> list[str]:
     two numbers in Python while the Job itself checks nothing.
     """
     failures = []
-    script = preflight_script(documents)
 
     found = probe_list(script)
     declared = denominator(script)
@@ -591,6 +692,34 @@ def agreement_failures(tmp_path: Path) -> list[str]:
         )
     pairs += 1
 
+    # ── PAIR 2: `probes.envoyGateway` AGAINST `gatewayListener.create` ────────
+    # READ AT BOTH ENDS TOO, AND OVER THE POST-INSTALL JOB'S OBJECTS. That probe
+    # enables the other Job, so a pair read over the preflight's render would be
+    # green whatever the tie did — it would be examining a Job this key does not
+    # enable. With the toggle true the probe must appear; with it false NO
+    # post-install object may render, because a probe Gateway bound to a
+    # GatewayClass this install never made is the failure class the tie exists for.
+    post_on = post_install_probe_objects(adopter_render())
+    listener_off_values = overrides(
+        tmp_path / "gateway-listener-off.yaml", "gatewayListener:\n  create: false\n"
+    )
+    post_off = post_install_probe_objects(adopter_render(CHART, "-f", str(listener_off_values)))
+
+    if not post_on:
+        failures.append(
+            "preflight.probes.envoyGateway is unset and `gatewayListener.create` is "
+            "true, so the probe should resolve TRUE and the post-install Job should "
+            "render; the render carries no object of that name"
+        )
+    if post_off:
+        failures.append(
+            "preflight.probes.envoyGateway is unset and `gatewayListener.create` is "
+            "false, so the probe should resolve FALSE and no post-install object "
+            "should render; found "
+            f"{sorted((document.get('kind'), name_of(document)) for document in post_off)}"
+        )
+    pairs += 1
+
     for probe in EXPECTED_DEFAULT_FALSE_PROBES:
         operator = {"keda": "keda", "mariadb": "mariadb-operator"}[probe]
         if operator in on:
@@ -609,7 +738,7 @@ def agreement_failures(tmp_path: Path) -> list[str]:
 
 
 def test_every_probe_agrees_with_the_toggle_that_renders_what_it_probes(tmp_path):
-    """R2 at step 4: one pair, plus the two default-false assertions."""
+    """R2 from step 5b: two pairs, plus the two default-false assertions."""
     failures = agreement_failures(tmp_path)
     assert failures == [], "\n".join(failures)
 
@@ -648,25 +777,47 @@ def test_a_tie_that_stops_following_its_toggle_reddens_the_agreement_gate(tmp_pa
 
 
 def test_an_explicit_false_is_honoured_where_it_discriminates(tmp_path):
-    """R3 with `probes.certManager` false. THE ONE DISCRIMINATING CASE AT STEP 4.
+    """R3 with `probes.certManager` false; and R3 with `probes.envoyGateway` false.
 
-    An explicit `false` is always honoured: losing a diagnostic is a choice an
-    adopter is entitled to make. It DISCRIMINATES only where the overridden tie can
-    take the other value — `probes.certManager`'s resolves TRUE at R2, so an
-    explicit `false` changes the observation. `probes.keda` and `probes.mariadb`
-    cannot discriminate at all: their tie is the hard constant false, so an explicit
-    `false` and a broken Sprig-`default` produce the SAME observation for both.
+    THE TWO DISCRIMINATING CASES FROM STEP 5b, and it is two rather than four. An
+    explicit `false` is always honoured: losing a diagnostic is a choice an adopter
+    is entitled to make. It DISCRIMINATES only where the overridden tie can take the
+    other value — `probes.certManager`'s and `probes.envoyGateway`'s both resolve
+    TRUE at R2, so an explicit `false` changes the observation. `probes.keda` and
+    `probes.mariadb` cannot discriminate at all: their tie is the hard constant
+    false, so an explicit `false` and a broken Sprig-`default` produce the SAME
+    observation for both.
+
+    EACH IS READ OVER ITS OWN JOB. `certManager` enables the pre-install preflight
+    and `envoyGateway` the post-install probe, so one `preflight_objects` call for
+    both would report the second probe's override as honoured while the Job it
+    enables rendered untouched.
     """
-    values = overrides(
-        tmp_path / "cert-manager-off.yaml", "preflight:\n  probes:\n    certManager: false\n"
-    )
-    rendered = preflight_objects(adopter_render(CHART, "-f", str(values)))
-    assert rendered == [], (
-        f"`preflight.probes.certManager: false` was not honoured — it is the only "
-        f"probe this render enables, so no preflight object should remain; found "
-        f"{sorted((document.get('kind'), name_of(document)) for document in rendered)}"
-    )
-    assert EXPECTED_DISCRIMINATING_OVERRIDES == 1
+    discriminating = 0
+    for probe, objects, other in (
+        ("certManager", preflight_objects, post_install_probe_objects),
+        ("envoyGateway", post_install_probe_objects, preflight_objects),
+    ):
+        values = overrides(
+            tmp_path / f"{probe}-off.yaml", f"preflight:\n  probes:\n    {probe}: false\n"
+        )
+        documents = adopter_render(CHART, "-f", str(values))
+        rendered = objects(documents)
+        assert rendered == [], (
+            f"`preflight.probes.{probe}: false` was not honoured — it is the only "
+            f"probe its Job carries at this render, so no object of that Job's should "
+            f"remain; found "
+            f"{sorted((document.get('kind'), name_of(document)) for document in rendered)}"
+        )
+        # AND THE OTHER JOB IS STILL THERE. Without this the assertion above would
+        # also pass over an override that dropped BOTH probes, which is a wider
+        # effect than the one being claimed.
+        assert other(documents), (
+            f"`preflight.probes.{probe}: false` also emptied the other Job's render, "
+            f"so this case no longer shows that the override is scoped to one probe"
+        )
+        discriminating += 1
+    assert discriminating == EXPECTED_DISCRIMINATING_OVERRIDES
 
 
 def chart_with_a_sprig_default_tie(destination: Path) -> Path:
@@ -755,8 +906,27 @@ def test_anding_the_explicit_true_with_the_tie_reddens_the_honoured_gate(tmp_pat
     assert denominator(script) == EXPECTED_PROBES_AT_R2
 
 
+REFUSED_EXPLICIT_TRUES = {
+    # probe -> (the R3 overlay that turns its own toggle off, the toggle the
+    # refusal must also name). BOTH ties are this chart's own, which is what makes
+    # the explicit `true` a refusal rather than the only way to enable the probe.
+    "certManager": (
+        "internalCA:\n  create: false\ncertificates:\n  create: false\n"
+        "edgeTLS:\n  create: false\n",
+        "internalCA.create",
+    ),
+    # THE CASE THAT FORCED THE WHOLE RULE. `probes.envoyGateway: true` with
+    # `gatewayListener.create: false` is the default adopter install that created a
+    # probe Gateway bound to a GatewayClass nothing in the install renders: the
+    # apply succeeded and the hook then failed, which is a clean install followed by
+    # a failed release.
+    "envoyGateway": ("gatewayListener:\n  create: false\n", "gatewayListener.create"),
+}
+
+
 def test_an_explicit_true_beside_its_own_false_toggle_is_refused(tmp_path):
-    """R3 with `probes.certManager` true AND all three of its toggles false.
+    """R3 with `probes.certManager` true AND its three toggles false; and R3 with
+    `probes.envoyGateway` true AND `gatewayListener.create` false.
 
     THIS IS THE FAILURE CLASS THE PROBE-DEFAULT RULE EXISTS FOR, not an escape
     hatch: a probe for an operator whose objects this install renders none of
@@ -764,26 +934,25 @@ def test_an_explicit_true_beside_its_own_false_toggle_is_refused(tmp_path):
     than blessed, and the refusal names BOTH keys — a refusal naming one leaves the
     reader to guess which side to change.
 
-    "R2 with one thing changed" cannot express this variant: at R2 the probe's own
-    toggle is true and the probe is HONOURED.
+    "R2 with one thing changed" cannot express either variant: at R2 each probe's
+    own toggle is true and the probe is HONOURED.
     """
-    values = overrides(
-        tmp_path / "cert-manager-true-toggles-false.yaml",
-        "internalCA:\n  create: false\ncertificates:\n  create: false\n"
-        "edgeTLS:\n  create: false\n"
-        "preflight:\n  probes:\n    certManager: true\n",
-    )
-    result = template(
-        CHART, *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values)
-    )
-    assert result.returncode != 0, (
-        "`preflight.probes.certManager: true` beside three false toggles rendered "
-        "cleanly; it must be refused, because the probe would create objects for an "
-        "operator this install renders nothing for"
-    )
-    assert "preflight.probes.certManager" in result.stderr, result.stderr
-    assert "internalCA.create" in result.stderr, result.stderr
-    assert EXPECTED_REFUSED_EXPLICIT_TRUES == 1
+    refused = 0
+    for probe, (toggles_off, toggle) in REFUSED_EXPLICIT_TRUES.items():
+        values = overrides(
+            tmp_path / f"{probe}-true-toggle-false.yaml",
+            toggles_off + f"preflight:\n  probes:\n    {probe}: true\n",
+        )
+        result = template(CHART, *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+        assert result.returncode != 0, (
+            f"`preflight.probes.{probe}: true` beside `{toggle}` false rendered "
+            f"cleanly; it must be refused, because the probe would create objects "
+            f"for an operator this install renders nothing for"
+        )
+        assert f"preflight.probes.{probe}" in result.stderr, result.stderr
+        assert toggle in result.stderr, result.stderr
+        refused += 1
+    assert refused == EXPECTED_REFUSED_EXPLICIT_TRUES
 
 
 def chart_whose_refusal_names_one_key(destination: Path) -> Path:
@@ -827,8 +996,22 @@ def test_a_refusal_that_names_one_key_reddens_the_refusal_gate(tmp_path):
 # ── THE PREFLIGHT'S OWN RBAC TRIPLE ──────────────────────────────────────────
 
 
-def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
-    """Every way the preflight's RBAC widens, or stops being wired to its own Job. PURE.
+def rbac_failures(
+    documents: list[dict],
+    expected: list[str],
+    objects=preflight_objects,
+    job_of=preflight_job,
+    rules_for: dict | None = None,
+    job_name: str = PREFLIGHT_JOB,
+) -> list[str]:
+    """Every way a probe Job's RBAC widens, or stops being wired to its own Job. PURE.
+
+    PARAMETERISED RATHER THAN COPIED, and the four arguments are the only things
+    that differ between the two triples. ADR-0679 says a matcher a sibling gate has
+    hardened is copied rather than re-derived; here the sibling is in this same file
+    and a copy would be two implementations of one check, drifting apart at the
+    first mutation either one learns to catch. The defaults are the pre-install
+    preflight's, so every existing call site reads as it did.
 
     THE WIRING, NOT A CENSUS. An earlier gate in this repository counted objects and
     three mutations walked through it green — the worst being a `roleRef` pointed at
@@ -846,19 +1029,19 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
     turn this red and a subset check would not.
     """
     failures = []
-    mine = preflight_objects(documents)
+    mine = objects(documents)
 
     cluster_scoped = of_kind(mine, "ClusterRole") + of_kind(mine, "ClusterRoleBinding")
     if cluster_scoped:
         failures.append(
-            f"expected 0 cluster-scoped RBAC objects from the preflight, found "
+            f"expected 0 cluster-scoped RBAC objects from {job_name}, found "
             f"{len(cluster_scoped)}: {sorted(name_of(document) for document in cluster_scoped)}"
         )
 
     accounts = of_kind(mine, "ServiceAccount")
     if len(accounts) != EXPECTED_PREFLIGHT_SERVICE_ACCOUNTS:
         failures.append(
-            f"expected {EXPECTED_PREFLIGHT_SERVICE_ACCOUNTS} preflight "
+            f"expected {EXPECTED_PREFLIGHT_SERVICE_ACCOUNTS} {job_name} "
             f"ServiceAccount, found {len(accounts)}: "
             f"{sorted(name_of(account) for account in accounts)}"
         )
@@ -867,7 +1050,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
     roles = of_kind(mine, "Role")
     if len(roles) != EXPECTED_PREFLIGHT_ROLES:
         failures.append(
-            f"expected {EXPECTED_PREFLIGHT_ROLES} preflight Role, found "
+            f"expected {EXPECTED_PREFLIGHT_ROLES} {job_name} Role, found "
             f"{len(roles)}: {sorted(name_of(role) for role in roles)}"
         )
     role_name = name_of(roles[0]) if len(roles) == 1 else None
@@ -875,7 +1058,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
     bindings = of_kind(mine, "RoleBinding")
     if len(bindings) != EXPECTED_PREFLIGHT_ROLE_BINDINGS:
         failures.append(
-            f"expected {EXPECTED_PREFLIGHT_ROLE_BINDINGS} preflight RoleBinding, "
+            f"expected {EXPECTED_PREFLIGHT_ROLE_BINDINGS} {job_name} RoleBinding, "
             f"found {len(bindings)}: {sorted(name_of(binding) for binding in bindings)}"
         )
 
@@ -892,7 +1075,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
             )
         if role_name is None:
             failures.append(
-                f"{name_of(binding)}: the render carries no single preflight Role, so "
+                f"{name_of(binding)}: the render carries no single {job_name} Role, so "
                 f"roleRef.name {reference.get('name')!r} was compared against nothing"
             )
         elif reference.get("name") != role_name:
@@ -910,7 +1093,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
             continue
         if identity is None:
             failures.append(
-                f"{name_of(binding)}: the render carries no single preflight "
+                f"{name_of(binding)}: the render carries no single {job_name} "
                 f"ServiceAccount, so the subject {subjects[0]} was compared against nothing"
             )
             continue
@@ -921,20 +1104,20 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
                 f"ServiceAccount {wanted}, found {subjects[0]}"
             )
 
-    job = preflight_job(documents)
+    job = job_of(documents)
     if job is None:
-        failures.append("the render carries no single preflight Job to check an identity on")
+        failures.append(f"the render carries no single {job_name} Job to check an identity on")
     else:
         pod = ((job.get("spec") or {}).get("template") or {}).get("spec") or {}
         runs_as = pod.get("serviceAccountName")
         if identity is None:
             failures.append(
-                f"the render carries no single preflight ServiceAccount, so the Job's "
+                f"the render carries no single {job_name} ServiceAccount, so the Job's "
                 f"serviceAccountName {runs_as!r} was compared against nothing"
             )
         elif runs_as != identity:
             failures.append(
-                f"{PREFLIGHT_JOB}: expected serviceAccountName to be the rendered "
+                f"{job_name}: expected serviceAccountName to be the rendered "
                 f"ServiceAccount {identity!r}, found {runs_as!r}. A Job left on another "
                 f"account runs as an identity this Role was never bound to, and every "
                 f"request it makes answers 403"
@@ -945,7 +1128,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
 
     wanted_rules = {}
     for operator in expected:
-        for group, resources in PROBE_RULES[operator].items():
+        for group, resources in (rules_for or PROBE_RULES)[operator].items():
             wanted_rules.setdefault(group, set()).update(resources)
 
     rules = roles[0].get("rules") or []
@@ -954,7 +1137,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
         verbs = sorted(rule.get("verbs") or [])
         if verbs != THE_PROBE_VERBS:
             failures.append(
-                f"expected {len(THE_PROBE_VERBS)} verbs on every preflight rule, "
+                f"expected {len(THE_PROBE_VERBS)} verbs on every {job_name} rule, "
                 f"exactly {THE_PROBE_VERBS}, found {len(verbs)}: {verbs}. The probe "
                 f"creates an object, reads it and deletes it; `list` would let it "
                 f"enumerate every object of that kind in the namespace and it needs none"
@@ -964,7 +1147,7 @@ def rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
 
     if found_rules != wanted_rules:
         failures.append(
-            f"expected the preflight Role scoped to {ded(wanted_rules)}, found "
+            f"expected the {job_name} Role scoped to {ded(wanted_rules)}, found "
             f"{ded(found_rules)}. The rules follow the probes this render enables, so "
             f"a rule left behind grants a permission no probe uses"
         )
@@ -1509,9 +1692,9 @@ def test_the_preflight_and_its_triple_are_hooks_at_ordered_weights():
     weights = {}
     for document in mine:
         annotations = annotations_of(document)
-        assert annotations.get("helm.sh/hook") == "pre-install,pre-upgrade", (
+        assert annotations.get("helm.sh/hook") == PRE_INSTALL, (
             f"{name_of(document)} ({document.get('kind')}) is a hook in phase "
-            f"{annotations.get('helm.sh/hook')!r}; the preflight is pre-install,pre-upgrade"
+            f"{annotations.get('helm.sh/hook')!r}; the preflight is {PRE_INSTALL}"
         )
         assert annotations.get("helm.sh/hook-delete-policy") == "before-hook-creation", (
             f"{name_of(document)} does not carry `hook-delete-policy: "
@@ -1536,15 +1719,1125 @@ def test_the_preflight_and_its_triple_are_hooks_at_ordered_weights():
         f"Job's {job_weight}, so the Job can be admitted before its identity exists"
     )
 
+    # SCOPED TO THE PRE-INSTALL JOBS, and that is not tidiness. A `hook-weight`
+    # orders hooks WITHIN one phase and means nothing across two, so the
+    # post-install probe's weight compared here would be an ordering claim about two
+    # Jobs that can never run in the same phase — and it would raise `KeyError`
+    # rather than fail readably for any hook Job that carried no weight at all.
     bootstrap = [
         int(annotations_of(job)["helm.sh/hook-weight"])
         for job in of_kind(documents, "Job")
         if name_of(job) != PREFLIGHT_JOB
+        and annotations_of(job).get("helm.sh/hook") == PRE_INSTALL
     ]
     assert bootstrap and job_weight < min(bootstrap), (
         f"the preflight Job's weight {job_weight} does not sit below the bootstrap "
         f"Jobs' {sorted(bootstrap)}; the preflight exists to refuse before anything "
         f"else acts"
+    )
+
+
+# ── THE POST-INSTALL ENVOY GATEWAY PROBE ─────────────────────────────────────
+# WHAT THIS SECTION CANNOT PROVE, said once and not repeated per case. Every
+# assertion here is taken over `helm template` output. That the probe actually goes
+# RED against a cluster whose Envoy Gateway controller is scaled to zero is a
+# RUN-TIME verdict, and the plan this chart is built from defers it to the
+# bare-install proof — as it does the assertion that no Gateway of the probe's name
+# survives a failing case. Nothing here may be reported as proving either.
+#
+# WHAT IT DOES PROVE is everything the scaled-to-zero verdict RESTS ON, each of
+# which is a render-time property with a mutation that breaks it: that the probe
+# waits for `Programmed` and not for `Accepted`, that it deletes any object of its
+# fixed name and waits for it to be GONE before creating its own — so the status it
+# reads can only have been written by this run — and that it deletes what it made on
+# every exit path. A probe missing any one of those reads green with the controller
+# at zero.
+
+# The `await` call the probe makes, read off the RENDERED script: which condition it
+# waits for, which status it accepts, which MESSAGE it requires alongside them, and
+# which operator it names when it gives up.
+AWAIT_CALL = re.compile(
+    r'^\s*await\s+"(?P<path>[^"]+)"\s+(?P<condition>\w+)\s+(?P<status>\S+)\s+'
+    r'"(?P<message>[^"]*)"\s+"(?P<operator>[^"]+)"\s*$',
+    re.MULTILINE,
+)
+
+# The condition the probe must take, and the weaker one it must never take.
+THE_PROGRAMMED_CONDITION = "Programmed"
+THE_WEAKER_CONDITION = "Accepted"
+
+# The matcher itself, and the needle the probe hands it. Both read off the RENDERED
+# script, because the gate below RUNS them rather than reading them.
+CONDITION_MATCHER = re.compile(
+    r"^(?P<indent>[ ]*)condition_matches\(\) \{\n(?:.*\n)*?(?P=indent)\}$",
+    re.MULTILINE,
+)
+PROGRAMMED_MESSAGE_ASSIGNMENT = re.compile(r"^[ ]*PROGRAMMED_MESSAGE=.*$", re.MULTILINE)
+
+# `trap cleanup EXIT` at the TOP LEVEL. Inside a function it is scoped to that
+# function's shell and never fires for the Job.
+CLEANUP_TRAP = re.compile(r"^\s*trap cleanup EXIT\s*$", re.MULTILINE)
+
+# The `create()` wrapper's body, to read whether it removes before it creates.
+CREATE_FUNCTION = re.compile(r"^\s*create\(\) \{\n(?P<body>(?:.*\n)*?)\s*\}\s*$", re.MULTILINE)
+
+# One request body: the probe Gateway. Asserted so the body gates below cannot pass
+# by examining none.
+EXPECTED_PROBE_REQUEST_BODIES = 1
+
+
+def probe_gateway_body(script: str) -> dict:
+    """The Gateway the probe POSTs, parsed. PURE.
+
+    PARSED RATHER THAN GREPED, because the claims here are structural — which class,
+    which EnvoyProxy, which listener protocol — and a regex over the rendered text
+    would pass on a body that is no longer valid JSON at all.
+    """
+    bodies = [match.group("body") for match in HEREDOC.finditer(script)]
+    assert len(bodies) == EXPECTED_PROBE_REQUEST_BODIES, (
+        f"expected {EXPECTED_PROBE_REQUEST_BODIES} request body in the probe script, "
+        f"found {len(bodies)}. A gate examining none of them passes whatever the "
+        f"script does"
+    )
+    return json.loads(bodies[0])
+
+
+def test_the_two_probe_jobs_own_disjoint_object_sets():
+    """THE SEPARATION IS ASSERTED, NOT LEFT TO WHAT THE OBJECTS HAPPEN TO BE CALLED.
+
+    Half the gates in this file say "the preflight's objects" and assert exactly one
+    ServiceAccount, one Role and one RoleBinding among them. If the post-install
+    probe's triple were ever swept into that set, every one of them would redden for
+    a reason none of their messages would name — so the two sets are read at R2,
+    required to be non-empty, and required to share nothing.
+    """
+    documents = adopter_render()
+    pre = {(document.get("kind"), name_of(document)) for document in preflight_objects(documents)}
+    post = {
+        (document.get("kind"), name_of(document))
+        for document in post_install_probe_objects(documents)
+    }
+    assert pre, "R2 carries no pre-install preflight objects, so this gate compares nothing"
+    assert post, "R2 carries no post-install probe objects, so this gate compares nothing"
+    assert pre & post == set(), (
+        f"the two probe Jobs' object sets overlap on {sorted(pre & post)}. Every gate "
+        f"in this file that says `the preflight` would then silently mean both"
+    )
+    assert len(post) == EXPECTED_POST_INSTALL_PROBE_OBJECTS_AT_R2, (
+        f"expected {EXPECTED_POST_INSTALL_PROBE_OBJECTS_AT_R2} post-install probe "
+        f"objects at R2 — the Job and its own triple — found {len(post)}: {sorted(post)}"
+    )
+
+
+def test_the_defaults_render_no_post_install_probe_object_at_all():
+    """R1: `gatewayListener.create` is false, so the probe resolves false and no Job."""
+    rendered = post_install_probe_objects(defaults_render())
+    assert rendered == [], (
+        f"expected {EXPECTED_POST_INSTALL_OBJECTS_AT_R1} post-install probe objects at "
+        f"the chart's defaults, found {len(rendered)}: "
+        f"{sorted((document.get('kind'), name_of(document)) for document in rendered)}"
+    )
+
+
+def test_the_listener_toggle_true_at_the_defaults_reddens_the_post_install_zero(tmp_path):
+    """R1's red case, and it is a VALUES flip: make the fourth probe resolve true.
+
+    `--api-versions` is passed because `render-checks.yaml` refuses the moment
+    `gatewayListener.create` is on — without it this case would read that refusal
+    instead of the zero it is trying to redden.
+    """
+    values = overrides(tmp_path / "listener-on.yaml", "gatewayListener:\n  create: true\n")
+    rendered = post_install_probe_objects(render(CHART, *API_VERSIONS, "-f", str(values)))
+    assert rendered, (
+        "`gatewayListener.create` was turned true at the defaults, its probe should "
+        "have resolved true and rendered the post-install Job, and the zero passed anyway"
+    )
+
+
+def test_the_post_install_probe_list_equals_its_denominator_at_the_adopter_values():
+    """R2 from step 5b: Envoy Gateway alone, in a Job whose denominator is its own."""
+    failures = post_install_probe_set_failures(
+        adopter_render(), EXPECTED_POST_INSTALL_OPERATORS_AT_R2
+    )
+    assert failures == [], "\n".join(failures)
+    assert len(EXPECTED_POST_INSTALL_OPERATORS_AT_R2) == EXPECTED_POST_INSTALL_PROBES_AT_R2
+
+
+def chart_with_a_second_gateway_in_the_probe(destination: Path) -> Path:
+    """The register row's red case: a second Gateway in the Job that no key enables."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    line = 'PROBES="{{ join " " $probes }}"'
+    assert line in text, "the PROBES line moved; this red case is now testing nothing"
+    job.write_text(text.replace(line, 'PROBES="{{ join " " $probes }} envoy-gateway-second"', 1))
+    return copy
+
+
+def test_a_second_gateway_no_key_enables_reddens_the_post_install_denominator(tmp_path):
+    failures = post_install_probe_set_failures(
+        adopter_render(chart_with_a_second_gateway_in_the_probe(tmp_path)),
+        EXPECTED_POST_INSTALL_OPERATORS_AT_R2,
+    )
+    message = "\n".join(failures)
+    assert failures, "a second probe nothing enables was added and the denominator passed"
+    assert "holds 2 probes against a denominator of 1" in message, message
+
+
+def chart_without_the_post_install_denominator_equality(destination: Path) -> Path:
+    """The gate's own red case: the run-time comparison deleted from the probe script."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    equality = '[ "$declared" -eq "$EXPECTED_PROBES" ] || {'
+    assert equality in text, "the equality moved; this red case is now testing nothing"
+    end = text.index(equality)
+    closing = text.index("}\n", end) + len("}\n")
+    job.write_text(text[:end] + text[closing:])
+    return copy
+
+
+def test_deleting_the_post_install_run_time_equality_reddens_the_gate(tmp_path):
+    failures = post_install_probe_set_failures(
+        adopter_render(chart_without_the_post_install_denominator_equality(tmp_path)),
+        EXPECTED_POST_INSTALL_OPERATORS_AT_R2,
+    )
+    message = "\n".join(failures)
+    assert failures, "the run-time equality was deleted and the post-install gate passed"
+    assert "carries no top-level" in message, message
+
+
+def await_call(script: str):
+    match = AWAIT_CALL.search(script)
+    assert match, (
+        "the rendered probe script makes no `await` call, so it waits for no "
+        "condition and this gate would pass having examined nothing"
+    )
+    return match
+
+
+def condition_choice_failures(script: str) -> list[str]:
+    """`Programmed`, NOT `Accepted`, AND THE DIFFERENCE IS THE WHOLE PROBE. PURE.
+
+    `Accepted=True` means the controller validated the Gateway's spec against its
+    GatewayClass; `Programmed=True` means the data plane for it exists. A controller
+    that accepts and never programs is the half-dead case this probe is for.
+
+    THE WEAKER CONDITION IS REFUSED BY NAME rather than left out of the check, so a
+    silent downgrade to `Accepted` fails here instead of shipping as a probe that
+    still says it proves a running data plane.
+
+    A HELPER RATHER THAN A TEST BODY, so the red case below can CALL THIS GATE and
+    assert the message it produces. A red case that only re-reads the mutation it
+    applied proves the mutation landed and says nothing about whether anything would
+    have caught it — which is the shape the denominator and RBAC gates in this file
+    already avoid.
+    """
+    failures = []
+    call = await_call(script)
+    if call.group("condition") != THE_PROGRAMMED_CONDITION:
+        failures.append(
+            f"the probe waits for {call.group('condition')!r}; it must wait for "
+            f"{THE_PROGRAMMED_CONDITION!r}. If that condition turns out not to be set "
+            f"at the pinned Envoy Gateway version, that is a measurement that changes "
+            f"this probe and is recorded with its reason — never a silent downgrade"
+        )
+    if call.group("status") != "True":
+        failures.append(f"the probe accepts status {call.group('status')!r}: {call.group(0)}")
+    if THE_WEAKER_CONDITION in script:
+        failures.append(
+            f"the probe script mentions {THE_WEAKER_CONDITION!r}, which a Gateway "
+            f"carries with the controller at zero replicas once it has ever been "
+            f"reconciled"
+        )
+    if "Envoy Gateway" not in call.group("operator"):
+        failures.append(
+            f"the probe's timeout names {call.group('operator')!r} rather than the "
+            f"operator, so a failure would report a condition instead of an absent "
+            f"controller"
+        )
+    return failures
+
+
+def test_the_probe_waits_for_programmed_and_never_for_accepted():
+    failures = condition_choice_failures(post_install_probe_script(adopter_render()))
+    assert failures == [], "\n".join(failures)
+
+
+def chart_whose_probe_waits_for_accepted(destination: Path) -> Path:
+    """The condition gate's red case: the stronger condition swapped for the weaker."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    line = 'await "$gateways/$PROBE_NAME" Programmed True "$PROGRAMMED_MESSAGE" "Envoy Gateway"'
+    assert line in text, "the await call moved; this red case is now testing nothing"
+    swapped = 'await "$gateways/$PROBE_NAME" Accepted True "$PROGRAMMED_MESSAGE" "Envoy Gateway"'
+    job.write_text(text.replace(line, swapped, 1))
+    return copy
+
+
+def test_waiting_for_accepted_reddens_the_condition_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_probe_waits_for_accepted(tmp_path))
+    )
+    failures = condition_choice_failures(script)
+    message = "\n".join(failures)
+    assert failures, "the probe was changed to wait for the weaker condition and the gate passed"
+    assert "the probe waits for 'Accepted'" in message, message
+
+
+def freshness_failures(script: str) -> list[str]:
+    """FRESHNESS IS WHAT MAKES THE SCALED-TO-ZERO CASE RED, and it is a line of shell.
+
+    A Gateway left behind by a killed run carries a status a PREVIOUS reconcile
+    wrote. Reading that back is exactly the already-persisted-condition defect the
+    pre-install Envoy Gateway probe was dropped for, reappearing on the post-install
+    side: with the controller at zero the probe would read a stale `Programmed=True`
+    and report a pass. So the script deletes any object of its fixed name and waits
+    for it to be GONE before creating its own.
+
+    A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
+    states: the red case below calls this and asserts the message. PURE.
+    """
+    failures = []
+    match = CREATE_FUNCTION.search(script)
+    assert match, "the probe script defines no `create()`, so there is nothing to place"
+    body = match.group("body")
+    if 'remove "$1"' not in body:
+        failures.append(
+            "the probe's `create()` does not remove the object of its fixed name "
+            "first, so a Gateway left by a killed run is read back with the status an "
+            f"earlier reconcile wrote: {body}"
+        )
+        return failures
+    if body.index('remove "$1"') >= body.index("request POST"):
+        failures.append(
+            f"the probe removes AFTER it creates, which collides with the leftover "
+            f"rather than replacing it: {body}"
+        )
+    return failures
+
+
+def test_the_probe_removes_any_prior_gateway_before_creating_its_own():
+    failures = freshness_failures(post_install_probe_script(adopter_render()))
+    assert failures == [], "\n".join(failures)
+
+
+def chart_whose_probe_does_not_remove_first(destination: Path) -> Path:
+    """The freshness gate's red case: the remove-before-create deleted."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    line = '                remove "$1"\n'
+    assert line in text, "the remove-before-create moved; this red case is now testing nothing"
+    job.write_text(text.replace(line, "", 1))
+    return copy
+
+
+def test_dropping_the_remove_before_create_reddens_the_freshness_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_probe_does_not_remove_first(tmp_path))
+    )
+    failures = freshness_failures(script)
+    message = "\n".join(failures)
+    assert failures, "the remove-before-create was deleted and the freshness gate passed"
+    assert "does not remove the object of its fixed name first" in message, message
+
+
+def cleanup_failures(script: str) -> list[str]:
+    """`hook-delete-policy` DOES NOT DO THIS, and a Gateway is not inert. PURE.
+
+    `before-hook-creation` deletes the JOB before the next hook run; it never touches
+    objects that Job created. Envoy Gateway provisions a Deployment and a Service per
+    Gateway, so a probe that times out and exits 1 would leave real proxy
+    infrastructure standing. The trap runs on EXIT — success and failure alike — and
+    it runs at the TOP LEVEL, because a trap set inside a function is scoped to that
+    function's shell and never fires for the Job.
+
+    A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
+    states: the red case below calls this and asserts the message.
+    """
+    failures = []
+    if not CLEANUP_TRAP.search(script):
+        failures.append(
+            "the probe script carries no top-level `trap cleanup EXIT`, so a probe "
+            "that times out leaves its Gateway — and the proxy Deployment and Service "
+            "Envoy Gateway provisioned for it — standing"
+        )
+    if 'request DELETE "$path" ""' not in script:
+        failures.append(
+            "the probe's cleanup issues no DELETE, so the trap fires and removes nothing"
+        )
+    if 'CREATED="$CREATED $1"' not in script:
+        failures.append(
+            "the probe never records what it created, so the cleanup walks an empty "
+            "list and passes having deleted nothing"
+        )
+    return failures
+
+
+def test_the_probe_deletes_its_gateway_on_every_exit_path():
+    failures = cleanup_failures(post_install_probe_script(adopter_render()))
+    assert failures == [], "\n".join(failures)
+
+
+def chart_without_the_probe_cleanup_trap(destination: Path) -> Path:
+    """The cleanup assertion's own red case: the trap deleted."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    line = "              trap cleanup EXIT\n"
+    assert line in text, "the trap moved; this red case is now testing nothing"
+    job.write_text(text.replace(line, "", 1))
+    return copy
+
+
+def test_deleting_the_cleanup_trap_reddens_the_cleanup_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
+    script = post_install_probe_script(
+        adopter_render(chart_without_the_probe_cleanup_trap(tmp_path))
+    )
+    failures = cleanup_failures(script)
+    message = "\n".join(failures)
+    assert failures, "the trap was deleted and the cleanup gate passed"
+    assert "carries no top-level `trap cleanup EXIT`" in message, message
+
+
+def probe_gateway_failures(documents: list[dict]) -> list[str]:
+    """THE CLASS IS WHAT MAKES THIS ENVOY GATEWAY'S PROBE, not the API group. PURE.
+
+    A Gateway is `gateway.networking.k8s.io`, a SPECIFICATION every implementation
+    registers. What names the operator is the GatewayClass, whose `controllerName` is
+    Envoy Gateway's own — so a probe bound to any other class proves nothing about
+    Envoy Gateway, and a probe bound to a class this chart does not render proves
+    nothing at all.
+
+    AND IT INHERITS THE REAL LISTENER'S INFRASTRUCTURE. The `parametersRef` names the
+    EnvoyProxy `gatewayListener.create` renders, so the probe's data plane is placed
+    and exposed exactly as the estate's own edge is. A probe provisioned from the
+    controller's defaults could fail where the real Gateway succeeds, which would be
+    a probe reporting on a Gateway nobody installed.
+
+    A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
+    states: the two red cases below call this and assert the message each produces.
+    """
+    failures = []
+    body = probe_gateway_body(post_install_probe_script(documents))
+
+    classes = of_kind(documents, "GatewayClass")
+    assert len(classes) == 1, f"expected 1 rendered GatewayClass, found {classes}"
+    if body["spec"]["gatewayClassName"] != name_of(classes[0]):
+        failures.append(
+            f"the probe Gateway binds to class {body['spec']['gatewayClassName']!r} "
+            f"and this chart renders {name_of(classes[0])!r}. A class nothing created "
+            f"leaves the probe `Accepted=False` forever, with no controller ever "
+            f"looking at it"
+        )
+
+    proxies = of_kind(documents, "EnvoyProxy")
+    assert len(proxies) == 1, f"expected 1 rendered EnvoyProxy, found {proxies}"
+    reference = body["spec"]["infrastructure"]["parametersRef"]
+    if reference != {
+        "group": "gateway.envoyproxy.io",
+        "kind": "EnvoyProxy",
+        "name": name_of(proxies[0]),
+    }:
+        failures.append(
+            f"the probe Gateway's parametersRef is {reference}; it must name the "
+            f"EnvoyProxy this chart renders, {name_of(proxies[0])!r}, so that whether "
+            f"a Gateway can be programmed on this cluster is one question rather than two"
+        )
+
+    listeners = body["spec"]["listeners"]
+    if len(listeners) != 1 or listeners[0]["protocol"] != "HTTP":
+        failures.append(
+            f"the probe Gateway's listeners are {listeners}; one plain HTTP listener "
+            f"is what keeps the probe free of a TLS Secret, a ReferenceGrant and "
+            f"cert-manager, so that a red here is Envoy Gateway and nothing else"
+        )
+    return failures
+
+
+def test_the_probe_gateway_binds_to_the_class_and_the_infrastructure_this_chart_renders():
+    failures = probe_gateway_failures(adopter_render())
+    assert failures == [], "\n".join(failures)
+
+
+def chart_whose_probe_binds_to_another_class(destination: Path) -> Path:
+    """The class gate's red case: the probe bound to a class this chart never renders."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    line = '"gatewayClassName":"{{ $listener.className }}",'
+    assert line in text, "the class reference moved; this red case is now testing nothing"
+    job.write_text(text.replace(line, '"gatewayClassName":"istio",', 1))
+    return copy
+
+
+def test_a_probe_bound_to_another_class_reddens_the_class_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
+    failures = probe_gateway_failures(
+        adopter_render(chart_whose_probe_binds_to_another_class(tmp_path))
+    )
+    message = "\n".join(failures)
+    assert failures, "the probe was bound to another class and the gate passed"
+    assert "binds to class 'istio'" in message, message
+
+
+def chart_whose_probe_names_no_infrastructure(destination: Path) -> Path:
+    """The infrastructure gate's red case: the parametersRef pointed at nothing."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    line = '"name":"{{ $listener.envoyProxy.name }}"}},'
+    assert line in text, "the parametersRef moved; this red case is now testing nothing"
+    job.write_text(text.replace(line, '"name":"no-such-envoyproxy"}},', 1))
+    return copy
+
+
+def test_a_probe_whose_infrastructure_names_nothing_reddens_the_gate(tmp_path):
+    """THE GATE IS CALLED, not the mutation re-read."""
+    failures = probe_gateway_failures(
+        adopter_render(chart_whose_probe_names_no_infrastructure(tmp_path))
+    )
+    message = "\n".join(failures)
+    assert failures, "the parametersRef was pointed at nothing and the gate passed"
+    assert "'name': 'no-such-envoyproxy'" in message, message
+
+
+# ── THE CONDITION READING, RUN RATHER THAN READ ──────────────────────────────
+# A GATEWAY CARRIES TWO CONDITIONS NAMED `Programmed`, AND THEY ARE DIFFERENT FACTS.
+# The OBJECT's means an address was assigned and the proxy replicas are available;
+# each LISTENER's means its configuration was translated and sent to the data plane.
+# Measured on kind-yadgar against `docker.io/envoyproxy/gateway:v1.9.1`, read-only:
+#
+#   object-level     Programmed=True  "Address assigned to the Gateway, 2/2 envoy
+#                                      replicas available"
+#   listener-level   Programmed=True  "Sending translated listener configuration to
+#                                      the data plane"
+#
+# and `Programmed` appears four times in one Gateway's status. The matcher greps the
+# whole response, so `Programmed=True` ALONE is satisfied by either.
+#
+# THE TWO COME APART ON THE PROOF'S OWN CLUSTER. `envoyProxy.serviceType` defaults to
+# `LoadBalancer`, `example/values.yaml` deliberately does not restate it, and the
+# bare-install proof runs where no load-balancer controller exists — so the OBJECT's
+# `Programmed` goes False with reason `AddressNotAssigned`, the probe inherits that
+# same EnvoyProxy and so inherits that same failure, and the listener still
+# translates. A probe keyed on the condition alone reports SUCCESS there while the
+# real `edge` Gateway stalls.
+#
+# THESE GATES RUN THE RENDERED MATCHER rather than reading it. A Python restatement
+# of `sed | grep | grep | grep` is a second implementation, and a gate that agrees
+# with its own restatement proves nothing about the shell that ships. So the function
+# is lifted out of the rendered script verbatim, handed the needles the rendered
+# `await` call hands it, and executed against constructed bodies.
+#
+# STIPULATED RATHER THAN MEASURED, and stated here as well as in the values file:
+# that v1.9.1 sets the LISTENER's `Programmed=True` while address assignment fails
+# was NOT reproduced. Closing it needs a Gateway created on a cluster with no
+# load-balancer controller, which no read-only observation can stand in for. What IS
+# measured is that both conditions exist under one name with the two messages above.
+
+
+def gateway_body(
+    object_status: str, object_message: str, listener_status: str, listener_message: str
+) -> str:
+    """The bytes `curl` writes to `$body` for a Gateway carrying these conditions. PURE.
+
+    COMPACT JSON, as the API server writes it — `separators=(",", ":")` — because the
+    matcher's first step splits on the literal `},{` and a body with spaces in it
+    would not split at all. Same reasoning as `api_server_body` above.
+    """
+    return json.dumps(
+        {
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {"name": "envoy-gateway-probe", "namespace": "yadgar"},
+            "spec": {"gatewayClassName": "eg"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Accepted",
+                        "status": "True",
+                        "reason": "Accepted",
+                        "message": "The Gateway has been scheduled by Envoy Gateway",
+                    },
+                    {
+                        "type": "Programmed",
+                        "status": object_status,
+                        "reason": "Programmed" if object_status == "True" else "AddressNotAssigned",
+                        "message": object_message,
+                    },
+                ],
+                "listeners": [
+                    {
+                        "name": "probe",
+                        "attachedRoutes": 0,
+                        "conditions": [
+                            {
+                                "type": "Accepted",
+                                "status": "True",
+                                "reason": "Accepted",
+                                "message": "Listener is accepted",
+                            },
+                            {
+                                "type": "Programmed",
+                                "status": listener_status,
+                                "reason": "Programmed",
+                                "message": listener_message,
+                            },
+                        ],
+                    }
+                ],
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+ADDRESS_ASSIGNED = "Address assigned to the Gateway, 2/2 envoy replicas available"
+LISTENER_TRANSLATED = "Sending translated listener configuration to the data plane"
+NO_ADDRESS = "No addresses have been assigned to the Gateway"
+
+# A FRESH GATEWAY WITH THE CONTROLLER AT ZERO: admitted, and never given a status.
+FRESH_GATEWAY_BODY = json.dumps(
+    {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "Gateway",
+        "metadata": {"name": "envoy-gateway-probe", "namespace": "yadgar"},
+        "spec": {"gatewayClassName": "eg"},
+        "status": {},
+    },
+    separators=(",", ":"),
+)
+
+# Each case is (name, body, must the matcher ACCEPT it, why it is here).
+CONDITION_READING_CASES = (
+    (
+        "programmed",
+        gateway_body("True", ADDRESS_ASSIGNED, "True", LISTENER_TRANSLATED),
+        True,
+        "the status a healthy cluster writes. A matcher that refuses this is red on a "
+        "healthy cluster, which is the class this chart refuses",
+    ),
+    (
+        "listener-only",
+        gateway_body("False", NO_ADDRESS, "True", LISTENER_TRANSLATED),
+        False,
+        "the OBJECT's `Programmed` False for want of an address and the LISTENER's "
+        "True. `envoyProxy.serviceType` defaults to `LoadBalancer` and the proof runs "
+        "where nothing provides one, so this is the proof's own configuration — a "
+        "matcher that accepts it reports success while the real `edge` Gateway stalls",
+    ),
+    (
+        "no-status",
+        FRESH_GATEWAY_BODY,
+        False,
+        "the scaled-to-zero case: a fresh Gateway the controller never touched. A "
+        "matcher that accepts it is the whole probe reading green with no controller",
+    ),
+)
+
+
+def matcher_harness(script: str) -> str:
+    """The rendered matcher, the needle the rendered script hands it, and nothing else.
+
+    THE NEEDLES ARE TAKEN FROM THE `await` CALL SITE rather than retyped here, so a
+    probe changed to demand something else is exercised as changed. PURE.
+    """
+    call = await_call(script)
+    function = CONDITION_MATCHER.search(script)
+    assert function, (
+        "the rendered script defines no `condition_matches()`, so there is nothing to "
+        "run and this gate would pass having executed nothing"
+    )
+    assignment = PROGRAMMED_MESSAGE_ASSIGNMENT.search(script)
+    assert assignment, (
+        "the rendered script assigns no PROGRAMMED_MESSAGE, so the probe requires no "
+        "message and this gate would run a matcher the probe does not use"
+    )
+    return "\n".join(
+        [
+            "set -u",
+            'body="$1"',
+            assignment.group(0).strip(),
+            textwrap.dedent(function.group(0)),
+            " ".join(
+                [
+                    "condition_matches",
+                    call.group("condition"),
+                    call.group("status"),
+                    '"' + call.group("message") + '"',
+                ]
+            ),
+            "",
+        ]
+    )
+
+
+def matcher_verdict(harness: Path, body: Path) -> int:
+    """Whether the rendered matcher ACCEPTS `body`: its exit status, 0 for yes."""
+    binary = shutil.which("sh")
+    # NOT A SKIP, and ADR-0650 is why — the same decision `helm()` above makes.
+    assert binary, (
+        "no POSIX shell is on PATH. This gate RUNS the probe's own matcher, and the "
+        "probe's container runs it under `sh` too — install one rather than letting "
+        "this report a pass it did not earn"
+    )
+    return subprocess.run(
+        [binary, str(harness), str(body)], capture_output=True, text=True
+    ).returncode
+
+
+def condition_reading_failures(script: str, tmp_path: Path) -> list[str]:
+    """Every constructed body the rendered matcher reads the wrong way."""
+    harness = tmp_path / "matcher.sh"
+    harness.write_text(matcher_harness(script))
+    failures = []
+    for name, body, must_accept, why in CONDITION_READING_CASES:
+        path = tmp_path / f"body-{name}.json"
+        path.write_text(body)
+        accepted = matcher_verdict(harness, path) == 0
+        if accepted == must_accept:
+            continue
+        verb = "ACCEPTS" if accepted else "REFUSES"
+        failures.append(
+            f"the rendered matcher {verb} the {name} body and must not: {why}. The "
+            f"body it read was {body}"
+        )
+    return failures
+
+
+def test_the_probe_refuses_a_body_carrying_only_the_listeners_programmed(tmp_path):
+    """R2: the three readings, through the shell the probe actually ships."""
+    failures = condition_reading_failures(post_install_probe_script(adopter_render()), tmp_path)
+    assert failures == [], "\n".join(failures)
+
+
+def chart_whose_matcher_drops_the_message_stage(destination: Path) -> Path:
+    """The reading gate's red case, and NOT AN INVENTED MUTATION.
+
+    This restores the matcher exactly as it stood when the review found the defect:
+    `Programmed=True` with no message required. It is at once the permanent red case
+    and the demonstration against the real bug.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = job.read_text()
+    three_stage = (
+        "                  | grep -E '\"status\":\"('\"$2\"')\"' \\\n"
+        '                  | grep -qF "$3"\n'
+    )
+    assert three_stage in text, "the matcher moved; this red case is now testing nothing"
+    two_stage = "                  | grep -Eq '\"status\":\"('\"$2\"')\"'\n"
+    job.write_text(text.replace(three_stage, two_stage, 1))
+    return copy
+
+
+def test_a_matcher_without_the_message_stage_reddens_the_reading_gate(tmp_path):
+    """The wide matcher put back: it accepts the body the real cluster produces."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_matcher_drops_the_message_stage(tmp_path))
+    )
+    failures = condition_reading_failures(script, tmp_path)
+    message = "\n".join(failures)
+    assert failures, (
+        "the message stage was deleted and the reading gate passed, so a probe that "
+        "reports success off the listener's condition would ship again"
+    )
+    assert "ACCEPTS the listener-only body" in message, message
+
+
+def chart_with_an_empty_programmed_message(destination: Path) -> Path:
+    """The key's own weakening direction: `grep -F ""` matches every line.
+
+    A VALUES EDIT, NOT A TEMPLATE ONE, which is the objection to making a message a
+    key at all. The gate answers it by BEHAVIOUR rather than by a literal: an empty
+    needle cannot refuse anything, so the reading gate reddens on the same three
+    bodies it always reads.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    values = copy / "values.yaml"
+    text = values.read_text()
+    line = "    programmedMessage: Address assigned to the Gateway\n"
+    assert line in text, (
+        "`preflight.envoyGateway.programmedMessage` moved; this red case is now "
+        "testing nothing"
+    )
+    values.write_text(text.replace(line, '    programmedMessage: ""\n', 1))
+    return copy
+
+
+def test_an_empty_programmed_message_reddens_the_reading_gate(tmp_path):
+    script = post_install_probe_script(
+        adopter_render(chart_with_an_empty_programmed_message(tmp_path))
+    )
+    failures = condition_reading_failures(script, tmp_path)
+    message = "\n".join(failures)
+    assert failures, (
+        "`programmedMessage` was emptied and the reading gate passed, so the third "
+        "stage can be turned into a no-op by a values edit nothing catches"
+    )
+    assert "ACCEPTS the listener-only body" in message, message
+
+
+# ── THE PROBE'S BOUND AND HELM'S HOOK BUDGET, WHICH ARE ONE CONSTRAINT ────────
+# MEASURED ON BOTH PINS — helm 3.18.4 and 4.3.0 — `--timeout` is documented as "time
+# to wait for any individual Kubernetes operation (like Jobs for hooks)" and defaults
+# to `5m0s`. Helm's clock starts when the hook Job is CREATED, so scheduling and
+# image pull come out of the same budget before the script's own clock starts.
+#
+# AND THE SCRIPT'S WORST CASE IS TWICE ITS BOUND. `create()` calls `remove()` first,
+# and `remove()` loops to the SAME `TIMEOUT_SECONDS` that `await()` then loops to. So
+# two bounded loops compose, plus the request time of the calls themselves, which no
+# value bounds.
+#
+# WHAT IS LOST WHEN HELM GIVES UP FIRST IS THE MESSAGE, NOT THE GATEWAY. The Job
+# carries `backoffLimit: 0` and no `activeDeadlineSeconds`, so the pod runs on and
+# the trap still deletes what it made. The operator reads `timed out waiting for the
+# condition` instead of the probe naming Envoy Gateway, which is exactly what ruling
+# 10 asks the probe to do.
+#
+# THE BOUND IS NOT LOWERED TO FIT. `Programmed` includes replica availability, so a
+# cold cluster may genuinely need 300s, and a bound cut to fit helm's default would
+# reintroduce red-on-healthy. The budget is documented instead, and this gate is what
+# stops the two diverging in silence.
+BOUNDED_LOOPS_PER_RUN = 2
+INSTALL_BUDGET_MARGIN_SECONDS = 300
+
+# The bound, read off the RENDERED script, never off the values literal beside it.
+PROBE_BOUND = re.compile(r"^\s*TIMEOUT_SECONDS=(?P<seconds>\d+)\s*$", re.MULTILINE)
+
+# `--timeout <duration>` as helm takes it. A bare `--timeout` with no duration after
+# it — the prose mentioning the flag — is not a statement of a budget and is skipped.
+TIMEOUT_FLAG = re.compile(r"--timeout\s+(?P<budget>\d+)(?P<unit>[smh])\b")
+SECONDS_PER_UNIT = {"s": 1, "m": 60, "h": 3600}
+
+# Where the budget must be stated, and the least number of statements each file must
+# carry. A MINIMUM rather than an equality, so prose may repeat it — but zero is
+# refused, because a gate that found no statement would pass having compared nothing.
+BUDGET_IS_STATED_IN = {"README.md": 1, "example/values.yaml": 1}
+
+
+def install_budget_failures(script: str, stated: dict[str, str]) -> list[str]:
+    """Whether every documented `--timeout` covers the probe's composed bound. PURE.
+
+    `stated` maps each file's name to its text, so the red cases below can hand this
+    a mutated document without writing one to disk.
+    """
+    failures = []
+    bound = PROBE_BOUND.search(script)
+    assert bound, (
+        "the rendered probe script sets no TIMEOUT_SECONDS, so it carries no bound "
+        "and this gate would pass having compared nothing"
+    )
+    seconds = int(bound.group("seconds"))
+    required = BOUNDED_LOOPS_PER_RUN * seconds + INSTALL_BUDGET_MARGIN_SECONDS
+
+    for name, minimum in BUDGET_IS_STATED_IN.items():
+        found = list(TIMEOUT_FLAG.finditer(stated[name]))
+        if len(found) < minimum:
+            failures.append(
+                f"{name} states `--timeout <duration>` {len(found)} times and must "
+                f"state it at least {minimum}. The probe bounds itself at {seconds}s "
+                f"and helm's own default is 300s, so an install that is handed no "
+                f"budget aborts before the probe can name Envoy Gateway"
+            )
+            continue
+        for match in found:
+            budget = int(match.group("budget")) * SECONDS_PER_UNIT[match.group("unit")]
+            if budget >= required:
+                continue
+            failures.append(
+                f"{name} documents `--timeout {match.group('budget')}"
+                f"{match.group('unit')}` = {budget}s, and the probe needs "
+                f"{required}s: {BOUNDED_LOOPS_PER_RUN} composed loops of {seconds}s "
+                f"plus {INSTALL_BUDGET_MARGIN_SECONDS}s for scheduling, image pull "
+                f"and request time. Helm aborts first, and the operator reads `timed "
+                f"out waiting for the condition` instead of the probe's diagnostic"
+            )
+    return failures
+
+
+def documented_budgets() -> dict[str, str]:
+    """The two files the budget is stated in, as they stand."""
+    return {
+        "README.md": README.read_text(),
+        "example/values.yaml": ADOPTER_VALUES.read_text(),
+    }
+
+
+def test_the_documented_install_budget_covers_the_probes_bound():
+    """R2: the bound off the rendered script, the budget off the two documents."""
+    failures = install_budget_failures(
+        post_install_probe_script(adopter_render()), documented_budgets()
+    )
+    assert failures == [], "\n".join(failures)
+
+
+def test_documenting_helms_own_default_reddens_the_budget_gate():
+    """The red case: the budget cut to the default the measurement says is too small."""
+    stated = documented_budgets()
+    original = stated["README.md"]
+    stated["README.md"] = original.replace("--timeout 15m", "--timeout 5m")
+    assert stated["README.md"] != original, (
+        "README.md no longer spells the budget `--timeout 15m`, so this red case "
+        "replaced nothing and is now testing whatever the unmutated file says"
+    )
+    failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
+    message = "\n".join(failures)
+    assert failures, "the documented budget was cut to helm's default and the gate passed"
+    assert "README.md documents `--timeout 5m` = 300s" in message, message
+
+
+def test_a_budget_stated_nowhere_reddens_the_budget_gate():
+    """The gate cannot pass having found no statement."""
+    stated = documented_budgets()
+    original = stated["example/values.yaml"]
+    stated["example/values.yaml"] = original.replace("--timeout 15m", "")
+    assert stated["example/values.yaml"] != original, (
+        "example/values.yaml no longer spells the budget `--timeout 15m`, so this red "
+        "case deleted nothing and is now testing whatever the unmutated file says"
+    )
+    failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
+    message = "\n".join(failures)
+    assert failures, "the budget was deleted from example/values.yaml and the gate passed"
+    assert "example/values.yaml states `--timeout <duration>` 0 times" in message, message
+
+
+def chart_whose_probe_outlives_the_documented_budget(destination: Path) -> Path:
+    """The other knob: the bound raised past what the documented budget covers."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    values = copy / "values.yaml"
+    text = values.read_text()
+    line = "    timeoutSeconds: 300\n"
+    assert line in text, (
+        "`preflight.envoyGateway.timeoutSeconds` moved; this red case is now testing "
+        "nothing"
+    )
+    values.write_text(text.replace(line, "    timeoutSeconds: 600\n", 1))
+    return copy
+
+
+def test_raising_the_bound_past_the_documented_budget_reddens_the_gate(tmp_path):
+    """THE CONSTRAINT HAS TWO KNOBS, and moving either one alone must redden."""
+    script = post_install_probe_script(
+        adopter_render(chart_whose_probe_outlives_the_documented_budget(tmp_path))
+    )
+    failures = install_budget_failures(script, documented_budgets())
+    message = "\n".join(failures)
+    assert failures, "the probe's bound was doubled and the documented budget still passed"
+    assert "the probe needs 1500s" in message, message
+
+
+def post_install_rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
+    """The post-install triple, through the SAME hardened check the preflight's uses."""
+    return rbac_failures(
+        documents,
+        expected,
+        objects=post_install_probe_objects,
+        job_of=post_install_probe_job,
+        rules_for=POST_INSTALL_PROBE_RULES,
+        job_name=POST_INSTALL_PROBE_JOB,
+    )
+
+
+def test_the_post_install_probe_role_carries_create_get_delete_and_never_list():
+    """`create`, `get`, `delete` on GATEWAYS — a different kind from the preflight's."""
+    failures = post_install_rbac_failures(adopter_render(), EXPECTED_POST_INSTALL_OPERATORS_AT_R2)
+    assert failures == [], "\n".join(failures)
+
+
+def chart_with_list_on_the_probe_role(destination: Path) -> Path:
+    """The verb gate's red case: `list` added back."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    rbac = copy / "templates" / "envoy-gateway-probe-rbac.yaml"
+    text = rbac.read_text()
+    line = '    verbs: ["create", "get", "delete"]'
+    assert line in text, "the verb list moved; this red case is now testing nothing"
+    rbac.write_text(text.replace(line, '    verbs: ["create", "get", "delete", "list"]'))
+    return copy
+
+
+def test_a_fourth_verb_reddens_the_post_install_rbac_gate(tmp_path):
+    failures = post_install_rbac_failures(
+        adopter_render(chart_with_list_on_the_probe_role(tmp_path)),
+        EXPECTED_POST_INSTALL_OPERATORS_AT_R2,
+    )
+    message = "\n".join(failures)
+    assert failures, "`list` was added to the probe Role and the verb gate passed"
+    assert "exactly ['create', 'delete', 'get']" in message, message
+
+
+def chart_with_the_probe_bound_to_cluster_admin(destination: Path) -> Path:
+    """The wiring gate's red case, and it renders NO extra object at all."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    rbac = copy / "templates" / "envoy-gateway-probe-rbac.yaml"
+    text = rbac.read_text()
+    block = "  kind: Role\n  name: {{ $probe.serviceAccountName }}"
+    assert block in text, "the roleRef moved; this red case is now testing nothing"
+    rbac.write_text(text.replace(block, "  kind: ClusterRole\n  name: cluster-admin", 1))
+    return copy
+
+
+def test_binding_the_probe_to_cluster_admin_reddens_the_wiring_gate(tmp_path):
+    documents = adopter_render(chart_with_the_probe_bound_to_cluster_admin(tmp_path))
+    census = of_kind(post_install_probe_objects(documents), "ClusterRole")
+    assert census == [], (
+        "binding to the built-in `cluster-admin` rendered a ClusterRole object, so "
+        "this red case no longer demonstrates what it was written for"
+    )
+    failures = post_install_rbac_failures(documents, EXPECTED_POST_INSTALL_OPERATORS_AT_R2)
+    message = "\n".join(failures)
+    assert failures, "the probe was bound to cluster-admin and the wiring gate passed"
+    assert "'kind': 'Role'" in message, message
+
+
+def test_the_probe_and_its_triple_are_post_install_hooks_at_ordered_weights():
+    """The Job is a `post-install` hook and its own triple sits BELOW it.
+
+    THE PHASE IS THE ORDERING. This Job runs once the release's objects exist,
+    the GatewayClass among them — which a weight cannot express, and which is the
+    whole reason a pre-install Envoy Gateway probe could not be built.
+
+    `test_bootstrap.py`'s chart-wide hook gate owns the COUNTS of Jobs, RBAC objects
+    and weight positions per phase. What is asserted here is this Job's own shape.
+    """
+    mine = post_install_probe_objects(adopter_render())
+    assert mine, "the adopter render carries no post-install probe objects at all"
+
+    weights = {}
+    for document in mine:
+        annotations = annotations_of(document)
+        assert annotations.get("helm.sh/hook") == POST_INSTALL, (
+            f"{name_of(document)} ({document.get('kind')}) is a hook in phase "
+            f"{annotations.get('helm.sh/hook')!r}; this probe is {POST_INSTALL}"
+        )
+        assert annotations.get("helm.sh/hook-delete-policy") == "before-hook-creation", (
+            f"{name_of(document)} does not carry `hook-delete-policy: "
+            f"before-hook-creation`, so its second install meets an immutable object"
+        )
+        weight = annotations.get("helm.sh/hook-weight")
+        assert isinstance(weight, str), (
+            f"{name_of(document)} renders a hook-weight of type "
+            f"{type(weight).__name__}, not str. Annotations are map[string]string, so "
+            f"an unquoted integer does not decode — and the failure arrives at apply time"
+        )
+        weights[(document.get("kind"), name_of(document))] = int(weight)
+
+    job_weight = weights[("Job", POST_INSTALL_PROBE_JOB)]
+    triple = {
+        weight
+        for (kind, _), weight in weights.items()
+        if kind in {"ServiceAccount", "Role", "RoleBinding"}
+    }
+    assert triple and max(triple) < job_weight, (
+        f"the probe triple's weights {sorted(triple)} do not all sit BELOW the Job's "
+        f"{job_weight}, so the Job can be admitted before its identity exists"
+    )
+
+
+def test_the_probe_body_generates_nothing_inside_itself():
+    """The trap this chart has met once, asserted for the second Job too.
+
+    A generator called as `$(...)` INSIDE A HEREDOC cannot fail the run: command
+    substitution DISCARDS the exit status, so `set -e` never sees it.
+    """
+    body = probe_gateway_body(post_install_probe_script(adopter_render()))
+    assert "$(" not in json.dumps(body), (
+        f"the probe's request body generates inside itself: {body}. Command "
+        f"substitution discards the exit status, so a generator that fails there "
+        f"posts an empty value and the Job reports success"
+    )
+
+
+def test_the_probe_image_is_pinned_by_digest_and_is_the_preflights_own():
+    """ONE IMAGE KEY FOR BOTH JOBS, and it is pinned by digest.
+
+    A tag is a MOVING pointer. A second key would be two sources for one decision
+    and the digest pin would have to be moved twice.
+    """
+    documents = adopter_render()
+    job = post_install_probe_job(documents)
+    assert job is not None
+    containers = (((job.get("spec") or {}).get("template") or {}).get("spec") or {})["containers"]
+    assert len(containers) == EXPECTED_PREFLIGHT_CONTAINERS, (
+        f"expected {EXPECTED_PREFLIGHT_CONTAINERS} container on the probe Job, found "
+        f"{[container.get('name') for container in containers]}"
+    )
+    assert DIGEST_PINNED.match(containers[0]["image"]), (
+        f"the probe image {containers[0]['image']!r} is not pinned by digest"
+    )
+    preflight = preflight_job(documents)
+    assert preflight is not None
+    assert containers[0]["image"] == (
+        ((preflight["spec"]["template"]["spec"])["containers"][0]["image"])
+    ), "the two probe Jobs no longer read one image key, so a digest bump moves one of them"
+
+
+def test_preflight_enabled_false_drops_both_jobs(tmp_path):
+    """ONE KEY DROPS BOTH, and `README.md` and `example/values.yaml` both say so.
+
+    A CLAIM IN PROSE THAT NO RENDER CHECKS IS THE SHAPE THIS REPOSITORY EXISTS TO
+    CATCH. `preflight.enabled` guards the pre-install Job, its triple, the
+    post-install Job and its triple, and an adopter reading either file is told that
+    setting it false is how the diagnostic is dropped. Asserted over R2, where both
+    Jobs otherwise render, so the zero here is the key's doing and not the tie's.
+
+    ITS RED CASE IS THE KEY AT ITS DEFAULT, which every other case in this file
+    renders: `test_the_two_probe_jobs_own_disjoint_object_sets` requires both sets
+    NON-EMPTY over exactly this render with the key untouched, so a guard that
+    stopped gating either Job reddens there.
+    """
+    values = overrides(tmp_path / "preflight-off.yaml", "preflight:\n  enabled: false\n")
+    documents = adopter_render(CHART, "-f", str(values))
+    assert preflight_objects(documents) == [], (
+        "`preflight.enabled: false` left pre-install preflight objects in the render: "
+        f"{sorted((document.get('kind'), name_of(document)) for document in preflight_objects(documents))}"
+    )
+    assert post_install_probe_objects(documents) == [], (
+        "`preflight.enabled: false` left post-install probe objects in the render: "
+        f"{sorted((document.get('kind'), name_of(document)) for document in post_install_probe_objects(documents))}"
+    )
+
+
+def chart_with_the_gateway_tie_hardcoded_true(destination: Path) -> Path:
+    """The second pair's red case: the tie stops following `gatewayListener.create`."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    partial = copy / "templates" / "_preflight.tpl"
+    text = partial.read_text()
+    line = '      "tied" $context.Values.gatewayListener.create'
+    assert line in text, "the gateway tie moved; this red case is now testing nothing"
+    partial.write_text(text.replace(line, '      "tied" true', 1))
+    return copy
+
+
+def test_a_gateway_tie_that_stops_following_its_toggle_reddens_the_agreement_gate(tmp_path):
+    """Flip one member of the second pair without the other."""
+    copy = chart_with_the_gateway_tie_hardcoded_true(tmp_path)
+    off_values = overrides(
+        tmp_path / "gateway-listener-off.yaml", "gatewayListener:\n  create: false\n"
+    )
+    off = post_install_probe_objects(adopter_render(copy, "-f", str(off_values)))
+    assert off, (
+        "the tie was hardcoded true, so the probe should have rendered a Job with "
+        "`gatewayListener.create` false, and the agreement gate saw nothing"
     )
 
 
@@ -1571,10 +2864,16 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
     r2_script = preflight_script(r2)
     r3_script = preflight_script(r3)
 
+    post_script = post_install_probe_script(r2)
+
     census = {
         "preflight objects at R1": at_r1,
+        "post-install probe objects at R1": len(post_install_probe_objects(defaults_render())),
         "probes at R2": len(probe_list(r2_script)),
         "denominator at R2": denominator(r2_script),
+        "post-install probes at R2": len(probe_list(post_script)),
+        "post-install denominator at R2": denominator(post_script),
+        "post-install probe objects at R2": len(post_install_probe_objects(r2)),
         "probes at R3 (keda+mariadb true)": len(probe_list(r3_script)),
         "denominator at R3 (keda+mariadb true)": denominator(r3_script),
         "probe/toggle pairs at R2": EXPECTED_AGREEMENT_PAIRS_AT_R2,
@@ -1583,7 +2882,11 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
         "honoured explicit trues": EXPECTED_HONOURED_EXPLICIT_TRUES,
         "refused explicit trues": EXPECTED_REFUSED_EXPLICIT_TRUES,
         "preflight Role rules at R3": len(of_kind(preflight_objects(r3), "Role")[0]["rules"]),
+        "post-install probe Role rules at R2": len(
+            of_kind(post_install_probe_objects(r2), "Role")[0]["rules"]
+        ),
         "request bodies at R3": len(HEREDOC.findall(r3_script)),
+        "post-install request bodies at R2": len(HEREDOC.findall(post_script)),
     }
     with capsys.disabled():
         print("\n  preflight census")
@@ -1592,18 +2895,25 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
 
     assert census == {
         "preflight objects at R1": EXPECTED_PREFLIGHT_OBJECTS_AT_R1,
+        "post-install probe objects at R1": EXPECTED_POST_INSTALL_OBJECTS_AT_R1,
         "probes at R2": EXPECTED_PROBES_AT_R2,
         "denominator at R2": EXPECTED_PROBES_AT_R2,
+        "post-install probes at R2": EXPECTED_POST_INSTALL_PROBES_AT_R2,
+        "post-install denominator at R2": EXPECTED_POST_INSTALL_PROBES_AT_R2,
+        "post-install probe objects at R2": EXPECTED_POST_INSTALL_PROBE_OBJECTS_AT_R2,
         "probes at R3 (keda+mariadb true)": EXPECTED_PROBES_AT_R3_BOTH,
         "denominator at R3 (keda+mariadb true)": EXPECTED_PROBES_AT_R3_BOTH,
-        "probe/toggle pairs at R2": 1,
+        "probe/toggle pairs at R2": 2,
         "default-false probes asserted at R2": 2,
-        "discriminating explicit-false overrides": 1,
+        "discriminating explicit-false overrides": 2,
         "honoured explicit trues": 2,
-        "refused explicit trues": 1,
+        "refused explicit trues": 2,
         # cert-manager one, KEDA two (its own group and `apps`), mariadb one.
         "preflight Role rules at R3": 4,
+        # Gateways in the upstream Gateway API group, and nothing else.
+        "post-install probe Role rules at R2": 1,
         "request bodies at R3": EXPECTED_REQUEST_BODIES,
+        "post-install request bodies at R2": EXPECTED_PROBE_REQUEST_BODIES,
     }
 
 

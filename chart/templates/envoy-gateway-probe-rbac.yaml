@@ -1,0 +1,93 @@
+{{/*
+THE POST-INSTALL PROBE'S OWN IDENTITY, AND THE SMALLEST PERMISSION THAT CAN PROBE.
+
+A THIRD TRIPLE, AND NOT THE PREFLIGHT'S. `templates/preflight-rbac.yaml` argues why
+the preflight does not share the bootstrap triple — a different verb set on
+different kinds — and the same argument separates this one from the preflight's:
+this Role holds `create`, `get` and `delete` on GATEWAYS, and the preflight's Role
+holds none. One triple for both would be the UNION of the two, held by both Jobs,
+so the pre-install preflight would gain the ability to create a Gateway it never
+touches.
+
+`create`, `get`, `delete`, AND NEVER `list`. The probe creates ONE Gateway under a
+name it already knows, reads THAT object back until it is programmed, and deletes
+it. `list` would let it enumerate every Gateway in the namespace and it needs none
+of them. `resourceNames` cannot narrow the `create` — the authorizer runs before
+the request body is decoded — so the Role being NAMESPACED is what bounds this
+identity.
+
+THE GROUP IS THE UPSTREAM GATEWAY API'S, NOT ENVOY GATEWAY'S, and `values.yaml`
+records why at length: a Gateway is `gateway.networking.k8s.io`, a specification
+every implementation registers. What makes this probe Envoy Gateway's is the CLASS
+the Gateway binds to, whose controller is Envoy Gateway's own. This Role grants
+nothing on `gateway.envoyproxy.io`: the probe REFERENCES the EnvoyProxy this chart
+already rendered and creates none.
+
+THE RULES FOLLOW THE PROBES THIS RENDER ENABLES, resolved from the SAME partial the
+Job reads. A fixed rule set would be a second statement of which probes exist,
+which is the invariant-spanning-two-places shape that passes while the constraint
+is broken.
+
+THE TRIPLE IS A HOOK IN THE JOB'S OWN PHASE, AT A WEIGHT BELOW IT. A `post-install`
+Job is admitted after the release's plain resources exist, so a plain ServiceAccount
+would in fact be there — but the triple is annotated anyway, at a lower weight, for
+symmetry with the pre-install triples and because a triple in a different phase from
+the Job it serves is a wiring nobody can read off one file. A `hook-delete-policy`
+that removed this triple between phases would break the Job that follows it, so it
+keeps `before-hook-creation` and nothing else.
+
+IT RENDERS ONLY WHERE THE JOB DOES. `preflight.enabled` defaults TRUE, so a triple
+gated on that key alone would render at this chart's own defaults — where
+`gatewayListener.create` is false, no probe resolves true and no Job exists for it
+to serve.
+
+THE WEIGHTS ARE QUOTED. Annotations are `map[string]string`, so an unquoted integer
+is a manifest that does not decode — and that failure arrives at apply time, not at
+render time.
+*/}}
+{{- $probe := .Values.preflight.envoyGateway }}
+{{- $probes := without (splitList " " (include "platform.preflight.postInstallProbes" (dict "context" $))) "" }}
+{{- if and .Values.preflight.enabled $probes }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $probe.serviceAccountName }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $probe.serviceAccountName }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+{{- if has "envoy-gateway" $probes }}
+  # The probe Gateway: created bound to the class this chart renders, read until
+  # Envoy Gateway programs it, and deleted on every exit path.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["create", "get", "delete"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $probe.serviceAccountName }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $probe.serviceAccountName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $probe.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

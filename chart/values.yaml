@@ -558,16 +558,26 @@ bootstrap:
 # operator's controller performs, waits a bounded time, cleans up, and ASSERTS the
 # number of operators it probed against the number of probes these values enable.
 #
+# TWO JOBS, ONE BLOCK, AND THE PHASE IS WHAT SEPARATES THEM. The PRE-INSTALL Job
+# carries the probes whose objects exist before the install acts — cert-manager,
+# KEDA and mariadb-operator. The POST-INSTALL Job carries Envoy Gateway alone,
+# because a pre-install Envoy Gateway probe cannot go red: `Accepted=True` on a
+# GatewayClass is a condition already persisted in etcd and stays there with the
+# controller at zero replicas, and on a fresh install the class this chart renders
+# does not exist yet anyway. Both Jobs read this one block, each has its OWN
+# ServiceAccount, Role and RoleBinding, and `preflight.envoyGateway` below holds
+# what belongs to the second one alone.
+#
 # `enabled` IS TRUE, AND IT IS THE ONE EXCEPTION TO THIS FILE'S DEFAULT-FALSE
-# CONVENTION. It renders built-in kinds only — a Job, a ServiceAccount, a Role and
-# a RoleBinding — so it costs the portability gate nothing, and a diagnostic that
+# CONVENTION. It renders built-in kinds only — Jobs, ServiceAccounts, Roles and
+# RoleBindings — so it costs the portability gate nothing, and a diagnostic that
 # is off by default is the silent hang it exists to prevent.
 #
 # AND IT STILL RENDERS NOTHING AT THESE DEFAULTS. Every probe below is TIED to the
 # toggle that renders what it probes, every one of those toggles is false here, so
-# every probe resolves false — and when every probe resolves false NO JOB RENDERS
-# AT ALL. A Job reporting `probed 0 operators` is the "a check that cannot fail
-# because it examined nothing" form this chart refuses to ship.
+# every probe resolves false — and when every probe resolves false NEITHER JOB
+# RENDERS AT ALL. A Job reporting `probed 0 operators` is the "a check that cannot
+# fail because it examined nothing" form this chart refuses to ship.
 preflight:
   enabled: true
 
@@ -575,6 +585,12 @@ preflight:
   # different kinds: `create`, `get` and `delete` on the probe objects, where the
   # bootstrap Role carries `create` on secrets alone. One triple for both would be
   # the union of two permissions, held by both Jobs.
+  #
+  # THE POST-INSTALL JOB DOES NOT SHARE IT EITHER, for the same reason and on the
+  # same terms: it holds `create`, `get` and `delete` on GATEWAYS and this one
+  # holds none, so a shared identity would be the union again — the pre-install
+  # Job gaining the ability to create a Gateway it never touches. Its name is
+  # `preflight.envoyGateway.serviceAccountName` below.
   serviceAccountName: preflight
 
   # curl and a shell, pinned by digest, and NOT read from `bootstrap.image`. The
@@ -626,23 +642,30 @@ preflight:
   # — a default cannot read another key — so the tie lives in
   # `templates/_preflight.tpl` and an unset key is what lets it resolve.
   #
-  #   probes.certManager  unset -> internalCA.create OR certificates.create OR
-  #                                edgeTLS.create
-  #   probes.keda         unset -> FALSE. This chart renders no ScaledObject, and
-  #                                a subchart cannot read the module charts'
-  #                                `autoscaling.enabled`.
-  #   probes.mariadb      unset -> FALSE. This chart renders no MariaDB CR, and a
-  #                                subchart cannot read the `-db` charts'
-  #                                `database.create`.
+  #   probes.certManager   unset -> internalCA.create OR certificates.create OR
+  #                                 edgeTLS.create
+  #   probes.envoyGateway  unset -> gatewayListener.create, which renders the
+  #                                 GatewayClass the probe Gateway binds to. This
+  #                                 one enables the POST-INSTALL Job.
+  #   probes.keda          unset -> FALSE. This chart renders no ScaledObject, and
+  #                                 a subchart cannot read the module charts'
+  #                                 `autoscaling.enabled`.
+  #   probes.mariadb       unset -> FALSE. This chart renders no MariaDB CR, and a
+  #                                 subchart cannot read the `-db` charts'
+  #                                 `database.create`.
   #
   # THE TWO OVERRIDE DIRECTIONS ARE NOT SYMMETRIC. An explicit `false` is ALWAYS
   # honoured: losing a diagnostic is a choice an adopter is entitled to make, and
   # it cannot produce the failure the tie exists to prevent. An explicit `true`
   # splits. For `keda` and `mariadb` it is REQUIRED and it is the only way to
-  # enable those probes at all. For `certManager` it is REFUSED when its own
-  # toggle is false, because a probe for an operator whose objects this install
-  # renders none of proves nothing and can only fail for the wrong reason — the
-  # refusal names both keys.
+  # enable those probes at all. For `certManager` and `envoyGateway` it is REFUSED
+  # when their own toggle is false, because a probe for an operator whose objects
+  # this install renders none of proves nothing and can only fail for the wrong
+  # reason — the refusal names both keys. `probes.envoyGateway: true` beside
+  # `gatewayListener.create: false` is the case that forced the rule: the probe
+  # Gateway would bind to a GatewayClass this install never made, the apply would
+  # succeed and the hook would then fail, which is a clean install followed by a
+  # failed release.
   #
   # AND THE UNSET TEST IS `hasKey`, NEVER SPRIG'S `default`. `default` treats
   # `false` AS EMPTY — it returns its fallback for `false` exactly as it does for
@@ -659,6 +682,131 @@ preflight:
   certManager:
     # Read off cert-manager as the estate pins it.
     apiVersion: cert-manager.io/v1
+
+  # ── THE POST-INSTALL PROBE, AND EVERYTHING THAT IS ITS ALONE ───────────────
+  # ONE PROBE, ONE JOB, ON THE OTHER SIDE OF THE INSTALL. The Job this block
+  # configures creates a FRESH Gateway bound to the class `gatewayListener`
+  # renders, waits for Envoy Gateway to PROGRAM it, and deletes it. It is a
+  # `post-install, post-upgrade` hook because a pre-install one could not work:
+  # the class does not exist before the install, and `Accepted=True` on a
+  # GatewayClass is a condition already persisted in etcd that stays there with
+  # the controller at zero replicas.
+  #
+  # THE GROUP BELOW IS THE UPSTREAM GATEWAY API'S, NOT ENVOY GATEWAY'S, and the
+  # difference is the trap this estate has already recorded once. A Gateway is
+  # `gateway.networking.k8s.io/v1` — a SPECIFICATION every implementation
+  # registers, Istio included — so this string names the API the probe POSTs to
+  # and NOTHING about which operator answers. What names the operator is the
+  # CLASS: `gatewayListener.className` is served by
+  # `gatewayListener.controllerName`, which is Envoy Gateway's own. The render
+  # check that refuses a cluster with no Envoy Gateway is the separate one on
+  # `gateway.envoyproxy.io/v1alpha1`, recorded under `gatewayListener` above.
+  #
+  # WHY THE CONDITION NAME IS NOT A KEY HERE, AND WHY ITS MESSAGE IS. The two are
+  # different kinds of thing, and this block holds one of each.
+  #
+  # WHICH CONDITION TO DEMAND IS A DESIGN DECISION, so the probe waits for
+  # `Programmed` and the template carries that word as a LITERAL. `Accepted=True`
+  # means the controller validated the Gateway against its class;
+  # `Programmed=True` means the data plane for it exists, and a controller that
+  # accepts and never programs is the half-dead case this probe is for. A key
+  # would make the weaker condition a values edit nothing catches; as a literal,
+  # weakening it is a template change
+  # `test_the_probe_waits_for_programmed_and_never_for_accepted` refuses.
+  #
+  # THE MESSAGE TEXT IS AN OPERATOR STRING, so `programmedMessage` below is a key
+  # and sits with the other operator strings this file records. It is not a choice
+  # between two conditions; it is wording read off the operator, which an upgrade
+  # can reword and a reader cannot guess. A literal would hide it in the template
+  # where the strings it belongs beside are not. Its own weakening direction —
+  # an EMPTY value, which `grep -F` matches against every line — is closed by
+  # behaviour rather than by a literal: `test_the_probe_refuses_a_body_carrying_
+  # only_the_listeners_programmed` runs the RENDERED matcher against a body and
+  # requires a refusal, which an empty needle cannot produce.
+  envoyGateway:
+    # MEASURED 2026-09-24 against kind-yadgar, running
+    # docker.io/envoyproxy/gateway:v1.9.1: `gateways.gateway.networking.k8s.io`
+    # serves `v1` and `v1beta1`, and the live `edge` Gateway carries
+    # `Programmed=True` with the message "Address assigned to the Gateway, 2/2
+    # envoy replicas available". Recorded here so an upgrade that moved the
+    # served version turns the probe RED rather than silently weakening it.
+    apiVersion: gateway.networking.k8s.io/v1
+    operatorImage: docker.io/envoyproxy/gateway:v1.9.1
+
+    # ── THE MESSAGE THE OBJECT-LEVEL `Programmed` CARRIES ──────────────────
+    # WHY A MESSAGE IS REQUIRED AT ALL, AND NOT `Programmed=True` ALONE. A
+    # Gateway's status carries TWO conditions named `Programmed` — the OBJECT's,
+    # which means an address was assigned and the proxy replicas are available,
+    # and each LISTENER's, which means its configuration was translated and sent
+    # to the data plane. Measured on kind-yadgar 2026-09-24: `Programmed` appears
+    # FOUR times in one Gateway's status. The matcher greps the whole response, so
+    # `Programmed=True` on its own is satisfied by EITHER.
+    #
+    # THAT IS NOT A HYPOTHETICAL SPLIT. `gatewayListener.envoyProxy.serviceType`
+    # above defaults to `LoadBalancer`, and neither `example/values.yaml` nor the
+    # parent chart's adopter values restate it. On a cluster with no
+    # load-balancer controller no address is ever assigned, so the OBJECT's
+    # `Programmed` goes False with reason `AddressNotAssigned` — and the probe
+    # inherits that same EnvoyProxy, so it inherits that same failure. A probe
+    # keyed on `Programmed=True` alone would then report SUCCESS off the
+    # listener's condition while the real `edge` Gateway stalls, which is the
+    # diagnostic failing to fire on exactly the cluster it was installed for.
+    #
+    # THE PREFIX ONLY, NEVER THE `2/2 replicas` TAIL, which varies with the
+    # replica count and would make this string a second place the count is
+    # written. This is the same rule `mariadb.validationMessage` follows: require
+    # the operator's OWN wording, so an upgrade that rewords it turns the probe
+    # RED rather than silently weakening it.
+    #
+    # STIPULATED, NOT MEASURED, and stated as such: that v1.9.1 sets the
+    # LISTENER's `Programmed=True` while address assignment fails is the reading
+    # this key is aimed at, and it was not reproduced — doing so needs a Gateway
+    # created on a cluster with no load-balancer controller, which no read-only
+    # observation can stand in for.
+    programmedMessage: Address assigned to the Gateway
+
+    # ITS OWN IDENTITY, NOT THE PRE-INSTALL PREFLIGHT'S. `create`, `get` and
+    # `delete` on GATEWAYS, where that Role holds none — sharing one would give
+    # each Job the other's permission.
+    serviceAccountName: envoy-gateway-probe
+
+    # THE FIXED NAME THE PROBE GATEWAY IS CREATED UNDER. Fixed rather than random
+    # so a Job killed between create and cleanup leaks at most ONE Gateway, and
+    # the next run deletes it rather than colliding with it. A Gateway is not
+    # inert — it is provisioned proxy infrastructure — which is why the script
+    # deletes any object of this name and waits for it to be gone BEFORE creating
+    # its own.
+    probeName: envoy-gateway-probe
+
+    # ITS OWN BOUND, AND NOT `preflight.timeoutSeconds`. A CEILING RATHER THAN A
+    # MEASUREMENT, chosen loose: programming a Gateway provisions a Deployment
+    # and a Service and waits for replicas to become available, which is a
+    # different wait from a cert-manager reconcile, and no measurement of a cold
+    # one on this estate exists. `preflight.pollSeconds` is shared, because how
+    # often a status is read has nothing to do with which status it is.
+    #
+    # THIS BOUND AND HELM'S `--timeout` ARE ONE CONSTRAINT WITH TWO KNOBS, and a
+    # Job whose bound outlives helm's patience reports nothing. Measured on both
+    # pins — helm 3.18.4 and 4.3.0 — `--timeout` defaults to `5m0s` and is
+    # documented as "time to wait for any individual Kubernetes operation (like
+    # Jobs for hooks)". Helm's clock starts when the hook Job is CREATED, so it
+    # covers pod scheduling and image pull before this script's own clock starts.
+    #
+    # AND THE SCRIPT'S WORST CASE IS TWICE THIS NUMBER, not once. `create()` calls
+    # `remove()` first, and `remove()` loops to this same bound before `await()`
+    # begins its own — so two bounded loops compose, plus the request time of the
+    # calls themselves, which no value here bounds.
+    #
+    # SO THE INSTALL MUST BE GIVEN A BUDGET, and `README.md` and
+    # `example/values.yaml` both state it. At 300 here the composed bound is 600s,
+    # and the documented `--timeout 15m` leaves 300s over it for scheduling, image
+    # pull and request time — a stated CEILING, not a measurement, because this
+    # estate has measured none of the three. The number is NOT lowered instead:
+    # `Programmed` includes replica availability, so a cold cluster may genuinely
+    # need this long, and a bound cut to fit helm's default would reintroduce
+    # red-on-healthy. `test_the_documented_install_budget_covers_the_probes_bound`
+    # is what keeps the two from diverging in silence.
+    timeoutSeconds: 300
 
   keda:
     # Read off KEDA as the estate pins it.

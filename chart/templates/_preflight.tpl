@@ -81,10 +81,12 @@ across renders and a diff of two renders shows a probe entering or leaving rathe
 than the whole line moving.
 
 `probes.envoyGateway` IS NOT HERE, and its absence is the design rather than an
-omission. It enables a POST-INSTALL Job — a pre-install Envoy Gateway probe cannot
-go red, because `Accepted=True` on a GatewayClass is a condition already persisted
-in etcd and stays there with the controller at zero replicas. That Job, and that
-key, arrive with the Gateway listener they probe.
+omission. It enables the POST-INSTALL Job, and the definition below this one
+resolves it — a pre-install Envoy Gateway probe cannot go red, because
+`Accepted=True` on a GatewayClass is a condition already persisted in etcd and
+stays there with the controller at zero replicas. The denominator each Job asserts
+is ITS OWN phase's probe set, so a key that enables one may never be counted by the
+other.
 
 RETURNS A SPACE-SEPARATED STRING, because a template action cannot return a list.
 The caller splits it.
@@ -116,6 +118,41 @@ The caller splits it.
       "owner" ""
       "operator" "mariadb-operator")) "true" -}}
 {{- $probes = append $probes "mariadb-operator" -}}
+{{- end -}}
+{{- join " " $probes -}}
+{{- end -}}
+
+{{/*
+THE POST-INSTALL PROBE SET, RESOLVED ONCE AND READ BY BOTH TEMPLATES.
+
+A SECOND SET RATHER THAN A SECOND ENTRY IN THE FIRST, because the two Jobs run in
+different PHASES and each asserts its own denominator. A probe counted by the wrong
+Job is a Job reporting a pass over a number that was never its own — and it is the
+shape the pre-install set's own header warns about, reached from the other side.
+
+`envoyGateway` TIES TO `gatewayListener.create`, which renders the GatewayClass the
+probe Gateway binds to. It is called WITH an `owner`, so an explicit `true` beside
+that toggle turned false is REFUSED and the refusal names both keys: a probe
+Gateway bound to a class this install never made is the failure class the tie
+exists to prevent, not an adopter's choice to make.
+
+ONE MEMBER TODAY, AND IT IS STILL A LIST. The Job and its Role both read this, the
+Job counts it, and a second post-install probe added later has a set to join rather
+than a special case to become.
+
+RETURNS A SPACE-SEPARATED STRING, because a template action cannot return a list.
+The caller splits it.
+*/}}
+{{- define "platform.preflight.postInstallProbes" -}}
+{{- $context := .context -}}
+{{- $probes := list -}}
+{{- if eq (include "platform.preflight.probe" (dict
+      "context" $context
+      "probe" "envoyGateway"
+      "tied" $context.Values.gatewayListener.create
+      "owner" "gatewayListener.create"
+      "operator" "Envoy Gateway")) "true" -}}
+{{- $probes = append $probes "envoy-gateway" -}}
 {{- end -}}
 {{- join " " $probes -}}
 {{- end -}}

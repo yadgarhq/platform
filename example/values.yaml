@@ -110,9 +110,25 @@ bootstrap:
 # NO `preflight` BLOCK APPEARS BELOW, AND ITS ABSENCE IS DELIBERATE RATHER THAN AN
 # OMISSION. Every `preflight.probes.*` key is left UNSET so the tie in
 # `chart/templates/_preflight.tpl` resolves it: `probes.certManager` follows the
-# three `create` toggles above, all true here, so this file renders exactly ONE
-# probe. Writing the key out would replace a tie that tracks the toggles with a
-# constant that does not.
+# three `create` toggles above and `probes.envoyGateway` follows
+# `gatewayListener.create`, all true here, so this file renders ONE probe in each of
+# the two Jobs. Writing either key out would replace a tie that tracks the toggles
+# with a constant that does not.
+#
+# THE TWO JOBS ARE SEPARATED BY PHASE, NOT BY TOGGLE. The pre-install preflight
+# refuses before anything else acts; the post-install probe creates a Gateway the
+# Envoy Gateway controller has never seen and waits for it to be programmed, which
+# is only possible once the install has made the GatewayClass it binds to.
+#
+# AND THE INSTALL THAT APPLIES THIS FILE MUST BE GIVEN `--timeout 15m`. Helm's
+# `--timeout` defaults to `5m0s` and covers each hook Job, measured on both pins.
+# The post-install probe bounds itself at `preflight.envoyGateway.timeoutSeconds`,
+# 300 seconds, and composes two of those loops — it waits for any Gateway of its
+# fixed name to be GONE before it creates its own — so its worst case is 600
+# seconds. Helm's clock starts at hook CREATION, so scheduling and image pull come
+# out of the same budget. At the default helm aborts first every time and the
+# operator reads `timed out waiting for the condition` instead of the probe naming
+# Envoy Gateway. The cleanup survives either way; the diagnostic does not.
 #
 # `probes.keda` AND `probes.mariadb` RESOLVE FALSE HERE, AND THAT IS CORRECT. This
 # chart renders no ScaledObject and no MariaDB CR, so a probe for either would test
@@ -121,8 +137,9 @@ bootstrap:
 # `database.create` are visible — a subchart cannot read a sibling's key, so an
 # explicit `true` there is the only place the truth can come from.
 #
-# TO DROP THE DIAGNOSTIC ENTIRELY, set `preflight.enabled: false`. An explicit
-# `preflight.probes.certManager: false` also works and is honoured. What is REFUSED
-# is `probes.certManager: true` beside three false `create` toggles — a probe for an
-# operator this install renders nothing for proves nothing and can only fail for the
-# wrong reason, and the refusal names both keys.
+# TO DROP THE DIAGNOSTIC ENTIRELY, set `preflight.enabled: false` — it drops both
+# Jobs. An explicit `preflight.probes.certManager: false` or
+# `preflight.probes.envoyGateway: false` drops one of them and is honoured. What is
+# REFUSED is either of those keys set TRUE beside its own `create` toggle set false —
+# a probe for an operator this install renders nothing for proves nothing and can
+# only fail for the wrong reason, and the refusal names both keys.
