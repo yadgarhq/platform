@@ -89,43 +89,87 @@ spec:
       ports:
         - protocol: TCP
           port: 4222
-    # THE MONITORING PORT, FROM ANYWHERE AT ALL, and deliberately not narrowed.
+    # THE MONITORING PORT, NARROWED TO THIS RELEASE'S OWN NAMESPACE.
     #
-    # THIS RULE CARRIES NO `from`, UNLIKE THE TWO AROUND IT, AND THAT IS NOT A
-    # NARROWER SCOPE — IT IS THE WIDEST ONE THERE IS. An ingress rule whose `from`
+    # WHAT IT USED TO BE. This rule carried NO `from` at all, which is not a
+    # narrower scope — it is the widest one there is. An ingress rule whose `from`
     # is absent or empty matches ALL SOURCES (ADR-0664, read off the OpenAPI
     # description compiled into the kubectl binary: "If this field is empty or
-    # missing, this rule matches all sources"). NOT "from anywhere in the
-    # namespace", which is what this comment used to say: every namespace, and
-    # whatever else the cluster's CNI presents to this pod. An adopter who reads
-    # it as namespace-scoped ships a cluster where any workload anywhere can GET
-    # `http://<nats-pod-ip>:8222/varz`, `/connz` or `/subsz` and read back subject
-    # names, connected clients and the server's configuration.
+    # missing, this rule matches all sources"). Not "from anywhere in the
+    # namespace": every namespace, and whatever else the cluster's CNI presents to
+    # this pod. Any workload anywhere could GET `http://<nats-pod-ip>:8222/varz`,
+    # `/connz` or `/subsz` and read back subject names, connected clients and the
+    # server's configuration. 8222 is plain HTTP with no authorization on it, so
+    # the network layer is the only thing that scopes it.
     #
-    # WHY IT IS STILL WRITTEN THIS WAY, AND THE PREMISE THE CONCLUSION NEEDS. A
-    # NetworkPolicy with any ingress rule DENIES every port it does not name, so a
-    # policy naming only 4222 would cut the endpoint the upstream chart's own
-    # startup, readiness and liveness probes use — restarting a healthy broker on
-    # the first CNI that enforces this. The port is HTTP with no authorization and
-    # no secrets on it. AND NARROWING IT TO PROMETHEUS WOULD LEAVE THE PROBES TO
-    # THE CNI'S TREATMENT OF HOST TRAFFIC, WHICH IS THE THING THAT VARIES. That
-    # last sentence is the premise, and without it "kubelet probes do not come
-    # from a pod this selector could name at all" reads as a reason narrowing
-    # would be SAFE. It is not: ADR-0592 — cited three paragraphs above in this
-    # same file — measured that a passing probe carries no information about a
-    # policy at all, so it can never be evidence that a narrower rule would keep
-    # the probes working.
+    # THE RISK THE NARROWING HAD TO CLEAR, AND HOW IT WAS CLEARED. A NetworkPolicy
+    # with any ingress rule DENIES every source it does not name, and all THREE of
+    # the upstream chart's probes — startup, readiness and liveness — are `httpGet`
+    # against the `monitor` port, which is this one. Kubelet probes originate from
+    # the NODE, and a `namespaceSelector` matches PODS, so if node-sourced traffic
+    # were subject to this rule the narrowing would restart a healthy broker in a
+    # loop. It is not, and that was MEASURED rather than reasoned:
     #
-    # THE BEHAVIOUR IS CARRIED OVER UNCHANGED from
-    # `deploy/infra/network-policies/shared-infrastructure.yaml`, whose copy of
-    # these rules is the one running today. Narrowing it is a production posture
-    # change, and this chart is not where that gets decided.
+    #   * kindnetd v20260528-9350166c runs the `kube-network-policies` controller
+    #     and its enforcement is proven by demanded refusal, twelve times over
+    #     (ADR-0688). Enforcement is an established premise here, not an
+    #     assumption — which is what makes the next line evidence at all.
+    #   * Given enforcement, EIGHT pods in the live estate carry a kubelet probe on
+    #     a port whose only ingress rule names selectors a node cannot match, and
+    #     every one of them is Ready. The closest case is `gateway`: its 8080 rule
+    #     is a `namespaceSelector` on `envoy-gateway-system`, the same construct
+    #     written below, and its readiness probe succeeds against it continuously.
     #
-    # `test_the_policies_admit_from_every_source_only_where_written_down` is what
-    # keeps this paragraph honest. The client census walks each rule's `from`, so
-    # a rule carrying none contributes NOTHING to it and an allow-all passes that
-    # census in silence; the ports admitted to everyone are asserted separately.
-    - ports:
+    # ADR-0592 IS THE RULE, AND THIS FILE USED TO CITE IT BACKWARDS. Its title is
+    # "Kubelet probe traffic is EXEMPT from ingress NetworkPolicy"; what it forbids
+    # is inferring that a policy is ABSENT because a probe passes. That is the
+    # opposite direction from this one. The comment that stood here read its
+    # one-way caution as a claim that probe behaviour under a narrower rule is
+    # unknowable, and so argued for allow-all from a reference that says probes are
+    # exempt.
+    #
+    # THE LIVE PROBES ARE `tcpSocket` AND THESE ARE `httpGet`, AND THE EVIDENCE
+    # STILL TRANSFERS. NetworkPolicy is an L3/L4 control. An `httpGet` probe is a
+    # TCP connection from the kubelet to the pod IP on this port, with a request
+    # written into it once the connection is up; the difference between the two
+    # probe kinds is entirely above the layer this rule acts on.
+    #
+    # NOTHING OUTSIDE THIS NAMESPACE WAS READING IT. Measured across the live
+    # estate before narrowing: no `PodMonitor` or `ServiceMonitor` CRD exists and
+    # scraping is annotation-based, the broker's pod carries NO `prometheus.io/*`
+    # annotation, all seven KEDA ScaledObjects trigger on `prometheus` and none on
+    # `nats-jetstream`, `natsBox` is off, and the only two objects in the cluster
+    # that name 8222 are the broker's own StatefulSet and ConfigMap.
+    #
+    # THE ALTERNATIVE THAT WAS NOT TAKEN. An `ipBlock` for the node CIDR would
+    # admit the kubelet explicitly rather than relying on the exemption. It is not
+    # written here because the node CIDR is not derivable from a chart — it would
+    # have to arrive as a values key every adopter supplies correctly, which is a
+    # knob that breaks the estate rather than one that adapts it — and `ipBlock`
+    # cannot say "the node this pod runs on" in any case, only "every node".
+    #
+    # THE CAVEAT THAT SURVIVES THE NARROWING, and it is the one true sentence the
+    # old comment had: this leaves the probes to the CNI'S TREATMENT OF HOST
+    # TRAFFIC, which is the thing that varies between CNIs. Exemption is measured
+    # on kindnet here and is the behaviour Kubernetes intends, but an adopter whose
+    # CNI subjects node-sourced traffic to pod-selector rules gets probes that fail
+    # against this rule. D80: the measurement is from this estate's cluster, and
+    # the chart ships further than the cluster does.
+    #
+    # `deploy/infra/network-policies/shared-infrastructure.yaml` STILL ALLOWS ALL
+    # on this port — it is the copy running today, and it does not change because
+    # this one did. The two diverge until that copy is narrowed to match.
+    - from:
+        # `kubernetes.io/metadata.name` is set by kube-apiserver on every Namespace
+        # (verified across all 14 in the live cluster), so this needs no labelling
+        # from any chart. `.Release.Namespace` rather than a values key: the release
+        # namespace is this chart's OWN render context, the same reason the valkey
+        # rule below templates its port from this chart's values while the broker's
+        # labels stay literals.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
         - protocol: TCP
           port: 8222
     # THE CLUSTER PORT, from the broker's own pods. Clustering is off in the
