@@ -20,7 +20,7 @@ The certificate half of the layer, and the Jobs that mint the credentials nothin
 | The Valkey Deployment and Service, and the `valkey-ingress` NetworkPolicy                                            | `valkey.create`          | `false` |
 | The upstream `nats` chart as a DEPENDENCY, and the `nats-ingress` NetworkPolicy this chart renders itself            | `nats.create`            | `false` |
 
-The preflight Job is here too, on its own toggle, and the section on it below says what it does. The three MariaDB instances are the one part of the layer that is not here and will not be: each has exactly one consuming module, so each belongs to that module's own chart behind `database.create`.
+The two probe Jobs are here too, on one toggle between them — the pre-install preflight and the post-install Envoy Gateway probe — and the sections on them below say what each does. The three MariaDB instances are the one part of the layer that is not here and will not be: each has exactly one consuming module, so each belongs to that module's own chart behind `database.create`.
 
 ## The broker is a dependency, not a copy
 
@@ -86,6 +86,8 @@ chart/templates/ingress-policies.yaml       who may dial the cache and who may d
 chart/templates/_preflight.tpl              the probe/toggle tie, and the refusal when the two disagree
 chart/templates/preflight.yaml              the pre-install Job that proves a controller is running
 chart/templates/preflight-rbac.yaml         the preflight's own identity, separate from the bootstrap's
+chart/templates/envoy-gateway-probe.yaml    the post-install Job that proves Envoy Gateway programs a Gateway
+chart/templates/envoy-gateway-probe-rbac.yaml  that Job's own identity — `create`, `get`, `delete` on Gateways
 example/values.yaml                        what an adopter commits in their own repository
 scripts/tests/                             the ladder gate, the render-check harness, the bootstrap, preflight and shared-infrastructure gates
 ```
@@ -112,9 +114,11 @@ kubectl -n yadgar get secret yadgar-internal-ca -o yaml
 
 **What `helm uninstall` leaves behind, deliberately.** The ServiceAccount, the Role, the RoleBinding and the two completed Jobs carry `hook-delete-policy: before-hook-creation` and nothing else, so all five remain after the release is gone. The design asks for exactly that, and `hook-succeeded` is not an available alternative: it would delete the ServiceAccount before the Jobs it serves are finished with it. The residual grant is real and it is bounded. Anyone who can create a pod in that namespace can mount that ServiceAccount and `create` Secrets there — and nothing else, because the Role holds no `get`, no `list`, no `update` and no `delete`, and it is namespaced. Delete the triple by hand if the namespace outlives the release.
 
-**And the preflight leaves a SECOND triple, with a different grant.** The preflight Job runs as its own ServiceAccount under its own Role, and that triple is residual for the same reason and by the same mechanism. Its grant is `create`, `get` and `delete` — never `list` — on the probe kinds alone, and only on the kinds the probes this install enables actually touch. It is namespaced like the bootstrap's. Delete it by hand alongside the other one.
+**And the two probe Jobs leave a triple each, with grants of their own.** The preflight Job runs as its own ServiceAccount under its own Role, and the post-install Envoy Gateway probe runs as a third — both residual for the same reason and by the same mechanism. The preflight's grant is `create`, `get` and `delete` — never `list` — on the probe kinds alone, and only on the kinds the probes this install enables actually touch; the probe's is the same three verbs on Gateways and nothing else. Both are namespaced like the bootstrap's. Delete them by hand alongside it.
 
 **The preflight refuses the install rather than decorating it.** It runs before every other hook, creates one object per enabled operator, waits for that operator's controller to act on it, deletes it and reports how many operators it probed — asserting that number against how many its values enabled. A cluster whose CRDs are registered but whose controller is absent is the case it exists to name, and the install stops there instead of hanging later on objects that never go Ready. It probes only what the install actually renders: every probe's default follows the toggle that renders what it probes, so a bare `helm install` of this chart with no values runs no probe and renders no Job at all. Set `preflight.enabled: false` to drop it.
+
+**Envoy Gateway is probed AFTER the install, in a Job of its own, and the phase is the whole reason.** A pre-install probe of it could not go red. `Accepted=True` on a GatewayClass is a condition already persisted in etcd, so it stays there with the controller at zero replicas; and `gatewayListener.create` renders the GatewayClass itself, so on a fresh install there is nothing to bind to yet. The post-install Job runs once the release's objects exist: it creates a Gateway the controller has never seen, on the class this chart rendered and inheriting that listener's EnvoyProxy, waits for Envoy Gateway to mark it `Programmed=True`, and deletes it on every exit path. A fresh object has no status, so only a running controller can give it one. Its default follows `gatewayListener.create` exactly as the other probes follow theirs, and `preflight.enabled: false` drops it too.
 
 The administrative bootstrap token is the one of the four a person actually reads. Hand it to the first administrator with:
 

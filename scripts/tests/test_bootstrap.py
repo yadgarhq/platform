@@ -70,15 +70,20 @@ it down. A gate that renders a set, finds no violation among zero members and
 reports a pass has proved nothing — which is why every zero here is an EQUALITY
 with a red case of its own.
 
-THE HOOK COUNT IS THIS STEP'S, NOT THE FINISHED LAYER'S, AND IT HAS ALREADY MOVED
-ONCE. Three hook Jobs render today, all `pre-install`, across three hook-weight
-positions: the two RBAC triples sharing the lowest, the preflight Job alone above
-them, and the two bootstrap Jobs sharing the highest. The post-install Envoy
-Gateway probe arrives in a later pull request and moves both numbers again — AND IT
-WILL REDDEN THIS GATE ON ITS PHASE BEFORE IT MOVES ANY NUMBER, because
-`hook_failures` accepts `pre-install,pre-upgrade` and nothing else. That is not an
-oversight to route around: the phase set is a claim about what this chart renders,
-and widening it is the change that step makes deliberately rather than discovers.
+THE HOOK COUNT IS THIS STEP'S, NOT THE FINISHED LAYER'S, AND IT HAS NOW MOVED
+TWICE. FOUR hook Jobs render today — THREE `pre-install` across three hook-weight
+positions (the two RBAC triples sharing the lowest, the preflight Job alone above
+them, and the two bootstrap Jobs sharing the highest) and ONE `post-install`, the
+Envoy Gateway probe, across two positions of its own with its triple below it. The
+gate that accepted `pre-install,pre-upgrade` and nothing else reddened on the
+probe's PHASE before any number moved, exactly as the previous revision of this
+paragraph said it would, and widening it is this step's deliberate change.
+
+THE TWO PHASES ARE COUNTED SEPARATELY, AND THAT IS NOT TIDINESS. A `hook-weight`
+ORDERS HOOKS WITHIN ONE PHASE and means nothing across two, so a single set of
+positions over both phases would report a collision that does not exist — and would
+have let the post-install triple sit ABOVE its own Job while a pre-install weight
+covered for it.
 
 WHICH GATES HERE ARE SCOPED TO THE BOOTSTRAP AND WHICH ARE CHART-WIDE, because the
 chart now renders a second hook Job with a triple of its own and the distinction
@@ -176,15 +181,38 @@ EXPECTED_BOOTSTRAP_JOBS = 2
 # `hook_failures` below is the one gate here that is deliberately chart-wide: a Job
 # outside the hook set runs in the wrong phase whatever template rendered it, and a
 # weight position colliding across templates is exactly the kind of thing a scoped
-# gate would never see. THREE Jobs — `preflight`, `bootstrap-secrets` and
-# `admin-bootstrap-token` — across TWO triples and THREE weight positions: the
-# triples share the lowest, `preflight` runs alone above them because the whole
+# gate would never see. FOUR Jobs across THREE triples.
+#
+# PRE-INSTALL, THREE JOBS AND THREE WEIGHT POSITIONS: `preflight`,
+# `bootstrap-secrets` and `admin-bootstrap-token`. The two triples that serve them
+# share the lowest position, `preflight` runs alone above them because the whole
 # point of it is to refuse before anything else acts, and the two bootstrap Jobs
 # share the highest because they mint disjoint Secret names and nothing orders one
 # against the other.
-EXPECTED_HOOK_JOBS = 3
-EXPECTED_RBAC_OBJECTS = 6
+#
+# POST-INSTALL, ONE JOB AND TWO WEIGHT POSITIONS: `envoy-gateway-probe` with its
+# own triple below it. It is ordered by PHASE rather than by weight — it runs once
+# the release's objects, the GatewayClass among them, already exist — and a weight
+# orders hooks only within their own phase, which is why the positions are counted
+# per phase rather than over the union.
+EXPECTED_HOOK_JOBS = 4
+EXPECTED_PRE_INSTALL_HOOK_JOBS = 3
+EXPECTED_POST_INSTALL_HOOK_JOBS = 1
+EXPECTED_RBAC_OBJECTS = 9
 EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS = 3
+EXPECTED_POST_INSTALL_WEIGHT_POSITIONS = 2
+
+# The two phases this chart renders hooks in, and the only two it may render.
+PRE_INSTALL = "pre-install,pre-upgrade"
+POST_INSTALL = "post-install,post-upgrade"
+EXPECTED_HOOK_JOBS_IN = {
+    PRE_INSTALL: EXPECTED_PRE_INSTALL_HOOK_JOBS,
+    POST_INSTALL: EXPECTED_POST_INSTALL_HOOK_JOBS,
+}
+EXPECTED_WEIGHT_POSITIONS_IN = {
+    PRE_INSTALL: EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS,
+    POST_INSTALL: EXPECTED_POST_INSTALL_WEIGHT_POSITIONS,
+}
 
 # ADR-0753's narrowing, as the exact list the Role must carry.
 THE_ONLY_VERB = ["create"]
@@ -1256,6 +1284,12 @@ def hook_failures(documents: list[dict]) -> list[str]:
     Job is then admitted against an identity that is not there, and it fails on a
     healthy cluster for a reason that has nothing to do with this chart.
 
+    AND THE POSITIONS ARE COUNTED PER PHASE. A `hook-weight` orders hooks WITHIN
+    one phase; it says nothing across two. Counted over the union, the post-install
+    triple's weight would be indistinguishable from a pre-install one — a collision
+    reported where none exists, and worse, a post-install triple left ABOVE its own
+    Job while a pre-install weight covered for it.
+
     THE WEIGHT IS A STRING. Annotations are `map[string]string`, so an unquoted
     integer is a manifest that does not decode; the type is asserted here because
     the failure otherwise arrives at apply time.
@@ -1283,14 +1317,24 @@ def hook_failures(documents: list[dict]) -> list[str]:
             f"{len(rbac)}: {sorted(name_of(document) for document in rbac)}"
         )
 
+    for phase, expected in EXPECTED_HOOK_JOBS_IN.items():
+        found = [job for job in jobs if annotations_of(job).get("helm.sh/hook") == phase]
+        if len(found) != expected:
+            failures.append(
+                f"expected {expected} {phase} hook Jobs, found {len(found)}: "
+                f"{sorted(name_of(job) for job in found)}. The phase is what orders "
+                f"a Job against the install, and a weight cannot express it"
+            )
+
     weights = {}
     for document in hooks:
         annotations = annotations_of(document)
         phase = annotations.get("helm.sh/hook")
-        if phase != "pre-install,pre-upgrade":
+        if phase not in EXPECTED_HOOK_JOBS_IN:
             failures.append(
                 f"{name_of(document)} ({document.get('kind')}) is a hook in phase "
-                f"{phase!r}; every hook this step renders is pre-install,pre-upgrade"
+                f"{phase!r}; this chart renders hooks in "
+                f"{sorted(EXPECTED_HOOK_JOBS_IN)} and in no other"
             )
         if annotations.get("helm.sh/hook-delete-policy") != "before-hook-creation":
             failures.append(
@@ -1306,25 +1350,27 @@ def hook_failures(documents: list[dict]) -> list[str]:
                 f"are map[string]string, so an unquoted integer does not decode"
             )
             continue
-        weights[(document.get("kind"), name_of(document))] = int(weight)
+        weights[(phase, document.get("kind"), name_of(document))] = int(weight)
 
-    if weights:
+    for phase, expected in EXPECTED_WEIGHT_POSITIONS_IN.items():
         rbac_weights = {
             weight
-            for (kind, _), weight in weights.items()
-            if kind in {"ServiceAccount", "Role", "RoleBinding"}
+            for (at, kind, _), weight in weights.items()
+            if at == phase and kind in {"ServiceAccount", "Role", "RoleBinding"}
         }
-        job_weights = {weight for (kind, _), weight in weights.items() if kind == "Job"}
+        job_weights = {
+            weight for (at, kind, _), weight in weights.items() if at == phase and kind == "Job"
+        }
         positions = rbac_weights | job_weights
-        if len(positions) != EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS:
+        if len(positions) != expected:
             failures.append(
-                f"expected {EXPECTED_PRE_INSTALL_WEIGHT_POSITIONS} pre-install "
-                f"hook-weight positions, found {len(positions)}: {sorted(positions)}"
+                f"expected {expected} {phase} hook-weight positions, found "
+                f"{len(positions)}: {sorted(positions)}"
             )
         if rbac_weights and job_weights and max(rbac_weights) >= min(job_weights):
             failures.append(
-                f"the RBAC triple's weights {sorted(rbac_weights)} do not all sit "
-                f"BELOW the Jobs' {sorted(job_weights)}, so a Job can be admitted "
+                f"the {phase} RBAC triples' weights {sorted(rbac_weights)} do not all "
+                f"sit BELOW the Jobs' {sorted(job_weights)}, so a Job can be admitted "
                 f"before the identity it runs as exists"
             )
     return failures
@@ -1351,7 +1397,60 @@ def test_a_job_that_is_not_a_hook_reddens_the_hook_count(tmp_path):
     failures = hook_failures(adopter_render(chart_with_a_job_that_is_not_a_hook(tmp_path)))
     message = "\n".join(failures)
     assert failures, "a Job left the hook set and the hook gate passed"
-    assert "expected 3 hook Jobs, found 2" in message, message
+    assert "expected 4 hook Jobs, found 3" in message, message
+
+
+def chart_with_the_probe_moved_into_the_pre_install_phase(destination: Path) -> Path:
+    """The per-phase count's own red case: the post-install Job moved a phase.
+
+    THE TOTAL DOES NOT MOVE, and that is the point. Four hook Jobs still render and
+    nine hook RBAC objects still render, so the two chart-wide counts above stay
+    green — only the per-phase split sees it. A probe that ran pre-install would bind
+    to a GatewayClass the install has not created yet, which is one of the two
+    defects the pre-install Envoy Gateway probe was dropped for.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = template.read_text()
+    line = "    helm.sh/hook: post-install,post-upgrade\n"
+    assert line in text, "the probe's hook annotation moved; this red case is now testing nothing"
+    template.write_text(text.replace(line, "    helm.sh/hook: pre-install,pre-upgrade\n", 1))
+    return copy
+
+
+def test_moving_the_probe_into_the_pre_install_phase_reddens_the_per_phase_count(tmp_path):
+    documents = adopter_render(chart_with_the_probe_moved_into_the_pre_install_phase(tmp_path))
+    hooks = bootstrap_objects(documents)
+    assert len([document for document in hooks if document.get("kind") == "Job"]) == (
+        EXPECTED_HOOK_JOBS
+    ), "the mutation changed the total hook-Job count, so it no longer isolates the phase"
+
+    failures = hook_failures(documents)
+    message = "\n".join(failures)
+    assert failures, "the probe Job changed phase and the hook gate passed"
+    assert f"expected {EXPECTED_POST_INSTALL_HOOK_JOBS} {POST_INSTALL} hook Jobs, found 0" in (
+        message
+    ), message
+
+
+def chart_with_the_probe_triple_above_its_job(destination: Path) -> Path:
+    """The post-install ordering's red case: the triple lifted above the Job it serves."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "envoy-gateway-probe-rbac.yaml"
+    text = template.read_text()
+    line = '    helm.sh/hook-weight: "-10"'
+    assert line in text, "the probe triple's weight moved; this red case is now testing nothing"
+    template.write_text(text.replace(line, '    helm.sh/hook-weight: "-1"'))
+    return copy
+
+
+def test_lifting_the_probe_triple_above_its_job_reddens_the_ordering(tmp_path):
+    failures = hook_failures(adopter_render(chart_with_the_probe_triple_above_its_job(tmp_path)))
+    message = "\n".join(failures)
+    assert failures, "the probe's triple was lifted above its Job and the ordering gate passed"
+    assert f"the {POST_INSTALL} RBAC triples' weights" in message, message
 
 
 # ── R1 — THE DEFAULTS RENDER NOTHING, AND THAT IS AN EQUALITY ────────────────

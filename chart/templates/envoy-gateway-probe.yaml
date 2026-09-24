@@ -1,0 +1,333 @@
+{{/*
+THE POST-INSTALL PROBE: A FRESH GATEWAY, AND THE CONTROLLER HAS TO PROGRAM IT.
+
+WHY THIS ONE IS NOT IN THE PREFLIGHT. A PRE-INSTALL Envoy Gateway probe cannot go
+red, and two independent defects say so. `Accepted=True` on a GatewayClass is a
+condition ALREADY PERSISTED IN ETCD — it was written when the controller last
+reconciled the object and it stays there with the controller at zero replicas, so
+the scaled-to-zero case reads green. And `gatewayListener.create` renders the
+GatewayClass itself, so on a fresh install — the only install a preflight matters
+on — the class does not exist when a pre-install hook runs, and the probe fails for
+the wrong reason on a healthy cluster. A POST-INSTALL hook runs once the release's
+objects exist, which is what makes probing a real Gateway possible at all.
+
+SO THE PROBE CREATES AN OBJECT THE CONTROLLER HAS NEVER SEEN. A fresh Gateway has
+no status, and nothing but a running controller can give it one. That is the whole
+red case: with Envoy Gateway scaled to zero the Gateway is admitted, no condition is
+ever written, and the probe fails at its bound naming Envoy Gateway.
+
+`Programmed`, NOT `Accepted`, AND THE DIFFERENCE IS THE WHOLE PROBE. `Accepted=True`
+means the controller validated the Gateway's spec against its GatewayClass;
+`Programmed=True` means the data plane for it exists. A controller that accepts and
+never programs is the half-dead case this probe is for, so the probe takes the
+stronger condition. The weaker one is NOT a fallback: if `Programmed` turned out not
+to be set at the pinned Envoy Gateway version, that is a measurement that changes
+this probe, recorded with its reason, and never a silent downgrade — which is why
+`Programmed` is a literal here rather than a values key, and why
+`test_the_probe_waits_for_programmed_and_never_for_accepted` refuses the swap.
+
+WHAT THE CONDITION READING CAN AND CANNOT SEE, stated rather than left to be
+discovered. The matcher is `condition_matches`, copied from the preflight Job rather
+than re-derived (ADR-0679), and it searches the WHOLE response — which on a Gateway
+carries the object's own conditions AND its listener's. Both are written by the
+controller and by nothing else, and the object is FRESH, so neither can be a stale
+condition from an earlier reconcile: the scaled-to-zero case this probe exists for
+reddens under either reading. Narrowing the search to `status.conditions` alone
+would mean cutting the body at a key position, which depends on the order the API
+server marshals the status struct in — and a probe that reds on a HEALTHY cluster
+because a field moved is the fail-for-the-wrong-reason class this chart refuses.
+
+IT IS ITS OWN JOB WITH ITS OWN DENOMINATOR. `PROBES` is built from the blocks this
+template renders and `EXPECTED_PROBES` from the `probes.*` keys the values resolve,
+scoped to the POST-INSTALL set — the pre-install Job's denominator is its own and
+counts none of this. The two are compared AT THE TOP LEVEL, because inside a
+function reached through `$( )` the exit status is discarded and `set -e` never sees
+it, and a pipeline reports only its last element's status.
+
+THE PROBE GATEWAY IS CLEANED UP ON EVERY EXIT PATH, AND `hook-delete-policy` DOES
+NOT DO IT. `before-hook-creation` deletes the JOB before the next hook run; it never
+touches objects that Job created. A Gateway left standing is not inert — it is
+provisioned proxy infrastructure. So there are two guarantees, because one of them
+has to survive the Job dying outright: a `trap` that deletes on EVERY exit, success
+and failure alike, before the failure is reported; and a FIXED name, deleted and
+waited for BEFORE this run creates its own, so a Job killed between create and
+cleanup leaks at most one Gateway and the next run removes it rather than colliding
+with it.
+*/}}
+{{- $preflight := .Values.preflight }}
+{{- $probe := $preflight.envoyGateway }}
+{{- $listener := .Values.gatewayListener }}
+{{- $probes := without (splitList " " (include "platform.preflight.postInstallProbes" (dict "context" $))) "" }}
+{{- if and $preflight.enabled $probes }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: envoy-gateway-probe
+  annotations:
+    # ORDERED BY PHASE RATHER THAN BY WEIGHT. This is the only Job on the other
+    # side of the install: it runs once the release's objects — the GatewayClass
+    # among them — already exist, which is the thing a weight cannot express.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-7"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  # ZERO RETRIES, as the preflight's. A retry is worth taking when the failure is
+  # transient; here the failure is "Envoy Gateway is not running", which does not
+  # become "it is running" on the second attempt. More attempts would only multiply
+  # the bound before the release is allowed to fail.
+  backoffLimit: {{ $preflight.backoffLimit }}
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: envoy-gateway-probe }
+    spec:
+      serviceAccountName: {{ $probe.serviceAccountName }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 100
+        seccompProfile: { type: RuntimeDefault }
+      # `readOnlyRootFilesystem` below leaves nowhere to put a response body, and
+      # a Gateway's status is one long line until it is split.
+      volumes:
+        - name: scratch
+          emptyDir: {}
+      containers:
+        - name: envoy-gateway-probe
+          # THE PREFLIGHT'S OWN IMAGE KEY, NOT A SECOND ONE. Both Jobs need the
+          # same four things of it — a POSIX shell, `curl`, `grep` and `sed`, and a
+          # nonroot user at UID/GID 100 — so a second key would be two sources for
+          # one decision, and the digest pin would have to be moved twice.
+          image: {{ $preflight.image }}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+          command: ["sh", "-c"]
+          args:
+            # `$(...)` BELOW IS THE SHELL'S, NOT KUBERNETES'. Kubernetes expands
+            # `$(VAR)` inside `args` only where VAR names an environment variable
+            # of this container, and an unresolvable reference is documented to be
+            # left unchanged. This container declares no environment at all.
+            - |
+              set -eu
+
+              api="https://kubernetes.default.svc"
+              sa="/var/run/secrets/kubernetes.io/serviceaccount"
+              ns="$(cat "$sa/namespace")"
+              token="$(cat "$sa/token")"
+              body=/tmp/answer
+
+              # ── THE LIST, AND THE DENOMINATOR IT IS ASSERTED AGAINST ──────
+              # TWO SEPARATE DERIVATIONS, and both are the POST-INSTALL set's.
+              # `PROBES` is built from the blocks this template renders;
+              # `EXPECTED_PROBES` is the count of post-install `probes.*` keys the
+              # values resolve. A probe added to this Job that no key enables moves
+              # the first and not the second.
+              PROBES="{{ join " " $probes }}"
+              EXPECTED_PROBES={{ len $probes }}
+
+              TIMEOUT_SECONDS={{ $probe.timeoutSeconds }}
+              POLL_SECONDS={{ $preflight.pollSeconds }}
+              PROBE_NAME={{ $probe.probeName }}
+
+              # THE PATHS THE CLEANUP WALKS. Appended as each object is created, so
+              # a probe that dies half-way still leaves its cleanup a complete list
+              # of what it made.
+              CREATED=""
+
+              # ── THE API, AND THE ONE PLACE A REQUEST IS MADE ──────────────
+              # The status lands in `STATUS` and the answer in `$body`. NOTHING
+              # HERE EXITS: a caller decides what a status means, because a 404 is
+              # a failure to a probe and a success to the cleanup.
+              STATUS=""
+              request() {
+                method="$1"
+                path="$2"
+                payload="$3"
+                if [ -n "$payload" ]; then
+                  STATUS="$(printf '%s' "$payload" | curl --silent --show-error \
+                    --cacert "$sa/ca.crt" \
+                    --header "Authorization: Bearer $token" \
+                    --header "Content-Type: application/json" \
+                    --request "$method" --data-binary @- \
+                    --output "$body" --write-out '%{http_code}' \
+                    "$api$path")"
+                else
+                  STATUS="$(curl --silent --show-error \
+                    --cacert "$sa/ca.crt" \
+                    --header "Authorization: Bearer $token" \
+                    --request "$method" \
+                    --output "$body" --write-out '%{http_code}' \
+                    "$api$path")"
+                fi
+              }
+
+              # ── CLEANUP ON EVERY EXIT PATH, SUCCESS AND FAILURE ALIKE ─────
+              # A GATEWAY IS NOT INERT. Envoy Gateway provisions a Deployment and a
+              # Service for each one, so a probe that times out and exits 1 without
+              # this would leave real proxy infrastructure standing under a name
+              # nobody recognises. The trap runs on EXIT, and it runs BEFORE the
+              # failure is reported.
+              cleanup() {
+                for path in $CREATED; do
+                  request DELETE "$path" "" || true
+                done
+              }
+              trap cleanup EXIT
+
+              # DELETE ANY OBJECT OF THIS NAME AND WAIT FOR IT TO BE GONE BEFORE
+              # CREATING OURS. This is what keeps the probe FRESH as well as what
+              # bounds a leak: a Gateway left by a killed Job carries a status a
+              # previous reconcile wrote, and reading that back would be the
+              # already-persisted-condition defect the pre-install probe was
+              # dropped for.
+              remove() {
+                waited=0
+                request DELETE "$1" "" || true
+                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
+                  request GET "$1" ""
+                  if [ "$STATUS" = "404" ]; then
+                    return 0
+                  fi
+                  sleep "$POLL_SECONDS"
+                  waited=$((waited + POLL_SECONDS))
+                done
+                echo "envoy-gateway-probe: $1 was still present ${waited}s after a delete" >&2
+                return 1
+              }
+
+              create() {
+                remove "$1"
+                request POST "$2" "$3"
+                if [ "$STATUS" != "201" ]; then
+                  echo "envoy-gateway-probe: creating $1 answered HTTP $STATUS" >&2
+                  cat "$body" >&2
+                  return 1
+                fi
+                CREATED="$CREATED $1"
+              }
+
+              # WHETHER A CONDITION OF TYPE $2 CARRIES A STATUS MATCHING $3. Copied
+              # from the preflight Job rather than re-derived (ADR-0679): the answer
+              # is one long line, so it is split on the boundary BETWEEN condition
+              # objects first — `grep` is a line matcher and an unsplit body would
+              # match a type from one condition against a status from another.
+              condition_matches() {
+                sed 's/},{/}\n{/g' "$body" \
+                  | grep '"type":"'"$1"'"' \
+                  | grep -Eq '"status":"('"$2"')"'
+              }
+
+              # WAIT FOR $1 TO CARRY CONDITION $2 MATCHING $3, OR FAIL AT THE BOUND
+              # NAMING THE OPERATOR. The bound is what makes this a probe rather
+              # than a hang: a controller that is absent produces an object that
+              # simply never gains a condition, which is indistinguishable from a
+              # slow one until the clock says otherwise.
+              await() {
+                path="$1"
+                kind="$2"
+                wanted="$3"
+                operator="$4"
+                waited=0
+                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
+                  request GET "$path" ""
+                  if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted"; then
+                    return 0
+                  fi
+                  sleep "$POLL_SECONDS"
+                  waited=$((waited + POLL_SECONDS))
+                done
+                echo "envoy-gateway-probe: $operator did not set $kind on $path within ${waited}s." >&2
+                echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running." >&2
+                return 1
+              }
+{{- if has "envoy-gateway" $probes }}
+
+              # ── Envoy Gateway ─────────────────────────────────────────────
+              # A FRESH GATEWAY ON THE CLASS THIS CHART RENDERS, and the class is
+              # what makes this Envoy Gateway's probe rather than the Gateway API's.
+              # `gatewayListener.className` is served by
+              # `gatewayListener.controllerName`, which is Envoy Gateway's own
+              # controller and no other implementation's — the API group below names
+              # a SPECIFICATION and discriminates nothing.
+              #
+              # A PLAIN HTTP LISTENER, NO TLS. The probe depends on no Secret and
+              # therefore on no ReferenceGrant and no cert-manager: a red here is
+              # Envoy Gateway and never a certificate that has not been issued yet.
+              #
+              # AND IT INHERITS THE REAL LISTENER'S INFRASTRUCTURE. The
+              # `parametersRef` names the EnvoyProxy `gatewayListener.create` has
+              # already rendered — this hook runs after the release's objects exist,
+              # which is the reason it is post-install at all. So the probe's data
+              # plane is placed and exposed exactly as the estate's own edge is, and
+              # whether a Gateway can be programmed on this cluster is one question
+              # rather than two. A probe provisioned from the controller's defaults
+              # could fail where the real Gateway succeeds, which would be a probe
+              # reporting on a Gateway nobody installed.
+              probe_envoy_gateway() {
+                gateways="/apis/{{ $probe.apiVersion }}/namespaces/$ns/gateways"
+
+                gateway_body=$(cat <<JSON
+              {"apiVersion":"{{ $probe.apiVersion }}","kind":"Gateway",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{"gatewayClassName":"{{ $listener.className }}",
+                       "infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io",
+                                                          "kind":"EnvoyProxy",
+                                                          "name":"{{ $listener.envoyProxy.name }}"}},
+                       "listeners":[{"name":"probe","protocol":"HTTP","port":80,
+                                     "allowedRoutes":{"namespaces":{"from":"Same"}}}]}}
+              JSON
+              )
+                create "$gateways/$PROBE_NAME" "$gateways" "$gateway_body"
+
+                await "$gateways/$PROBE_NAME" Programmed True "Envoy Gateway"
+              }
+{{- end }}
+
+              # ── THE DENOMINATOR, CHECKED BEFORE ANYTHING IS PROBED ────────
+              # AT THE TOP LEVEL, and that is not a style choice. Inside a function
+              # reached through `$( )` the status is discarded and `set -e` never
+              # sees it; inside a pipeline only the last element's status is
+              # reported. Both are ways this check could exist and never fire.
+              declared=0
+              for probe in $PROBES; do
+                declared=$((declared + 1))
+              done
+
+              [ "$declared" -eq "$EXPECTED_PROBES" ] || {
+                echo "envoy-gateway-probe: the render declares $declared probes ($PROBES) against a denominator of $EXPECTED_PROBES." >&2
+                echo "envoy-gateway-probe: a probe runs that no preflight.probes.* key asked for, or a key asks for a probe this Job does not carry." >&2
+                exit 1
+              }
+
+              probed=0
+              for probe in $PROBES; do
+                case "$probe" in
+{{- if has "envoy-gateway" $probes }}
+                  envoy-gateway) probe_envoy_gateway ;;
+{{- end }}
+                  *)
+                    echo "envoy-gateway-probe: $probe is in the probe list and this Job carries no probe for it." >&2
+                    exit 1
+                    ;;
+                esac
+                echo "envoy-gateway-probe: $probe answered"
+                probed=$((probed + 1))
+              done
+
+              [ "$probed" -eq "$EXPECTED_PROBES" ] || {
+                echo "envoy-gateway-probe: probed $probed operators against a denominator of $EXPECTED_PROBES." >&2
+                exit 1
+              }
+
+              echo "envoy-gateway-probe: probed $probed operators"
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+{{- end }}
