@@ -47,6 +47,46 @@ edgeTLS:
     name: yadgar-dev-ca
     kind: ClusterIssuer
 
+# ── THE EDGE LISTENER ────────────────────────────────────────────────────────
+# THREE OBJECTS AND ONE TOGGLE: the GatewayClass Envoy Gateway watches, the
+# Gateway that terminates TLS on it, and the EnvoyProxy that says how the data
+# plane it provisions is placed and exposed.
+#
+# `gatewayListener.hostname` AND `edgeTLS.dnsNames` MUST AGREE, and the chart's
+# gate says so rather than the render failing later: verification fails after
+# signing succeeds when they do not, which is a confusing place to find a typo.
+# Both ship this organisation's value as a stated starting point.
+#
+# `envoyProxy.serviceType` DEFAULTS TO `LoadBalancer` AND IS NOT RESTATED HERE.
+# That is the right answer on a cluster with a load-balancer controller, which is
+# the adopter this file is written for. Without one, set it to `NodePort` and pin
+# the port in your own values — this organisation does exactly that in
+# `yadgarhq/deploy`, because under rootless podman the host cannot route to
+# container IPs at all.
+gatewayListener:
+  create: true
+
+# ── THE ONE SHARED CACHE ─────────────────────────────────────────────────────
+# A Deployment, a Service and an ingress NetworkPolicy. The password comes from
+# the bootstrap Job below; nothing here survives a restart and nothing here needs
+# to.
+valkey:
+  create: true
+
+# ── THE BROKER, AS AN UPSTREAM CHART DEPENDENCY ──────────────────────────────
+# `nats.create` IS READ BY HELM ITSELF, not by a template: it is the `condition`
+# on the dependency `Chart.yaml` declares, so setting it false removes the whole
+# NATS release from the render rather than one object. The ingress
+# NetworkPolicy that guards the broker is this chart's own and follows the same
+# key.
+#
+# THE BROKER'S OWN VALUES ARE NOT RESTATED HERE, deliberately — the two accounts,
+# their subject permissions and the `<< >>` escape live in the chart's
+# `values.yaml` and this file inherits them, which is what keeps one source for
+# them. Both passwords are minted by the bootstrap Job below.
+nats:
+  create: true
+
 # THE BOOTSTRAP JOBS. Two pre-install hooks mint the four credentials nothing
 # outside the installation can supply, and neither Helm nor Argo tracks the
 # Secrets they create — so an uninstall or a prune leaves them standing (ADR-0750).

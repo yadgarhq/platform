@@ -60,9 +60,25 @@ REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
-# The group the render check demands before any of this renders. See the module
-# docstring, and `test_render_checks.py` for the check itself.
-CERT_MANAGER_API = "cert-manager.io/v1"
+# ── EVERY GROUP THE CHART'S RENDER CHECKS ASK FOR ────────────────────────────
+# ONE ENTRY PER CHECK THE CHART DECLARES, AND A LITERAL RATHER THAN A LIST READ
+# OFF THE CHART. `fail` aborts the WHOLE render at the FIRST failing check and
+# names only that one, so a render here that omits a group is refused for THAT
+# check's reason before the objects this suite counts exist at all — which is how
+# every case in this file went red the day the second check landed. Deriving the
+# tuple from `test_render_checks.py`'s `declared_checks` would follow a check
+# DELETED from the chart, so these renders would keep passing over one fewer group
+# and stop discriminating at the moment the checks stopped existing.
+#
+# `test_render_checks.py` owns the count of what the chart declares; this is the
+# independent restatement that disagrees with it when somebody moves one and not
+# the other.
+DECLARED_API_VERSIONS = ("cert-manager.io/v1", "gateway.envoyproxy.io/v1alpha1")
+
+# `--api-versions <group>` for each of them, spliced into every render below.
+API_VERSIONS = tuple(
+    part for group in DECLARED_API_VERSIONS for part in ("--api-versions", group)
+)
 
 # ── THE EXPECTED NUMBERS, ONE PAIR PER RENDER ────────────────────────────────
 # THEY ARE LITERALS AND THEY MUST STAY LITERALS. A count derived from the render
@@ -113,7 +129,7 @@ def helm(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 def render(chart: Path, *arguments: str) -> list[dict]:
     result = helm(
-        "template", "platform", str(chart), "--api-versions", CERT_MANAGER_API, *arguments
+        "template", "platform", str(chart), *API_VERSIONS, *arguments
     )
     assert result.returncode == 0, result.stderr
     return [
@@ -375,10 +391,44 @@ def test_the_edge_leaf_refuses_without_an_issuer(tmp_path):
             "template",
             "platform",
             str(CHART),
-            "--api-versions",
-            CERT_MANAGER_API,
+            *API_VERSIONS,
             "-f",
             str(overridden),
         )
         assert result.returncode != 0, f"{key} has no default and the render did not refuse"
         assert key in result.stderr, result.stderr
+
+
+def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
+    """`DECLARED_API_VERSIONS` RESTATED AGAINST THE CHART. An assertion, NOT a derivation.
+
+    THE LITERAL ABOVE STAYS A LITERAL, and that is deliberate rather than an omission
+    this case tidies up. A tuple computed from `declared_checks(CHART)` would FOLLOW a
+    check deleted from the chart: every render in this file would keep passing over
+    one fewer group and this file would stop discriminating at exactly the moment the
+    render checks stopped existing. `test_render_checks.py` catches that deletion on
+    its own count. So the independent restatement has to survive, and what was missing
+    beside it was the comparison.
+
+    WHAT THE COMPARISON BUYS IS A NAMED CAUSE. This constant is spliced into every
+    enabled render in this file, and `fail` aborts a whole chart render at the first
+    check whose group is absent. So ONE stale entry here does not fail as "this tuple
+    is stale" — it fails as dozens of cases across this file, each printing the
+    CHART's refusal and naming the chart's operator. The reader meets a symptom that
+    names the chart and is caused by a constant in a test file. This case fails first
+    and says so.
+
+    It is imported inside the function, following this file's existing precedent, so
+    the constant stays readable without a module-level dependency between suites.
+    """
+    from test_render_checks import declared_checks
+
+    declared = tuple(sorted(declared_checks(CHART)))
+    assert DECLARED_API_VERSIONS == declared, (
+        f"this file's DECLARED_API_VERSIONS names {DECLARED_API_VERSIONS} and the "
+        f"chart declares {declared}. Every enabled render in this file passes the "
+        f"first, and `fail` aborts each of them at the first check whose group is "
+        f"missing — so a stale entry HERE reddens this whole file with the CHART's "
+        f"refusal, naming the chart rather than this constant. Move this tuple to "
+        f"match the chart, or restore the check the chart lost"
+    )

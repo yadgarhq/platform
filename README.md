@@ -10,14 +10,29 @@ A bare cluster with the third-party operators already installed should become a 
 
 The certificate half of the layer, and the Jobs that mint the credentials nothing outside the installation can supply.
 
-| object set                                                                                                           | toggle                | default |
-| -------------------------------------------------------------------------------------------------------------------- | --------------------- | ------- |
-| Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca` | `internalCA.create`   | `false` |
-| The ten internal leaf Certificates, each carrying its own `renewBefore`                                              | `certificates.create` | `false` |
-| The edge Certificate, whose issuer is an authority this chart does not own                                           | `edgeTLS.create`      | `false` |
-| Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share        | `bootstrap.create`    | `false` |
+| object set                                                                                                           | toggle                   | default |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------- |
+| Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca` | `internalCA.create`      | `false` |
+| The ten internal leaf Certificates, each carrying its own `renewBefore`                                              | `certificates.create`    | `false` |
+| The edge Certificate, whose issuer is an authority this chart does not own                                           | `edgeTLS.create`         | `false` |
+| Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share        | `bootstrap.create`       | `false` |
+| GatewayClass `eg`, Gateway `edge` and the EnvoyProxy that places its data plane                                      | `gatewayListener.create` | `false` |
+| The Valkey Deployment and Service, and the `valkey-ingress` NetworkPolicy                                            | `valkey.create`          | `false` |
+| The upstream `nats` chart as a DEPENDENCY, and the `nats-ingress` NetworkPolicy this chart renders itself            | `nats.create`            | `false` |
 
-The rest of the layer — the databases, NATS, Valkey, the Gateway listener and the preflight Job — arrives in later pull requests.
+The preflight Job is here too, on its own toggle, and the section on it below says what it does. The three MariaDB instances are the one part of the layer that is not here and will not be: each has exactly one consuming module, so each belongs to that module's own chart behind `database.create`.
+
+## The broker is a dependency, not a copy
+
+`chart/Chart.yaml` declares `nats` from `https://nats-io.github.io/k8s/helm/charts` at `2.14.6` — the version this organisation already runs — behind `condition: nats.create`. It is the estate's first non-yadgarhq chart dependency, and three things follow.
+
+**Nothing is vendored into git** (ADR-0725). `chart/charts/` stays ignored and the release pipeline resolves the dependency before it packages or renders anything, because a STALE vendored subchart is silent on every tool this estate runs: `helm package`, `helm lint --strict` and `helm template` all exit 0 on a chart whose `Chart.yaml` pins one version while `charts/` holds another. **So run `helm dependency update chart` after cloning**, or every helm command here refuses with `found in Chart.yaml, but missing in charts/ directory: nats`.
+
+**The condition is load-bearing.** A declared dependency renders unconditionally unless a `condition` names a values key that is false. Without it, the parent chart's default render would grow by the whole NATS release the day this chart is added, on every install, for every adopter.
+
+**The published tarball carries the broker, and that is proved rather than assumed.** installing a chart does not resolve its dependencies — the install expects a self-contained package — so an adopter with no helm repositories configured gets a broker only if `helm package -u` vendored the HTTP-sourced chart into the artifact. `test_the_package_carries_every_declared_subchart` packages this chart and asserts `platform/charts/nats/Chart.yaml` is inside it, and that the number of vendored subcharts equals the number declared.
+
+The broker's own values — the two accounts, their subject permissions and the `<< >>` escape that emits `$NATS_PASSWORD` unquoted — live under `nats:` in `chart/values.yaml`, moved from this organisation's Argo Application unchanged. The `nats-ingress` NetworkPolicy is NOT the upstream chart's: it is this estate's object and this chart renders it.
 
 ## The bootstrap Jobs, and the Secrets nothing owns
 
@@ -44,9 +59,13 @@ Every leaf has exactly one consuming module, so ADR-0752's rule that a single-co
 
 ## The render check, and the trap in testing it
 
-`chart/templates/render-checks.yaml` refuses at render time when the target does not have `cert-manager.io/v1`, naming the operator and the toggle that asked for it. Without it a toggle set true on a cluster with no cert-manager renders cleanly and fails at apply with `no matches for kind Certificate` — half-way through an install, naming a kind rather than a prerequisite.
+`chart/templates/render-checks.yaml` refuses at render time when the target does not have the API a toggle asked for, naming the operator that provides it and the toggle that asked. Without it a toggle set true on a cluster with no cert-manager renders cleanly and fails at apply with `no matches for kind Certificate` — half-way through an install, naming a kind rather than a prerequisite.
+
+**Two checks, one per operator rather than one per kind.** Everything the certificate half renders comes from `cert-manager.io/v1`, so those share a check. `gatewayListener.create` renders three kinds from TWO groups and also carries ONE check — and **which group it names is the whole decision**. The Gateway API's own `gateway.networking.k8s.io/v1` is a SPECIFICATION that Istio and every other implementation registers, so a check on it is green on a cluster with the Gateway API CRDs and no Envoy Gateway anywhere: it names a specification and can never be the refusal that names Envoy Gateway. The same cluster serves `gateway.networking.x-k8s.io/v1alpha1` too. Three plausible strings, one correct — the check targets `gateway.envoyproxy.io/v1alpha1`, the EnvoyProxy's own group, which no other implementation registers. The string is recorded in `chart/values.yaml` beside the toggle, read off Envoy Gateway at the version this estate pins, and a gate asserts the recorded string and the check's own literal agree.
 
 **`helm template` does not populate `.Capabilities.APIVersions` with CRD-backed groups from anywhere but a live cluster.** So a bare render is refused whatever the target holds, and a red case built that way cannot tell "the check works" apart from "the renderer always answers false". `scripts/tests/test_render_checks.py` therefore constructs **both** halves of every pair with `--api-versions`: the red case names a group no check asks for, the green case names the group the check wants. It asserts how many pairs it exercised against the number of checks the chart declares, so a check deleted from the chart reddens the suite on the count.
+
+**With more than one check the construction is not "name the group under test".** `fail` aborts the whole render at the FIRST failing check and the refusal names only that one, so a red case that leaves a second check unsatisfied refuses for THAT check's reason. The green case therefore names EVERY group the render's checks ask for, and the red case for a check names every one of those groups EXCEPT its own, plus a filler group no check asks for. Both halves of that are what make the refusal attributable to the check under test, and both are asserted rather than described.
 
 ## Layout
 
@@ -61,8 +80,14 @@ chart/templates/edge-certificate.yaml      the edge leaf, whose issuerRef is req
 chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
 chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook
 chart/templates/admin-bootstrap-token.yaml the one credential an operator reads out, in its own file
+chart/templates/gateway-listener.yaml       the GatewayClass, the Gateway and the EnvoyProxy that places its data plane
+chart/templates/valkey.yaml                 the one shared cache — a Deployment and a Service, no persistence
+chart/templates/ingress-policies.yaml       who may dial the cache and who may dial the broker
+chart/templates/_preflight.tpl              the probe/toggle tie, and the refusal when the two disagree
+chart/templates/preflight.yaml              the pre-install Job that proves a controller is running
+chart/templates/preflight-rbac.yaml         the preflight's own identity, separate from the bootstrap's
 example/values.yaml                        what an adopter commits in their own repository
-scripts/tests/                             the ladder gate, the render-check harness and the bootstrap gate
+scripts/tests/                             the ladder gate, the render-check harness, the bootstrap, preflight and shared-infrastructure gates
 ```
 
 ## Adopting this in your own installation
@@ -98,6 +123,8 @@ kubectl -n yadgar get secret admin-bootstrap-token -o jsonpath='{.data.token}' |
 ```
 
 **Read it again after every cluster rebuild.** The Job mints a new token when the Secret is gone, so a value copied from before the rebuild agrees with nothing. The Secret is never _absent_ — it is present, ready, and wrong — and no existence check can tell the two apart.
+
+**Envoy Gateway is your prerequisite too, if you turn the listener on.** `gatewayListener.envoyProxy.serviceType` defaults to `LoadBalancer`, which is the right answer on a cluster with a load-balancer controller. Without one, set it to `NodePort` and pin the port in your own values — this organisation does exactly that in `yadgarhq/deploy`, because under rootless podman the host cannot route to container IPs at all.
 
 **cert-manager is your prerequisite and this chart never installs it.** That is the estate's standing rule for every operator — cert-manager, mariadb-operator, KEDA, Envoy Gateway and Argo CD are the adopter's to install, and a chart that needs one checks the API and refuses at render when it is absent.
 

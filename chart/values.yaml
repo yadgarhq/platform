@@ -198,6 +198,275 @@ edgeTLS:
     size: 256
     rotationPolicy: Always
 
+# ── THE EDGE LISTENER, AND THE ONE OPERATOR STRING BESIDE ITS CHECK ─────────
+# THREE OBJECTS, ONE TOGGLE: the GatewayClass Envoy Gateway watches, the Gateway
+# that terminates TLS on it, and the EnvoyProxy that says how the data plane it
+# provisions is placed and exposed. They move together because none of the three
+# is usable without the other two — a Gateway naming a class nobody created sits
+# `Accepted=False` with no controller ever looking at it, which reads as a broken
+# Gateway rather than a missing object.
+#
+# TWO API GROUPS, ONE RENDER CHECK, AND THAT IS DELIBERATE. The GatewayClass and
+# the Gateway are `gateway.networking.k8s.io/v1` — the UPSTREAM Gateway API, which
+# is a SPECIFICATION. Istio registers those CRDs, and so does every other
+# implementation, so a check on that group is green on a cluster with no Envoy
+# Gateway anywhere: it names a specification, not an operator, and could never be
+# the refusal that names Envoy Gateway. The EnvoyProxy below is the object whose
+# group no other implementation registers, so the one check this toggle carries
+# targets THAT group and guards all three kinds.
+gatewayListener:
+  create: false
+
+  # ── THE OPERATOR STRING, READ OFF THE OPERATOR AND RECORDED HERE ───────────
+  # THE SAME DISCIPLINE THE mariadb PROBE'S MESSAGE SUBSTRING CARRIES, and for the
+  # same reason: an operator upgrade that moved the group or the version turns the
+  # check RED rather than silently weakening it. A string guessed from
+  # documentation is a check that passes against a cluster it never understood.
+  #
+  # THREE PLAUSIBLE GROUPS ARE SERVED BY THE SAME CLUSTER AND ONLY ONE IS RIGHT:
+  #
+  #   gateway.envoyproxy.io/v1alpha1        Envoy Gateway's own API — THIS ONE
+  #   gateway.networking.k8s.io/v1          the upstream Gateway API, a DIFFERENT
+  #                                         project, registered by every
+  #                                         implementation
+  #   gateway.networking.x-k8s.io/v1alpha1  the upstream experimental channel
+  #
+  # A check written against either of the last two passes on a cluster carrying
+  # the Gateway API CRDs with no Envoy Gateway installed at all, which is exactly
+  # the adopter state the check exists to refuse.
+  #
+  # THE CHECK ITSELF PASSES THE STRING AS A LITERAL rather than reading this key,
+  # because `scripts/tests/test_render_checks.py` reads the invocation's arguments
+  # off the template to count and exercise the checks the chart declares, and a
+  # values reference is not a string it can read. So the group lives in two files,
+  # and `test_the_render_check_names_the_group_the_values_file_records` is the gate
+  # that keeps them one source.
+  envoyGateway:
+    # MEASURED 2026-09-23 against kind-yadgar, running
+    # docker.io/envoyproxy/gateway:v1.9.1.
+    apiVersion: gateway.envoyproxy.io/v1alpha1
+    operatorImage: docker.io/envoyproxy/gateway:v1.9.1
+
+  # THE CLASS, AND THE CONTROLLER NAME IS NOT A CONVENTION TO GUESS AT. It is the
+  # value Envoy Gateway's own chart carries as
+  # `config.envoyGateway.gateway.controllerName`, taken from `helm show values` at
+  # 1.9.1. A Gateway whose class names a controller nothing runs stays
+  # `Accepted=False` forever.
+  #
+  # NO `parametersRef` ON THE CLASS, deliberately. Infrastructure configuration
+  # attaches at the Gateway instead, which keeps the EnvoyProxy in the same
+  # namespace as the Gateway that uses it — a cluster-scoped object reaching into
+  # one namespace is easy to add and awkward to unpick.
+  className: eg
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+  # THE EDGE ITSELF. ONE LISTENER, HTTPS ONLY, and no plaintext listener: a port-80
+  # listener would exist only to redirect, and until something needs redirecting it
+  # is a way to serve MCP over plaintext by accident.
+  #
+  # RENAMING THIS GATEWAY MOVES TWO ALLOW-LISTS AND NOTHING REFUSES THE MISMATCH.
+  # Envoy Gateway DERIVES `gateway.envoyproxy.io/owning-gateway-name` and
+  # `...-namespace` from this name and the release namespace, and stamps both onto
+  # every data-plane pod it creates. The `gateway` chart's own ingress policy
+  # selects those pods by those labels. Rename this and that allow-list matches no
+  # pod: every external call times out while both pods stay Ready, the
+  # EndpointSlice keeps both addresses, and nothing is logged.
+  gatewayName: edge
+
+  # WHAT THE EDGE ANSWERS ON. THREE PLACES MUST AGREE — this hostname, the
+  # certificate's `dnsNames` under `edgeTLS` above, and any name constraint on the
+  # authority that signs it — or verification fails AFTER signing succeeds, which
+  # is a confusing place to find a typo.
+  hostname: gateway.yadgar.internal
+
+  # THE SECRET THE LISTENER TERMINATES ON, AND IT IS A SEPARATE KEY FROM
+  # `edgeTLS.name` ON PURPOSE. An adopter may terminate on a Secret their own
+  # tooling populates, with `edgeTLS.create` false and no Certificate in the render
+  # at all — so the two cannot be one key. What keeps them in step when BOTH are on
+  # is a gate rather than a template:
+  # `test_the_listener_serves_the_secret_the_edge_certificate_writes`.
+  #
+  # Gateway API will not read a TLS Secret across namespaces without a
+  # ReferenceGrant, so this Secret is the one the release namespace holds.
+  certificateSecretName: gateway-tls
+
+  # HOW THE PROVISIONED DATA PLANE IS PLACED AND EXPOSED. Envoy Gateway does not
+  # run the data plane itself: it provisions a Deployment and a Service per
+  # Gateway, and this object is the only way to influence either.
+  envoyProxy:
+    name: edge
+
+    # `LoadBalancer`, WHICH IS THE ADOPTER'S CASE AND NOT THIS ORGANISATION'S.
+    # This organisation's cluster is kind under rootless podman, where the host
+    # cannot route to container IPs at all and `type: LoadBalancer` is unavailable
+    # whatever provides it — so `yadgarhq/deploy` keeps its own NodePort 30443
+    # copy with a StrategicMerge patch pinning that number, and this chart does
+    # not try to express it. An adopter on a cluster with a load-balancer
+    # controller wants the default; an adopter without one sets this to
+    # `NodePort` and pins the port in their own values.
+    serviceType: LoadBalancer
+
+    # TWO, per the estate's invariant. A single proxy replica makes a class of
+    # defect unreachable, and there is no reason for the edge to be the exception.
+    replicas: 2
+
+# ── THE ONE SHARED CACHE ─────────────────────────────────────────────────────
+# ONE DEPLOYMENT, NO PERSISTENCE, NO REPLICAS, and each consumer using its own key
+# namespace. NOTHING HERE SURVIVES LOSS BECAUSE NOTHING HERE NEEDS TO: compute
+# caches are content-addressed, row caches key on a version and query caches on an
+# epoch, so every entry recomputes. Losing this cache costs a cold start, not data
+# — which is why it is a Deployment with no volume rather than a StatefulSet with
+# a PVC.
+#
+# THE OFFICIAL IMAGE AND NOT A CHART, and that is a supply-chain measurement
+# rather than a preference. The Bitnami chart was used first and removed: Bitnami
+# restricted free image distribution in 2025, and verified 2026-08-30 with skopeo,
+# `bitnami/valkey:9.1.1` and `:8.1` are NOT PULLABLE while `:latest` is the only
+# tag that resolves. Pinning is not possible there, only unpinning. The official
+# image pins cleanly, and one Deployment is all this needs.
+valkey:
+  create: false
+  name: valkey
+
+  # PINNED BY TAG RATHER THAN BY DIGEST, unlike the two Job images in this file,
+  # and the difference is what the image does. A Job image here MINTS the estate's
+  # root credentials, so a moving tag would leave that code as whatever the
+  # registry last published. This one runs a cache whose whole content is
+  # recomputable, and the upstream project's tags are immutable in practice. An
+  # adopter with a mirrored registry moves it without forking the chart.
+  image: valkey/valkey:9.1.1
+
+  port: 6379
+
+  # ── requirepass, AND IT IS ENFORCED BY THE SERVER ─────────────────────────
+  # The password is the control that holds on EVERY CNI and every platform; the
+  # ingress policy below is the second layer, not the first. Before this existed
+  # anything on the pod network could read and rewrite every token bucket, epoch
+  # counter and conversation token in here.
+  #
+  # THE SECRET IS MINTED BY THE BOOTSTRAP JOB, not by a human and not by this
+  # chart's templates — `bootstrap.create` above renders the Job that creates it,
+  # and neither Helm nor Argo tracks the result (ADR-0750). The name is a key here
+  # because this Deployment and that Job are the two halves of one agreement, and
+  # `test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints` is the
+  # gate over it.
+  #
+  # `VALKEYCLI_AUTH` IS THE PROBE'S COPY, under the name `valkey-cli` itself reads.
+  # Read off `valkey-cli --help` in this exact image rather than assumed from
+  # Redis: the fork renamed it, and `REDISCLI_AUTH` is silently ignored.
+  passwordSecret:
+    name: valkey-password
+    key: password
+
+  # A CACHE THAT REFUSES WRITES WHEN FULL IS NOT A CACHE. Eviction is the correct
+  # behaviour for every class of entry stored here, all of which are recomputable.
+  maxmemory: 512mb
+  maxmemoryPolicy: allkeys-lru
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 640Mi
+
+# ── THE BROKER, WHICH THIS CHART DEPENDS ON RATHER THAN OWNS ────────────────
+# THE ESTATE'S FIRST NON-YADGARHQ CHART DEPENDENCY. `Chart.yaml` declares `nats`
+# from `https://nats-io.github.io/k8s/helm/charts` at 2.14.6 — the version
+# `yadgarhq/deploy` runs today — behind `condition: nats.create`, so this key is
+# read by helm itself and not by any template here. Without the condition a
+# declared dependency renders UNCONDITIONALLY, and the parent's default render
+# would grow by the whole NATS release on every install for every adopter.
+#
+# EVERYTHING BELOW `create` IS THE UPSTREAM CHART'S OWN VALUES, moved from
+# `deploy/infra/nats.yaml` unchanged. This chart renders the `nats-ingress`
+# NetworkPolicy itself, because that is this estate's object and not the upstream
+# chart's, and nothing else here templates the broker.
+#
+# `<< >>` IS THE CHART'S ESCAPE, NOT NATS SYNTAX. The chart emits this config as
+# JSON and quotes every scalar; a value wrapped in `<< >>` is emitted UNQUOTED,
+# which is what makes `$NATS_PASSWORD` a variable the server expands rather than a
+# literal fourteen-character password. Verified by rendering: the output is
+# `"password": $NATS_PASSWORD`, with no quotes around it.
+nats:
+  create: false
+
+  # nats-box is a shell with the NATS CLI in it — a debugging convenience, not
+  # part of the system. `kubectl run` covers the same need on the rare occasion it
+  # arises, without a pod running permanently to provide it.
+  natsBox:
+    enabled: false
+
+  # ── AUTHENTICATION, AND EACH SERVICE GETS ITS OWN ACCOUNT ─────────────────
+  # TWO ACCOUNTS: `iam` publishes the cache-invalidation events and `gateway`
+  # subscribes to them. Add accounts rather than sharing one — a shared account
+  # cannot have any single service's access revoked, and `gateway`'s permissions
+  # could not be narrower than `iam`'s if the two shared a user.
+  #
+  # `gateway` IS SUBSCRIBE-ONLY and `publish: {deny: ">"}` closes every subject,
+  # its own reply inbox included, on purpose: a compromised gateway cannot forge
+  # the revocation it is supposed to be receiving. `iam` is the mirror —
+  # publish-only on the same two subjects, with `subscribe: {deny: ">"}`.
+  #
+  # GETTING THIS LIST WRONG IS SILENT AT THE PUBLISHER. A permissions violation on
+  # publish is an asynchronous `-ERR` from the server; the client call has already
+  # returned `Ok(())` by then. So a subject dropped from this list does not fail a
+  # revocation loudly — it makes every revocation late, with nothing in the
+  # publisher's log to say so.
+  #
+  # THE MONITORING PORT IS UNAFFECTED: `config.monitor` serves plain HTTP on 8222
+  # with no client authorization, so the chart's own startup, readiness and
+  # liveness probes keep working. An authorization block that broke them would
+  # take the broker down rather than secure it.
+  config:
+    merge:
+      authorization:
+        users:
+          - user: iam
+            password: << $NATS_PASSWORD >>
+            permissions:
+              publish:
+                allow:
+                  - "yadgar.iam.credential.revoked"
+                  - "yadgar.iam.user.teams-changed"
+              subscribe:
+                deny: ">"
+          - user: gateway
+            password: << $NATS_PASSWORD_GATEWAY >>
+            permissions:
+              publish:
+                deny: ">"
+              subscribe:
+                allow:
+                  - "yadgar.iam.credential.revoked"
+                  - "yadgar.iam.user.teams-changed"
+
+  container:
+    env:
+      # A FILE WOULD BE BETTER AND THIS CHART OFFERS NO WAY TO ASK FOR ONE:
+      # `container.env` is where it accepts a `secretKeyRef`, and the config above
+      # references an environment variable by name. So the password is in this
+      # container's environment. It is still out of git, out of this file and out
+      # of any repository — and this pod is the one that legitimately holds the
+      # credential, unlike its clients.
+      #
+      # BOTH SECRETS ARE MINTED BY THE BOOTSTRAP JOB, as the Valkey password is.
+      # `nats-auth-gateway` is a SEPARATE Secret rather than a second key on
+      # `nats-auth`: the Job's Role grants `create` alone, and a key added to an
+      # existing created Secret is a `create` against a name that already exists —
+      # the API server answers 409, the script reads that as "already done", and
+      # the key would never materialise on a cluster that has already bootstrapped.
+      NATS_PASSWORD:
+        valueFrom:
+          secretKeyRef:
+            name: nats-auth
+            key: password
+      NATS_PASSWORD_GATEWAY:
+        valueFrom:
+          secretKeyRef:
+            name: nats-auth-gateway
+            key: password
+
 # ── THE BOOTSTRAP JOBS, AND THE SECRETS NOTHING OUTSIDE THE INSTALLATION CAN
 #    SUPPLY ─────────────────────────────────────────────────────────────────
 # ADR-0750: a secret with NO SOURCE OUTSIDE THE INSTALLATION is generated by an

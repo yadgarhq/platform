@@ -1,0 +1,143 @@
+{{/*
+THE TWO SHARED INGRESS POLICIES: who may dial the cache, and who may dial the
+broker. Each follows the toggle that renders what it protects, so a policy never
+outlives its workload and never arrives before it.
+
+THESE ARE THE SECOND LAYER, NOT THE FIRST. `requirepass` on the cache and the
+`authorization` block on the broker are enforced by those servers, so they hold on
+every CNI and every platform. These policies hold only where the cluster's CNI
+evaluates NetworkPolicy. The server-side control leads and the policy follows;
+neither file depends on the other existing.
+
+A podSelector THAT MATCHES NOTHING IS ACCEPTED, LISTED AND DESCRIBABLE, AND
+PROTECTS NOTHING, and this estate has no control that refuses one (ADR-0685). Nor
+does a passing kubelet probe carry any information about whether a policy is in
+force (ADR-0592) — probe traffic comes from the node, not from a pod, so a
+pod-selector ingress rule never applies to it. The only instrument is
+`scripts/tests/test_shared_infrastructure.py`, which compares each selector with
+the pod template labels the SAME RENDER produces.
+
+NO `clients` VALUES LIST ON EITHER, AND SO NO ADR-0664 GUARD. ADR-0664 exists for
+an ingress allow-list that arrives EMPTY from values and renders an allow-all
+wearing a control's name — helm parses `--set clients={}` into a list holding one
+empty string, so even a `not` guard passes. A selector written here cannot arrive
+empty, so that hazard has no way in, and a `fail` beside it would be a refusal
+with nothing to refuse. The `gateway` chart's own policy is the one that takes the
+list and the guard, because its clients are an assertion about somebody else's
+topology; these two name consumers inside this estate.
+
+EGRESS IS NOT RESTRICTED AT ALL, only ingress. Egress rules need DNS carve-outs to
+be usable, and a half-written egress policy breaks name resolution for everything
+it selects. Ingress is the half that answers the question.
+*/}}
+{{- if .Values.valkey.create }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-ingress
+spec:
+  # The labels `valkey.yaml` stamps on the cache's pods, from the same key.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.valkey.name }}
+  policyTypes: [Ingress]
+  ingress:
+    # THE ONE CONSUMER IS `gateway`, and that is the module chart's pod label
+    # rather than anything this chart renders — no render can resolve it, so
+    # the suite asserts it BY VALUE and says so. Each new consumer of the cache
+    # is a line added here; the header of the cache's own file describes more
+    # that will arrive.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: {{ .Values.valkey.port }}
+{{- end }}
+{{- if .Values.nats.create }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-ingress
+spec:
+  # ── THE LABEL AND THE PORTS BELOW ARE LITERALS, AND THAT IS THE DESIGN ────
+  # They describe the UPSTREAM chart's rendered output, which this chart does not
+  # own. Reading them from the upstream chart's own values keys would make the
+  # policy follow the broker automatically — and would make the gate over it
+  # compare one source with itself, so a drift between the two could never be
+  # caught. Written as literals, an adopter who sets `nats.nameOverride` or moves
+  # `nats.config.nats.port` reddens
+  # `test_a_moved_subchart_label_reddens_the_nats_policy_gate` and its port twin
+  # instead of getting a policy that silently protects nothing.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  policyTypes: [Ingress]
+  ingress:
+    # THE CLIENT PORT. The whole point of the file. Two consumers today: `iam`
+    # publishes the cache-invalidation events and `gateway` subscribes to them.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: iam
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 4222
+    # THE MONITORING PORT, FROM ANYWHERE AT ALL, and deliberately not narrowed.
+    #
+    # THIS RULE CARRIES NO `from`, UNLIKE THE TWO AROUND IT, AND THAT IS NOT A
+    # NARROWER SCOPE — IT IS THE WIDEST ONE THERE IS. An ingress rule whose `from`
+    # is absent or empty matches ALL SOURCES (ADR-0664, read off the OpenAPI
+    # description compiled into the kubectl binary: "If this field is empty or
+    # missing, this rule matches all sources"). NOT "from anywhere in the
+    # namespace", which is what this comment used to say: every namespace, and
+    # whatever else the cluster's CNI presents to this pod. An adopter who reads
+    # it as namespace-scoped ships a cluster where any workload anywhere can GET
+    # `http://<nats-pod-ip>:8222/varz`, `/connz` or `/subsz` and read back subject
+    # names, connected clients and the server's configuration.
+    #
+    # WHY IT IS STILL WRITTEN THIS WAY, AND THE PREMISE THE CONCLUSION NEEDS. A
+    # NetworkPolicy with any ingress rule DENIES every port it does not name, so a
+    # policy naming only 4222 would cut the endpoint the upstream chart's own
+    # startup, readiness and liveness probes use — restarting a healthy broker on
+    # the first CNI that enforces this. The port is HTTP with no authorization and
+    # no secrets on it. AND NARROWING IT TO PROMETHEUS WOULD LEAVE THE PROBES TO
+    # THE CNI'S TREATMENT OF HOST TRAFFIC, WHICH IS THE THING THAT VARIES. That
+    # last sentence is the premise, and without it "kubelet probes do not come
+    # from a pod this selector could name at all" reads as a reason narrowing
+    # would be SAFE. It is not: ADR-0592 — cited three paragraphs above in this
+    # same file — measured that a passing probe carries no information about a
+    # policy at all, so it can never be evidence that a narrower rule would keep
+    # the probes working.
+    #
+    # THE BEHAVIOUR IS CARRIED OVER UNCHANGED from
+    # `deploy/infra/network-policies/shared-infrastructure.yaml`, whose copy of
+    # these rules is the one running today. Narrowing it is a production posture
+    # change, and this chart is not where that gets decided.
+    #
+    # `test_the_policies_admit_from_every_source_only_where_written_down` is what
+    # keeps this paragraph honest. The client census walks each rule's `from`, so
+    # a rule carrying none contributes NOTHING to it and an allow-all passes that
+    # census in silence; the ports admitted to everyone are asserted separately.
+    - ports:
+        - protocol: TCP
+          port: 8222
+    # THE CLUSTER PORT, from the broker's own pods. Clustering is off in the
+    # values this chart ships, so this matches nothing today — it is here so that
+    # turning clustering on does not silently produce a broker whose members
+    # cannot route to each other, which presents as JetStream never becoming
+    # ready.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+      ports:
+        - protocol: TCP
+          port: 6222
+{{- end }}

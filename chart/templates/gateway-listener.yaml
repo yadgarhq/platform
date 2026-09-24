@@ -1,0 +1,106 @@
+{{/*
+THE EDGE LISTENER: the class, the Gateway on it, and how its data plane is placed.
+
+THREE OBJECTS AND ONE TOGGLE, because none of the three is usable without the
+other two. A Gateway naming a class nobody created stays `Accepted=False` with no
+controller ever looking at it; a Gateway with no EnvoyProxy beside it is
+provisioned from the controller's defaults, silently losing the replica count and
+the service type this file states. `scripts/tests/test_shared_infrastructure.py`
+asserts each of those references rather than counting the objects — a census
+passes while a reference is broken, because both objects still render.
+
+NO `metadata.namespace` ON ANY OF THE THREE, and on the Gateway and the EnvoyProxy
+that is load-bearing rather than tidy. `spec.infrastructure.parametersRef` carries
+NO namespace field: it resolves in the Gateway's own namespace. Pinning a
+namespace on one and not the other would send the reference across a boundary it
+cannot cross, and the Gateway would provision from the controller's defaults with
+nothing saying so. The GatewayClass is cluster-scoped and has no namespace to set.
+
+THE RENDER CHECK FOR THIS TOGGLE LIVES IN `render-checks.yaml`, on
+`gateway.envoyproxy.io/v1alpha1` and NOT on the Gateway API's own group — the
+reason is written there and in `values.yaml` beside the recorded string.
+*/}}
+{{- if .Values.gatewayListener.create }}
+{{- $listener := .Values.gatewayListener }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ $listener.className }}
+spec:
+  # NOT A CONVENTION TO GUESS AT. This is the value Envoy Gateway's own chart
+  # carries as `config.envoyGateway.gateway.controllerName`, read off
+  # `helm show values` at the pinned version. A class naming a controller nothing
+  # runs is a class no Gateway can ever be accepted by.
+  controllerName: {{ $listener.controllerName }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $listener.gatewayName }}
+spec:
+  gatewayClassName: {{ $listener.className }}
+
+  # ATTACHED HERE RATHER THAN ON THE GatewayClass, so the EnvoyProxy lives beside
+  # the Gateway it configures instead of a cluster-scoped object reaching into one
+  # namespace. The namespace is implicit at this level: the Gateway's own.
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: {{ $listener.envoyProxy.name }}
+
+  listeners:
+    # ONE LISTENER, HTTPS ONLY. A port-80 listener would exist only to redirect,
+    # and until something needs redirecting it is a way to serve traffic over
+    # plaintext by accident.
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ $listener.hostname }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          # THE SECRET, NOT THE CERTIFICATE. `edgeTLS` renders the Certificate
+          # that WRITES this Secret when its own toggle is on; an adopter whose
+          # tooling populates the Secret directly leaves that toggle off. Gateway
+          # API will not read a TLS Secret across namespaces without a
+          # ReferenceGrant, so both live in the release namespace and there is no
+          # grant to forget.
+          - kind: Secret
+            name: {{ $listener.certificateSecretName }}
+      allowedRoutes:
+        namespaces:
+          # The release namespace only. Routes are attached by the modules being
+          # fronted, and every one of them installs here.
+          from: Same
+---
+{{/*
+A LITERAL, NOT `{{ $listener.envoyGateway.apiVersion }}`, AND THE DIFFERENCE IS
+WHAT MAKES THE GATE OVER IT ABLE TO FAIL. The recorded string in `values.yaml`
+exists so an operator upgrade that moved the group turns the CHECK red; if this
+object read that same key, the object and the check would move together and
+`test_the_gateway_listener_renders_a_kind_from_the_checked_group` would be
+comparing one source with itself. Three files hold the string — this one,
+`render-checks.yaml` and `values.yaml` — and two gates assert them equal pairwise,
+so editing any one of the three is caught.
+*/}}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ $listener.envoyProxy.name }}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: {{ $listener.envoyProxy.replicas }}
+      envoyService:
+        # THE ADOPTER'S CASE, WHICH IS NOT THIS ORGANISATION'S. `values.yaml`
+        # records why: under rootless podman the host cannot route to container
+        # IPs at all, so `yadgarhq/deploy` keeps a NodePort copy with a
+        # StrategicMerge patch pinning 30443, and this chart does not try to
+        # express that. An adopter without a load-balancer controller sets this to
+        # `NodePort` and pins the port in their own values.
+        type: {{ $listener.envoyProxy.serviceType }}
+{{- end }}
