@@ -504,12 +504,13 @@ cert-manager:
 
 keda:
   crds:
-    # `platform` OWNS THESE SIX (ADR-0787). They are vendored into
+    # `platform` WILL OWN THESE SIX (ADR-0787). Step 2 of
+    # `plans/the-operators-toggle.md` vendors them into
     # `templates/vendored-crds/` carrying `helm.sh/resource-policy: keep`,
     # because upstream ships them with no such protection and `helm uninstall`
     # would otherwise delete them along with every ScaledObject in the cluster.
-    # KEDA's own copies would collide with the vendored ones, so this chart's
-    # own installation of KEDA must not install them too.
+    # KEDA's own copies would collide with the vendored ones once they land, so
+    # this chart's own installation of KEDA must not install them too.
     install: false
 
 mariadb-operator:
@@ -517,8 +518,9 @@ mariadb-operator:
     # ALREADY THE DEFAULT — set explicitly because the upstream README's own
     # warning is what this false protects against: "This should only be set to
     # true during the initial deployment. If this chart manages the CRDs and is
-    # later uninstalled, all MariaDB instances will be DELETED." `platform` owns
-    # these twelve the same way it owns KEDA's six, vendored with
+    # later uninstalled, all MariaDB instances will be DELETED." Step 2 of
+    # `plans/the-operators-toggle.md` will make `platform` own these twelve the
+    # same way it will own KEDA's six, vendored with
     # `helm.sh/resource-policy: keep`. A default relied on silently is a default
     # nobody notices moving, so it is written down rather than left implicit.
     enabled: false

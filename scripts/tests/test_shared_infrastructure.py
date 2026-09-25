@@ -75,6 +75,24 @@ EXPECTED_VALKEY_OBJECTS = 2  # Deployment, Service
 EXPECTED_INGRESS_POLICIES = 2  # valkey-ingress, nats-ingress
 EXPECTED_DECLARED_DEPENDENCIES = 6  # nats, cert-manager, keda, mariadb-operator, gateway-helm, argo-cd
 
+# THE `condition:` OF EVERY DEPENDENCY, BY NAME. LITERAL, for the reason every
+# expected number and string in this file is: a value derived from the chart
+# agrees with whatever the chart happens to declare. This is the register no
+# gate read before this test — `declared_dependencies` returns names only, and
+# a chart that declares six dependencies with one condition transposed onto the
+# wrong name still passes every other gate in this suite, because nothing else
+# reads `dependencies[].condition`. Measured against
+# `plans/the-operators-toggle.md`'s dependency table and `chart/Chart.yaml`
+# itself, both at `origin/main` on 2026-09-25.
+EXPECTED_DECLARED_CONDITIONS = {
+    "nats": "nats.create",
+    "cert-manager": "operators.certManager.create,operators.create",
+    "keda": "operators.keda.create,operators.create",
+    "mariadb-operator": "operators.mariadbOperator.create,operators.create",
+    "gateway-helm": "operators.envoyGateway.create,operators.create",
+    "argo-cd": "operators.argoCd.create,operators.create",
+}
+
 # The clients each policy admits, by value, because they belong to other charts.
 EXPECTED_VALKEY_CLIENTS = ["gateway"]
 EXPECTED_NATS_CLIENTS = ["gateway", "iam"]
@@ -1364,6 +1382,12 @@ def declared_dependencies(chart: Path) -> list[str]:
     )
 
 
+def declared_conditions(chart: Path) -> dict[str, str]:
+    """Every dependency's `condition:`, by name. PURE."""
+    manifest = yaml.safe_load((chart / "Chart.yaml").read_text())
+    return {d["name"]: d.get("condition", "") for d in manifest.get("dependencies", [])}
+
+
 def vendored_members(archive: Path) -> list[str]:
     """Every `<top>/charts/<name>/Chart.yaml` member of a packaged chart. PURE."""
     with tarfile.open(archive) as tarball:
@@ -1401,6 +1425,54 @@ def test_the_chart_declares_the_dependencies_this_suite_expects():
         "mariadb-operator",
         "nats",
     ], declared
+
+
+def test_the_chart_declares_the_condition_this_suite_expects_for_each_dependency():
+    """The two-path `condition:` mechanism, given ZERO coverage until this gate.
+
+    ORDER IS THE WHOLE MECHANISM, and this is why it is asserted rather than
+    merely counted. Helm evaluates only the FIRST VALID path in a
+    comma-separated `condition:` and ignores the rest — so
+    `operators.<op>.create,operators.create` gives the per-operator sub-key
+    precedence over the register key `operators.create` ONLY because that
+    sub-key is written first. Every dependency here passed
+    `test_the_chart_declares_the_dependencies_this_suite_expects` above while
+    carrying another dependency's `condition:` outright — that test reads
+    names, never conditions — and a chart in that state renders the wrong
+    operator for an adopter's per-operator override while 154 unrelated tests
+    stay green. See `test_a_transposed_condition_sends_the_wrong_operator`
+    below for the reproduced failure this gate now catches.
+    """
+    assert declared_conditions(CHART) == EXPECTED_DECLARED_CONDITIONS, declared_conditions(
+        CHART
+    )
+
+
+def test_a_transposed_condition_sends_the_wrong_operator():
+    """The red case for the gate above, constructed rather than rendered.
+
+    PURE INPUTS, so this needs no helm and no network. It proves WHY order
+    matters, not merely that two dicts differ: with `cert-manager` and
+    `argo-cd`'s conditions swapped, an adopter who sets
+    `operators.certManager.create=true` (with `operators.create=false`) would
+    have that key read by the `argo-cd` dependency instead of `cert-manager`'s
+    — because helm evaluates only the FIRST valid path — and would get Argo CD
+    (53 objects) where they asked for cert-manager (50). This was reproduced
+    for real by transposing the two conditions in `chart/Chart.yaml` and
+    rendering both `--set` shapes; the assertion below is the same transposition
+    held as data, so the gate that would have caught it runs on every commit
+    without helm.
+    """
+    conditions = dict(EXPECTED_DECLARED_CONDITIONS)
+    conditions["cert-manager"], conditions["argo-cd"] = (
+        conditions["argo-cd"],
+        conditions["cert-manager"],
+    )
+    assert conditions != EXPECTED_DECLARED_CONDITIONS, (
+        "the transposition changed nothing, so it proves nothing"
+    )
+    assert conditions["cert-manager"] == "operators.argoCd.create,operators.create"
+    assert conditions["argo-cd"] == "operators.certManager.create,operators.create"
 
 
 def test_the_package_carries_every_declared_subchart(tmp_path):
