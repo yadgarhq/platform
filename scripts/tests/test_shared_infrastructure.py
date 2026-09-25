@@ -73,7 +73,7 @@ DECLARED_API_VERSIONS = ("cert-manager.io/v1", "gateway.envoyproxy.io/v1alpha1")
 EXPECTED_GATEWAY_LISTENER_OBJECTS = 3  # GatewayClass, Gateway, EnvoyProxy
 EXPECTED_VALKEY_OBJECTS = 2  # Deployment, Service
 EXPECTED_INGRESS_POLICIES = 2  # valkey-ingress, nats-ingress
-EXPECTED_DECLARED_DEPENDENCIES = 1  # nats
+EXPECTED_DECLARED_DEPENDENCIES = 6  # nats, cert-manager, keda, mariadb-operator, gateway-helm, argo-cd
 
 # The clients each policy admits, by value, because they belong to other charts.
 EXPECTED_VALKEY_CLIENTS = ["gateway"]
@@ -1393,7 +1393,14 @@ def vendoring_failures(declared: list[str], members: list[str]) -> list[str]:
 def test_the_chart_declares_the_dependencies_this_suite_expects():
     declared = declared_dependencies(CHART)
     assert len(declared) == EXPECTED_DECLARED_DEPENDENCIES, declared
-    assert declared == ["nats"], declared
+    assert declared == [
+        "argo-cd",
+        "cert-manager",
+        "gateway-helm",
+        "keda",
+        "mariadb-operator",
+        "nats",
+    ], declared
 
 
 def test_the_package_carries_every_declared_subchart(tmp_path):

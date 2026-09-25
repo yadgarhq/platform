@@ -2,5 +2,20 @@ dependencies:
 - name: nats
   repository: https://nats-io.github.io/k8s/helm/charts
   version: 2.14.6
-digest: sha256:c7c75fa0130da3f2d5d2293106d3830e98f851f6d4364974ced1a9fafd631d63
-generated: "2026-09-23T22:18:38.727147128+02:00"
+- name: cert-manager
+  repository: https://charts.jetstack.io
+  version: v1.21.1
+- name: keda
+  repository: https://kedacore.github.io/charts
+  version: 2.20.2
+- name: mariadb-operator
+  repository: https://helm.mariadb.com/mariadb-operator
+  version: 26.6.0
+- name: gateway-helm
+  repository: oci://docker.io/envoyproxy
+  version: v1.9.1
+- name: argo-cd
+  repository: https://argoproj.github.io/argo-helm
+  version: 8.6.1
+digest: sha256:e26f70bc6400e239c80eeef1fcbc314042249bd41f6eccc3d1a2d79d922f2805
+generated: "2026-09-25T20:08:14.638509801+02:00"
