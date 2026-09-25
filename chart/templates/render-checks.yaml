@@ -1,6 +1,15 @@
 {{/*
 EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHING.
 
+TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
+`.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
+target does not carry an API group this render needs. A VALUES check reads the
+release's own values and nothing else. The mixed-release refusal below is the only
+one of the second kind, and everything that makes a capability check awkward —
+`--api-versions`, the offline-render rule, the default-false rule — does not apply
+to it. Its red and green cases in `scripts/tests/test_render_checks.py` are two
+BARE renders, and that is the design rather than an omission.
+
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the ten internal leaves and the edge leaf all come from
 `cert-manager.io/v1`, and one operator provides that whole group — so they share a
@@ -19,6 +28,89 @@ THE CONDITION IS THE OR OF EVERY TOGGLE THAT RENDERS A `cert-manager.io/v1`
 OBJECT. Each of the three defaults false, so a render that asks for nothing is
 never refused for a cluster it was never going to touch.
 */}}
+
+{{/*
+THE MIXED RELEASE, REFUSED HERE RATHER THAN HALF-WAY THROUGH AN APPLY (ADR-0787,
+`plans/the-operators-toggle.md`).
+
+`operators.create: true` names a release that installs the five operators and
+NOTHING ELSE. A release that installs an operator AND renders an object of a kind
+that operator provides cannot work, and the reason needs no cluster to check:
+`.Capabilities.APIVersions.Has` is answered from discovery before any template
+renders, so it can never see a CRD the same release is about to create. helm is
+also understood to resolve the kind of every object in a release before it applies
+anything, which would fail such a release mid-apply — that second mechanism is READ
+rather than measured, and nothing here rests on it.
+
+SO THE ADOPTER GETS TWO RELEASES: the operators in one, the estate in the next.
+Without this check the mixed shape is refused anyway, by the cert-manager check
+below, with a message telling the adopter to install cert-manager while cert-manager
+sits in the same release. This check exists to say what is actually wrong.
+
+IT IS DECLARED FIRST, AND THE ORDER IS LOAD-BEARING. `fail` aborts the whole render
+at the FIRST failing check, and every mixed shape trips a capability check too. Move
+this check below them and its refusal never reaches the adopter — the capability
+refusal does, and the diagnosis is lost.
+`test_the_values_check_is_declared_BEFORE_the_capability_checks` is the gate.
+
+IT REFUSES A CASE THAT IS SOMETIMES LEGAL, AND THAT IS ACCEPTED. On a cluster that
+already carries the CRDs, a mixed release would apply fine. Refusing it anyway is
+what makes one values file behave the same on every cluster.
+
+THE FIRST CONJUNCT IS NOT `operators.create`, AND THE DIFFERENCE IS A HOLE. Each
+dependency's `condition:` is `operators.<op>.create,operators.create`, and helm
+reads the FIRST VALID path and stops — so an adopter who sets
+`operators.certManager.create: true` alone installs cert-manager with the register
+key still false. `dig` with the register key as the FALLBACK is that same
+resolution, which is why the guard below uses it. `or .Values.operators.keda.create
+.Values.operators.create` does NOT reproduce it, and reading `operators.create`
+alone misses the sub-key shape entirely.
+`test_a_guard_reading_only_the_register_key_misses_the_sub_key_case` constructs that
+wrong guard and watches the sub-key shape stop being refused.
+
+THE SECOND CONJUNCT IS EVERY OTHER `create` TOGGLE THIS CHART CARRIES, not only the
+ones that render a CRD-backed kind. The rule being enforced is the release SHAPE —
+operators alone, then everything else — and a rule stated over a subset is a rule an
+adopter has to learn the exceptions to. `bootstrap.iamKeys.create` is absent because
+it is nested: `templates/bootstrap-secrets.yaml` renders its block only inside the
+`bootstrap.create` guard that opens the file, so the OR below already covers it.
+
+BOTH LISTS ARE GATED AGAINST THEIR SOURCES rather than kept in step by attention —
+against `Chart.yaml`'s dependencies and against `values.yaml`'s own keys. The plan
+asks for one helper shared with the vendored-CRD guards of its step 2; no such
+helper exists yet, and those two gates stand in for it until one does.
+*/}}
+{{- $operators := .Values.operators }}
+{{- $operatorKeysOn := list }}
+{{- range $operator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator") }}
+{{- if (dig $operator "create" $operators.create $operators) }}
+{{- $operatorKeysOn = append $operatorKeysOn (ternary (printf "operators.%s.create" $operator) "operators.create" (hasKey $operators $operator)) }}
+{{- end }}
+{{- end }}
+{{- $otherKeysOn := list }}
+{{/*
+`index` AND NOT `dig` ON THIS SIDE, and it is not a style choice: `dig` takes a
+`map[string]interface{}` and the ROOT `.Values` is helm's own `chartutil.Values`
+type, so `dig <key> "create" false $.Values` dies with `interface conversion:
+interface {} is common.Values` — measured on helm v4.3.0, 2026-09-25. The operator
+side above passes `.Values.operators`, an ordinary map, which is why `dig` is
+correct there and its fallback semantics are available there.
+*/}}
+{{- range $toggle := (list "bootstrap" "certificates" "edgeTLS" "gatewayListener" "internalCA" "nats" "valkey") }}
+{{- if (index ((index $.Values $toggle) | default dict) "create") }}
+{{- $otherKeysOn = append $otherKeysOn (printf "%s.create" $toggle) }}
+{{- end }}
+{{- end }}
+{{- if and $operatorKeysOn $otherKeysOn }}
+{{- fail (printf (join "" (list
+      "platform: this release installs operators AND renders the estate's own objects, and one release cannot do both. "
+      "%s asked for the operators; %s asked for the objects. "
+      "An object's CustomResourceDefinition has to be registered on the target before the release that needs it renders, "
+      "and a CRD this very release is installing is not — so this would fail part-way through the apply, with the operators in and the objects not. "
+      "Install the operators in a release of their own, with every other create toggle false, then install the estate against the cluster that release leaves behind."))
+      (join ", " (uniq $operatorKeysOn)) (join ", " $otherKeysOn)) }}
+{{- end }}
+
 {{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}
 {{- include "platform.require-api" (dict
       "context" $
