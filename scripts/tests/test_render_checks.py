@@ -210,7 +210,12 @@ def declaration_failures(chart: Path, expected: dict[str, str]) -> list[str]:
     failures = []
     if len(found) != len(expected):
         failures.append(
-            f"expected {len(expected)} render checks declared in the chart, "
+            # "CAPABILITY checks" and not "render checks", because `check_count_failures`
+            # reports a DIFFERENT and larger number under a name that would otherwise be
+            # the same one: the chart declares three render checks, two of which are the
+            # capability checks this function counts. Two gates printing one phrase with
+            # two numbers is a reader believing whichever they meet first.
+            f"expected {len(expected)} capability checks declared in the chart, "
             f"found {len(found)}: expected {sorted(expected)}, found {sorted(found)}"
         )
     if found != expected:
@@ -624,8 +629,8 @@ def test_deleting_a_check_from_the_chart_reddens_the_count(tmp_path):
     message = "\n".join(failures)
     assert failures, "a check was deleted from the chart and the harness said nothing"
     assert (
-        f"expected {EXPECTED_CAPABILITY_CHECKS} render checks declared in the chart, found 0"
-        in message
+        f"expected {EXPECTED_CAPABILITY_CHECKS} capability checks declared in the chart, "
+        f"found 0" in message
     )
 
 
