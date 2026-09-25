@@ -1440,39 +1440,23 @@ def test_the_chart_declares_the_condition_this_suite_expects_for_each_dependency
     carrying another dependency's `condition:` outright — that test reads
     names, never conditions — and a chart in that state renders the wrong
     operator for an adopter's per-operator override while 154 unrelated tests
-    stay green. See `test_a_transposed_condition_sends_the_wrong_operator`
-    below for the reproduced failure this gate now catches.
+    stay green.
+
+    THE FAILURE THIS GATE CATCHES, NAMED. With `cert-manager`'s and
+    `argo-cd`'s conditions transposed, an adopter who sets
+    `operators.certManager.create=true` (with `operators.create=false`) gets
+    Argo CD — 53 objects — where they asked for cert-manager — 50.
+
+    THE RED CASE IS MANUAL, AND SAID SO PLAINLY. Transposing the two
+    `condition:` lines in `chart/Chart.yaml` by hand and rerunning this
+    assertion was reproduced on 2026-09-25; the assertion above goes red on
+    that edit, naming both `cert-manager` and `argo-cd`. There is no second,
+    automated test constructing that transposition — this docstring is the
+    only place the red case is recorded.
     """
     assert declared_conditions(CHART) == EXPECTED_DECLARED_CONDITIONS, declared_conditions(
         CHART
     )
-
-
-def test_a_transposed_condition_sends_the_wrong_operator():
-    """The red case for the gate above, constructed rather than rendered.
-
-    PURE INPUTS, so this needs no helm and no network. It proves WHY order
-    matters, not merely that two dicts differ: with `cert-manager` and
-    `argo-cd`'s conditions swapped, an adopter who sets
-    `operators.certManager.create=true` (with `operators.create=false`) would
-    have that key read by the `argo-cd` dependency instead of `cert-manager`'s
-    — because helm evaluates only the FIRST valid path — and would get Argo CD
-    (53 objects) where they asked for cert-manager (50). This was reproduced
-    for real by transposing the two conditions in `chart/Chart.yaml` and
-    rendering both `--set` shapes; the assertion below is the same transposition
-    held as data, so the gate that would have caught it runs on every commit
-    without helm.
-    """
-    conditions = dict(EXPECTED_DECLARED_CONDITIONS)
-    conditions["cert-manager"], conditions["argo-cd"] = (
-        conditions["argo-cd"],
-        conditions["cert-manager"],
-    )
-    assert conditions != EXPECTED_DECLARED_CONDITIONS, (
-        "the transposition changed nothing, so it proves nothing"
-    )
-    assert conditions["cert-manager"] == "operators.argoCd.create,operators.create"
-    assert conditions["argo-cd"] == "operators.certManager.create,operators.create"
 
 
 def test_the_package_carries_every_declared_subchart(tmp_path):
