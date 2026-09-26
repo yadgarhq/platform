@@ -707,34 +707,62 @@ def test_a_deleted_operators_key_is_refused_wherever_this_chart_runs(tmp_path):
     print("operators-shape: the deleted key is refused as root AND as a subchart")
 
 
+# THE TWO RANGES A THIRD-PARTY PARENT IS STILL EXPOSED TO, one row each. BOTH are
+# needed: arm two and the register arms stand down as a subchart for the same
+# reason and the residual is now the union of the two, so a test carrying only the
+# older row would go on reporting a pass while the newer half widened underneath
+# it. `create: "yes"` is the register row rather than `create: {}` because it is
+# the truthy one — the vendored CRDs DO render for it, which is a different
+# rendered state from arm two's and worth measuring as such.
+THE_RESIDUAL_ROWS = (
+    ("arm two — a present non-map block", "operators: true\n", 0),
+    ("the register arm — a present non-bool create", 'operators:\n  create: "yes"\n', 18),
+)
+
+
 def test_a_parent_with_no_refusal_is_the_residual_this_chart_documents(tmp_path):
     """THE HOLE, MEASURED RATHER THAN ASSERTED AWAY.
 
     A third-party parent carrying no refusal of its own gets the silent
-    fail-open: helm leaves every operator dependency enabled, this chart's own
-    vendored CRDs skip, and nothing says so. This is not a gate on desired
-    behaviour — it is the measurement that keeps the residual honest, and it
-    reddens if a future change closes it, at which point delete this test and
-    the paragraph in the module docstring together.
+    fail-open: helm leaves every operator dependency enabled and nothing says so.
+    This is not a gate on desired behaviour — it is the measurement that keeps the
+    residual honest, and it reddens if a future change closes it, at which point
+    delete this test and the paragraphs in `render-checks.yaml` together.
+
+    ONE ROW PER RANGE THAT STANDS DOWN AS A SUBCHART, and the vendored-CRD count
+    differs between them, which is the point of carrying both. Arm two's shapes
+    make the whole block unreadable, so the helper skips and NO vendored CRD
+    renders. The register arm's truthy shapes leave the block readable, so all
+    eighteen render — beside five operators the adopter did not ask for.
     """
     parent = parent_around(tmp_path, with_refusal=False)
-    result = render_under_parent(tmp_path, parent, "bool-true", "true")
-    assert result.returncode == 0, result.stderr
-    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
-        assert raise_text not in result.stderr, result.stderr
-    assert vendored_crd_names(result.stdout) == [], (
-        "the vendored CRDs rendered under an unusable `operators`, so the helper "
-        "is not skipping"
-    )
-    rendered = len(documents(result.stdout))
-    assert rendered > 0, (
-        "nothing rendered at all, so this case no longer measures the fail-open "
-        "it exists to record"
-    )
-    print(
-        f"operators-shape: a bare parent renders {rendered} objects and 0 vendored "
-        f"CRDs — the documented residual"
-    )
+    for label, body, expected_crds in THE_RESIDUAL_ROWS:
+        result = render_under_parent_body(
+            tmp_path, parent, label.replace(" ", "-").replace("—", "-"), body
+        )
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, f"{label}: {result.stderr}"
+        names = vendored_crd_names(result.stdout)
+        assert len(names) == expected_crds, (
+            f"{label} rendered {len(names)} vendored CRDs, expected {expected_crds}: "
+            f"{names}"
+        )
+        rendered = len(documents(result.stdout))
+        assert rendered > 0, (
+            f"{label} rendered nothing at all, so this case no longer measures the "
+            f"fail-open it exists to record"
+        )
+        arrived = subchart_documents(result.stdout)
+        assert arrived > 100, (
+            f"{label} rendered {arrived} documents from the operator subcharts, so "
+            f"the fail-open this case records did not happen"
+        )
+        print(
+            f"operators-shape: a bare parent renders {rendered} objects, "
+            f"{len(names)} vendored CRDs and {arrived} subchart documents for "
+            f"{label} — the documented residual"
+        )
 
 
 # ═══ THE GREEN SIDE: THE GUARD CHANGED NO USABLE VALUE ═══════════════════════
@@ -1263,7 +1291,12 @@ def subchart_documents(stdout: str) -> int:
     lines themselves, which no quoted description contains at column zero.
     """
     return sum(
-        1 for line in stdout.splitlines() if line.startswith("# Source: platform/charts/")
+        1
+        for line in stdout.splitlines()
+        # MATCHED ON THE SEGMENT AND NOT ON THE WHOLE PREFIX, because this chart
+        # is `platform/charts/...` as the root and `<parent>/charts/platform/
+        # charts/...` under a parent, and both are counted here.
+        if line.startswith("# Source: ") and "platform/charts/" in line
     )
 
 

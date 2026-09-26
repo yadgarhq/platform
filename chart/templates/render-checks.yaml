@@ -116,9 +116,12 @@ identically on helm v3.20.2 and v4.3.0.
 
 THE RESIDUAL, STATED RATHER THAN HIDDEN: a parent that pins this chart and
 carries NO refusal of its own gets the silent fail-open for the six present
-non-map shapes. `yadgarhq/chart` is the only parent this estate ships and it
-carries one. `test_a_parent_with_no_refusal_is_the_residual_this_chart_documents`
-measures that hole rather than asserting it away.
+non-map shapes — and, since the register arms below stand down as a subchart
+too, for every present non-bool `operators.create` and `nats.create` as well.
+`yadgarhq/chart` is the only parent this estate ships and it carries refusals for
+both ranges. `test_a_parent_with_no_refusal_is_the_residual_this_chart_documents`
+measures the whole hole rather than asserting it away, and it carries a row from
+each range so widening the code without widening that test goes red.
 
 BOTH ARMS ARE DECLARED FIRST, BEFORE THE MIXED-RELEASE REFUSAL AND BEFORE THE
 CAPABILITY CHECKS, and the order is load-bearing for the same reason theirs is:
@@ -206,6 +209,11 @@ executes the deepest template path first, so a parent `fail` can never pre-empt 
 child's. Refusing here unconditionally would make `yadgarhq/chart`'s own clause
 dead code and make its test pass against THIS message.
 `test_the_parent_is_the_one_that_names_a_non_bool_register_key` is the gate.
+
+AND IT TAKES ARM TWO'S RESIDUAL WITH IT, WIDENED. A third-party parent carrying
+no refusal of its own now gets the silent fail-open for these shapes as well as
+for arm two's six, which is stated here and measured there rather than left for
+the next reader to work out from the branch condition.
 
 AND THE DELETED BRANCH IS UNCONDITIONAL, because the parent is STRUCTURALLY blind
 to it. Not blind in arm one's way — a parent probe reads `hasKey
