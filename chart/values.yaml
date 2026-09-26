@@ -713,6 +713,15 @@ preflight:
   # curlimages/curl:8.16.0
   image: curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
 
+  # AND BOTH PROBE JOBS OVERRIDE THIS IMAGE'S OWN `User-Agent`. The API server
+  # pretty-prints for any client whose agent begins with `curl`, and `grep` above
+  # is a LINE matcher over a body the scripts split on the literal `},{` — so the
+  # default agent of the very image this key names is what made both probes fail
+  # against a healthy cluster. Each template sets `USER_AGENT` and asks for
+  # `pretty=false`, and records the measurement there. It is a LITERAL in the two
+  # templates rather than a key here: its whole job is to NOT begin with `curl`
+  # and to NOT contain `mozilla`, so a key would only be a weakening direction.
+
   # ZERO RETRIES, and that is the opposite of the bootstrap Jobs' four. A retry is
   # worth taking when the failure is transient and the work is idempotent; here the
   # failure is "the operator is not running", which does not become "it is running"
