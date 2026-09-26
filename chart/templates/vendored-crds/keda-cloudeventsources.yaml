@@ -1,0 +1,221 @@
+{{/*
+VENDORED CustomResourceDefinition, EXTRACTED from `keda` 2.20.2 and re-emitted as
+this chart's own template. Upstream source: `keda/templates/crds/crd-cloudeventsources.yaml`.
+
+WHY THIS COPY EXISTS (ADR-0787, ADR-0792 condition 1). KEDA 2.20.2 ships its six
+CRDs with NO uninstall protection: `grep -rn 'resource-policy'` over the upstream
+chart returns no match, and it offers no `crds.keep` key. So `helm uninstall` of a
+KEDA release deletes this CRD, and the API server garbage-collects every object of
+its kind in the cluster along with it. The `helm.sh/resource-policy: keep`
+annotation below is that protection.
+
+IT CANNOT BE ADDED AT RELEASE TIME, which is what makes the copy permissible
+rather than merely convenient. Resolution copies the upstream bytes faithfully —
+that is the whole point of it — so no dependency resolution the release pipeline
+performs can attach an annotation to another chart's object. `keda.crds.install`
+is false in `chart/values.yaml` for the same reason: `platform` owns these six,
+and the upstream copies would collide with them.
+
+WHAT WOULD DELETE THIS FILE (ADR-0792 condition 4, the revisit trigger). KEDA
+shipping uninstall protection for its own CRDs — a `crds.keep` key, or the
+annotation in the upstream document. At that point the extraction has no subject
+and these copies should be DELETED rather than re-vendored. Do not renew them out
+of habit.
+
+`scripts/tests/test_vendored_crds.py` is the drift gate ADR-0792 condition 3
+requires, and it is the condition of this commit rather than a companion to it. It
+renders the pin `chart/Chart.yaml` declares, strips the fields that legitimately
+differ, and reddens when this document and that render disagree.
+
+THE GUARD BELOW IS THIS FILE'S OWN. It mirrors the `condition:` of the dependency
+this CRD belongs to; it is NOT `operators.create` over the directory. `dig` with
+`operators.create` as the fallback reproduces helm's own semantics — helm reads
+the FIRST valid path of a comma-separated `condition:` and ignores the rest — so
+an unset `operators.keda.create` defers to the register key and a set one wins.
+`or` does NOT reproduce it: `or .Values.operators.keda.create
+.Values.operators.create` is true where the dependency's condition is false, which
+applies KEDA's CRDs to a cluster running no KEDA at all.
+*/}}
+{{- if (dig "keda" "create" .Values.operators.create .Values.operators) }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/name: keda-operator
+    helm.sh/chart: keda-2.20.2
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.20.2
+  name: cloudeventsources.eventing.keda.sh
+spec:
+  group: eventing.keda.sh
+  names:
+    kind: CloudEventSource
+    listKind: CloudEventSourceList
+    plural: cloudeventsources
+    singular: cloudeventsource
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Active")].status
+      name: Active
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: CloudEventSource defines how a KEDA event will be sent to event sink
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation of an object.
+
+              Servers should convert recognized schemas to the latest internal value, and
+
+              may reject unrecognized values.
+
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this object represents.
+
+              Servers may infer this from the endpoint the client submits requests to.
+
+              Cannot be updated.
+
+              In CamelCase.
+
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CloudEventSourceSpec defines the spec of CloudEventSource
+            properties:
+              authenticationRef:
+                description: 'AuthenticationRef points to the TriggerAuthentication or ClusterTriggerAuthentication object that
+
+                  is used to authenticate the scaler with the environment'
+                properties:
+                  kind:
+                    description: Kind of the resource being referred to. Defaults to TriggerAuthentication.
+                    enum:
+                    - TriggerAuthentication
+                    - ClusterTriggerAuthentication
+                    type: string
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              clusterName:
+                type: string
+              destination:
+                description: Destination defines the various ways to emit events
+                properties:
+                  azureEventGridTopic:
+                    properties:
+                      endpoint:
+                        type: string
+                    required:
+                    - endpoint
+                    type: object
+                  http:
+                    properties:
+                      uri:
+                        type: string
+                    required:
+                    - uri
+                    type: object
+                type: object
+              eventSubscription:
+                description: EventSubscription defines filters for events
+                properties:
+                  excludedEventTypes:
+                    items:
+                      enum:
+                      - keda.scaledobject.ready.v1
+                      - keda.scaledobject.failed.v1
+                      - keda.scaledobject.removed.v1
+                      - keda.scaledobject.paused.v1
+                      - keda.scaledobject.unpaused.v1
+                      - keda.scaledjob.ready.v1
+                      - keda.scaledjob.failed.v1
+                      - keda.scaledjob.removed.v1
+                      - keda.scaledjob.paused.v1
+                      - keda.scaledjob.unpaused.v1
+                      - keda.scaledjob.rolloutcleanup.started.v1
+                      - keda.scaledjob.rolloutcleanup.completed.v1
+                      - keda.scaledjob.rolloutcleanup.failed.v1
+                      - keda.authentication.triggerauthentication.created.v1
+                      - keda.authentication.triggerauthentication.updated.v1
+                      - keda.authentication.triggerauthentication.removed.v1
+                      - keda.authentication.clustertriggerauthentication.created.v1
+                      - keda.authentication.clustertriggerauthentication.updated.v1
+                      - keda.authentication.clustertriggerauthentication.removed.v1
+                      type: string
+                    type: array
+                  includedEventTypes:
+                    items:
+                      enum:
+                      - keda.scaledobject.ready.v1
+                      - keda.scaledobject.failed.v1
+                      - keda.scaledobject.removed.v1
+                      - keda.scaledobject.paused.v1
+                      - keda.scaledobject.unpaused.v1
+                      - keda.scaledjob.ready.v1
+                      - keda.scaledjob.failed.v1
+                      - keda.scaledjob.removed.v1
+                      - keda.scaledjob.paused.v1
+                      - keda.scaledjob.unpaused.v1
+                      - keda.scaledjob.rolloutcleanup.started.v1
+                      - keda.scaledjob.rolloutcleanup.completed.v1
+                      - keda.scaledjob.rolloutcleanup.failed.v1
+                      - keda.authentication.triggerauthentication.created.v1
+                      - keda.authentication.triggerauthentication.updated.v1
+                      - keda.authentication.triggerauthentication.removed.v1
+                      - keda.authentication.clustertriggerauthentication.created.v1
+                      - keda.authentication.clustertriggerauthentication.updated.v1
+                      - keda.authentication.clustertriggerauthentication.removed.v1
+                      type: string
+                    type: array
+                type: object
+            required:
+            - destination
+            type: object
+          status:
+            description: CloudEventSourceStatus defines the observed state of CloudEventSource
+            properties:
+              conditions:
+                description: Conditions an array representation to store multiple Conditions
+                items:
+                  description: Condition to store the condition state
+                  properties:
+                    message:
+                      description: A human readable message indicating details about the transition.
+                      type: string
+                    reason:
+                      description: The reason for the condition's last transition.
+                      type: string
+                    status:
+                      description: Status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: Type of condition
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

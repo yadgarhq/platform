@@ -10,6 +10,32 @@ repos:
         args: [--fix=lf]
       - id: check-merge-conflict
       - id: check-added-large-files
+        # `chart/templates/vendored-crds/` is EXCLUDED, and this is the ONLY hook
+        # it is excluded from. No `args:` sits here, so the limit is the 500 kB
+        # default, and `keda-scaledjobs.yaml` is 614607 bytes — KEDA's `ScaledJob`
+        # CRD embeds the whole `batch/v1` JobSpec and, inside it, a PodSpec.
+        #
+        # THE SIZE IS UPSTREAM'S SCHEMA, NOT THIS REPOSITORY'S FORMATTING, and that
+        # was measured rather than assumed. Re-serialising the same parsed document
+        # with `yaml.safe_dump(sort_keys=False)` gives 754582 bytes in block style
+        # and 696190 with `default_flow_style=None` — both LARGER than the committed
+        # file, which is already the readable block form. The only serialisation
+        # that comes in under the limit is `default_flow_style=True`, a single
+        # 420322-byte line no reviewer can read a diff of.
+        #
+        # `--maxkb` IS REFUSED as the fix. Raising the limit would blind this hook
+        # on every other path in the repository to buy one directory's exemption,
+        # which is the opposite trade.
+        #
+        # WHY THE EXEMPTION IS SAFE, AND IT IS NOT "these files are fine". This
+        # directory is the one place here where an oversized or stray file CANNOT
+        # survive. `scripts/tests/test_vendored_crds.py` asserts name-set equality
+        # and per-document digest equality against a fresh render of the pinned
+        # upstream, so anything in here that is not a vendored CRD matching that
+        # render reddens the suite — including a file nobody meant to add. The
+        # large-file guard's purpose is already served on this path by a strictly
+        # stronger check, which is why it is dropped HERE and nowhere else.
+        exclude: ^chart/templates/vendored-crds/
       - id: check-yaml
         # Helm templates are Go templates that HAPPEN to look like YAML, so a
         # real parser rejects them. `helm lint` and `helm template` below are the

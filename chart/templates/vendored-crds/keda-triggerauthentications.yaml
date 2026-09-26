@@ -1,0 +1,669 @@
+{{/*
+VENDORED CustomResourceDefinition, EXTRACTED from `keda` 2.20.2 and re-emitted as
+this chart's own template. Upstream source: `keda/templates/crds/crd-triggerauthentications.yaml`.
+
+WHY THIS COPY EXISTS (ADR-0787, ADR-0792 condition 1). KEDA 2.20.2 ships its six
+CRDs with NO uninstall protection: `grep -rn 'resource-policy'` over the upstream
+chart returns no match, and it offers no `crds.keep` key. So `helm uninstall` of a
+KEDA release deletes this CRD, and the API server garbage-collects every object of
+its kind in the cluster along with it. The `helm.sh/resource-policy: keep`
+annotation below is that protection.
+
+IT CANNOT BE ADDED AT RELEASE TIME, which is what makes the copy permissible
+rather than merely convenient. Resolution copies the upstream bytes faithfully —
+that is the whole point of it — so no dependency resolution the release pipeline
+performs can attach an annotation to another chart's object. `keda.crds.install`
+is false in `chart/values.yaml` for the same reason: `platform` owns these six,
+and the upstream copies would collide with them.
+
+WHAT WOULD DELETE THIS FILE (ADR-0792 condition 4, the revisit trigger). KEDA
+shipping uninstall protection for its own CRDs — a `crds.keep` key, or the
+annotation in the upstream document. At that point the extraction has no subject
+and these copies should be DELETED rather than re-vendored. Do not renew them out
+of habit.
+
+`scripts/tests/test_vendored_crds.py` is the drift gate ADR-0792 condition 3
+requires, and it is the condition of this commit rather than a companion to it. It
+renders the pin `chart/Chart.yaml` declares, strips the fields that legitimately
+differ, and reddens when this document and that render disagree.
+
+THE GUARD BELOW IS THIS FILE'S OWN. It mirrors the `condition:` of the dependency
+this CRD belongs to; it is NOT `operators.create` over the directory. `dig` with
+`operators.create` as the fallback reproduces helm's own semantics — helm reads
+the FIRST valid path of a comma-separated `condition:` and ignores the rest — so
+an unset `operators.keda.create` defers to the register key and a set one wins.
+`or` does NOT reproduce it: `or .Values.operators.keda.create
+.Values.operators.create` is true where the dependency's condition is false, which
+applies KEDA's CRDs to a cluster running no KEDA at all.
+*/}}
+{{- if (dig "keda" "create" .Values.operators.create .Values.operators) }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/name: keda-operator
+    helm.sh/chart: keda-2.20.2
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.20.2
+  name: triggerauthentications.keda.sh
+spec:
+  group: keda.sh
+  names:
+    kind: TriggerAuthentication
+    listKind: TriggerAuthenticationList
+    plural: triggerauthentications
+    shortNames:
+    - ta
+    - triggerauth
+    singular: triggerauthentication
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.podIdentity.provider
+      name: PodIdentity
+      type: string
+    - jsonPath: .spec.secretTargetRef[*].name
+      name: Secret
+      type: string
+    - jsonPath: .spec.env[*].name
+      name: Env
+      type: string
+    - jsonPath: .spec.hashiCorpVault.address
+      name: VaultAddress
+      type: string
+    - jsonPath: .status.scaledobjects
+      name: ScaledObjects
+      priority: 1
+      type: string
+    - jsonPath: .status.scaledjobs
+      name: ScaledJobs
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: TriggerAuthentication defines how a trigger can authenticate
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation of an object.
+
+              Servers should convert recognized schemas to the latest internal value, and
+
+              may reject unrecognized values.
+
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this object represents.
+
+              Servers may infer this from the endpoint the client submits requests to.
+
+              Cannot be updated.
+
+              In CamelCase.
+
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TriggerAuthenticationSpec defines the various ways to authenticate
+            properties:
+              awsSecretManager:
+                description: AwsSecretManager is used to authenticate using AwsSecretManager
+                properties:
+                  credentials:
+                    properties:
+                      accessKey:
+                        properties:
+                          valueFrom:
+                            properties:
+                              secretKeyRef:
+                                properties:
+                                  key:
+                                    type: string
+                                  name:
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                            required:
+                            - secretKeyRef
+                            type: object
+                        required:
+                        - valueFrom
+                        type: object
+                      accessSecretKey:
+                        properties:
+                          valueFrom:
+                            properties:
+                              secretKeyRef:
+                                properties:
+                                  key:
+                                    type: string
+                                  name:
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                            required:
+                            - secretKeyRef
+                            type: object
+                        required:
+                        - valueFrom
+                        type: object
+                      accessToken:
+                        properties:
+                          valueFrom:
+                            properties:
+                              secretKeyRef:
+                                properties:
+                                  key:
+                                    type: string
+                                  name:
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                            required:
+                            - secretKeyRef
+                            type: object
+                        required:
+                        - valueFrom
+                        type: object
+                    required:
+                    - accessKey
+                    - accessSecretKey
+                    type: object
+                  podIdentity:
+                    description: 'AuthPodIdentity allows users to select the platform native identity
+
+                      mechanism'
+                    properties:
+                      externalID:
+                        description: ExternalID sets the External ID to be used when assuming an identity. This is only applicable when using AWS pod identity with a RoleArn.
+                        type: string
+                      identityAuthorityHost:
+                        description: Set identityAuthorityHost to override the default Azure authority host. If this is set, then the IdentityTenantID must also be set
+                        type: string
+                      identityId:
+                        type: string
+                      identityOwner:
+                        description: IdentityOwner configures which identity has to be used during auto discovery, keda or the scaled workload. Mutually exclusive with roleArn
+                        enum:
+                        - keda
+                        - workload
+                        type: string
+                      identityTenantId:
+                        description: Set identityTenantId to override the default Azure tenant id. If this is set, then the IdentityID must also be set
+                        type: string
+                      provider:
+                        description: PodIdentityProvider contains the list of providers
+                        enum:
+                        - azure-workload
+                        - gcp
+                        - aws
+                        - aws-eks
+                        - none
+                        type: string
+                      roleArn:
+                        description: RoleArn sets the AWS RoleArn to be used. Mutually exclusive with IdentityOwner
+                        type: string
+                    required:
+                    - provider
+                    type: object
+                  region:
+                    type: string
+                  secrets:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        parameter:
+                          type: string
+                        secretKey:
+                          type: string
+                        versionId:
+                          type: string
+                        versionStage:
+                          type: string
+                      required:
+                      - name
+                      - parameter
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - secrets
+                type: object
+              azureKeyVault:
+                description: AzureKeyVault is used to authenticate using Azure Key Vault
+                properties:
+                  cloud:
+                    properties:
+                      activeDirectoryEndpoint:
+                        type: string
+                      keyVaultResourceURL:
+                        type: string
+                      type:
+                        type: string
+                    required:
+                    - type
+                    type: object
+                  credentials:
+                    properties:
+                      clientId:
+                        type: string
+                      clientSecret:
+                        properties:
+                          valueFrom:
+                            properties:
+                              secretKeyRef:
+                                properties:
+                                  key:
+                                    type: string
+                                  name:
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                            required:
+                            - secretKeyRef
+                            type: object
+                        required:
+                        - valueFrom
+                        type: object
+                      tenantId:
+                        type: string
+                    required:
+                    - clientId
+                    - clientSecret
+                    - tenantId
+                    type: object
+                  podIdentity:
+                    description: 'AuthPodIdentity allows users to select the platform native identity
+
+                      mechanism'
+                    properties:
+                      externalID:
+                        description: ExternalID sets the External ID to be used when assuming an identity. This is only applicable when using AWS pod identity with a RoleArn.
+                        type: string
+                      identityAuthorityHost:
+                        description: Set identityAuthorityHost to override the default Azure authority host. If this is set, then the IdentityTenantID must also be set
+                        type: string
+                      identityId:
+                        type: string
+                      identityOwner:
+                        description: IdentityOwner configures which identity has to be used during auto discovery, keda or the scaled workload. Mutually exclusive with roleArn
+                        enum:
+                        - keda
+                        - workload
+                        type: string
+                      identityTenantId:
+                        description: Set identityTenantId to override the default Azure tenant id. If this is set, then the IdentityID must also be set
+                        type: string
+                      provider:
+                        description: PodIdentityProvider contains the list of providers
+                        enum:
+                        - azure-workload
+                        - gcp
+                        - aws
+                        - aws-eks
+                        - none
+                        type: string
+                      roleArn:
+                        description: RoleArn sets the AWS RoleArn to be used. Mutually exclusive with IdentityOwner
+                        type: string
+                    required:
+                    - provider
+                    type: object
+                  secrets:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        parameter:
+                          type: string
+                        version:
+                          type: string
+                      required:
+                      - name
+                      - parameter
+                      type: object
+                    minItems: 1
+                    type: array
+                  vaultUri:
+                    type: string
+                required:
+                - secrets
+                - vaultUri
+                type: object
+              boundServiceAccountToken:
+                items:
+                  properties:
+                    parameter:
+                      type: string
+                    serviceAccountName:
+                      type: string
+                  required:
+                  - parameter
+                  - serviceAccountName
+                  type: object
+                type: array
+              configMapTargetRef:
+                items:
+                  description: AuthConfigMapTargetRef is used to authenticate using a reference to a config map
+                  properties:
+                    key:
+                      type: string
+                    name:
+                      type: string
+                    parameter:
+                      type: string
+                  required:
+                  - key
+                  - name
+                  - parameter
+                  type: object
+                type: array
+              env:
+                items:
+                  description: 'AuthEnvironment is used to authenticate using environment variables
+
+                    in the destination ScaleTarget spec'
+                  properties:
+                    containerName:
+                      type: string
+                    name:
+                      type: string
+                    parameter:
+                      type: string
+                  required:
+                  - name
+                  - parameter
+                  type: object
+                type: array
+              filePath:
+                description: 'FilePath specifies a file containing auth parameters as JSON map[string]string.
+
+                  When set, auth params are read directly from this file instead.'
+                type: string
+              gcpSecretManager:
+                properties:
+                  credentials:
+                    properties:
+                      clientSecret:
+                        properties:
+                          valueFrom:
+                            properties:
+                              secretKeyRef:
+                                properties:
+                                  key:
+                                    type: string
+                                  name:
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                            required:
+                            - secretKeyRef
+                            type: object
+                        required:
+                        - valueFrom
+                        type: object
+                    required:
+                    - clientSecret
+                    type: object
+                  podIdentity:
+                    description: 'AuthPodIdentity allows users to select the platform native identity
+
+                      mechanism'
+                    properties:
+                      externalID:
+                        description: ExternalID sets the External ID to be used when assuming an identity. This is only applicable when using AWS pod identity with a RoleArn.
+                        type: string
+                      identityAuthorityHost:
+                        description: Set identityAuthorityHost to override the default Azure authority host. If this is set, then the IdentityTenantID must also be set
+                        type: string
+                      identityId:
+                        type: string
+                      identityOwner:
+                        description: IdentityOwner configures which identity has to be used during auto discovery, keda or the scaled workload. Mutually exclusive with roleArn
+                        enum:
+                        - keda
+                        - workload
+                        type: string
+                      identityTenantId:
+                        description: Set identityTenantId to override the default Azure tenant id. If this is set, then the IdentityID must also be set
+                        type: string
+                      provider:
+                        description: PodIdentityProvider contains the list of providers
+                        enum:
+                        - azure-workload
+                        - gcp
+                        - aws
+                        - aws-eks
+                        - none
+                        type: string
+                      roleArn:
+                        description: RoleArn sets the AWS RoleArn to be used. Mutually exclusive with IdentityOwner
+                        type: string
+                    required:
+                    - provider
+                    type: object
+                  secrets:
+                    items:
+                      properties:
+                        id:
+                          type: string
+                        parameter:
+                          type: string
+                        version:
+                          type: string
+                      required:
+                      - id
+                      - parameter
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - secrets
+                type: object
+              hashiCorpVault:
+                description: HashiCorpVault is used to authenticate using Hashicorp Vault
+                properties:
+                  address:
+                    type: string
+                  authentication:
+                    description: VaultAuthentication contains the list of Hashicorp Vault authentication methods
+                    enum:
+                    - token
+                    - kubernetes
+                    type: string
+                  credential:
+                    description: Credential defines the Hashicorp Vault credentials depending on the authentication method
+                    properties:
+                      serviceAccount:
+                        type: string
+                      serviceAccountName:
+                        type: string
+                      token:
+                        type: string
+                    type: object
+                  mount:
+                    type: string
+                  namespace:
+                    type: string
+                  role:
+                    type: string
+                  secrets:
+                    items:
+                      description: VaultSecret defines the mapping between the path of the secret in Vault to the parameter
+                      properties:
+                        key:
+                          type: string
+                        parameter:
+                          type: string
+                        path:
+                          type: string
+                        pkiData:
+                          properties:
+                            altNames:
+                              type: string
+                            commonName:
+                              type: string
+                            format:
+                              type: string
+                            ipSans:
+                              type: string
+                            otherSans:
+                              type: string
+                            ttl:
+                              type: string
+                            uriSans:
+                              type: string
+                          type: object
+                        type:
+                          description: VaultSecretType defines the type of vault secret
+                          enum:
+                          - ''
+                          - secretV2
+                          - secret
+                          - pki
+                          type: string
+                      required:
+                      - key
+                      - parameter
+                      - path
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - address
+                - authentication
+                - secrets
+                type: object
+              oauth2:
+                properties:
+                  clientId:
+                    type: string
+                  clientSecret:
+                    properties:
+                      valueFrom:
+                        properties:
+                          secretKeyRef:
+                            properties:
+                              key:
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                        required:
+                        - secretKeyRef
+                        type: object
+                    required:
+                    - valueFrom
+                    type: object
+                  scopes:
+                    items:
+                      type: string
+                    type: array
+                  tokenUrl:
+                    type: string
+                  tokenUrlParams:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  type:
+                    default: clientCredentials
+                    enum:
+                    - clientCredentials
+                    type: string
+                required:
+                - clientId
+                - tokenUrl
+                - type
+                type: object
+              podIdentity:
+                description: 'AuthPodIdentity allows users to select the platform native identity
+
+                  mechanism'
+                properties:
+                  externalID:
+                    description: ExternalID sets the External ID to be used when assuming an identity. This is only applicable when using AWS pod identity with a RoleArn.
+                    type: string
+                  identityAuthorityHost:
+                    description: Set identityAuthorityHost to override the default Azure authority host. If this is set, then the IdentityTenantID must also be set
+                    type: string
+                  identityId:
+                    type: string
+                  identityOwner:
+                    description: IdentityOwner configures which identity has to be used during auto discovery, keda or the scaled workload. Mutually exclusive with roleArn
+                    enum:
+                    - keda
+                    - workload
+                    type: string
+                  identityTenantId:
+                    description: Set identityTenantId to override the default Azure tenant id. If this is set, then the IdentityID must also be set
+                    type: string
+                  provider:
+                    description: PodIdentityProvider contains the list of providers
+                    enum:
+                    - azure-workload
+                    - gcp
+                    - aws
+                    - aws-eks
+                    - none
+                    type: string
+                  roleArn:
+                    description: RoleArn sets the AWS RoleArn to be used. Mutually exclusive with IdentityOwner
+                    type: string
+                required:
+                - provider
+                type: object
+              secretTargetRef:
+                items:
+                  description: AuthSecretTargetRef is used to authenticate using a reference to a secret
+                  properties:
+                    key:
+                      type: string
+                    name:
+                      type: string
+                    parameter:
+                      type: string
+                  required:
+                  - key
+                  - name
+                  - parameter
+                  type: object
+                type: array
+            type: object
+          status:
+            description: TriggerAuthenticationStatus defines the observed state of TriggerAuthentication
+            properties:
+              scaledjobs:
+                type: string
+              scaledobjects:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}
