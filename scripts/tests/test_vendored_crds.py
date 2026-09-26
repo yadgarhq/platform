@@ -741,7 +741,7 @@ def delete_one_schema_property(path: Path) -> str:
     template is not YAML.
     """
     text = path.read_text()
-    opening = "{{- if (dig "
+    opening = '{{- if (include "platform.operator-create"'
     closing = "{{- end }}\n"
     start = text.index(opening)
     head = text[: text.index("\n", start) + 1]
@@ -876,8 +876,8 @@ def test_every_vendored_file_is_guarded_by_its_own_dependency_condition():
     caught before somebody has to notice a count.
     """
     expected = {
-        "keda": '{{- if (dig "keda" "create" .Values.operators.create .Values.operators) }}',
-        "mariadb": '{{- if (dig "mariadbOperator" "create" .Values.operators.create .Values.operators) }}',
+        "keda": '{{- if (include "platform.operator-create" (dict "context" $ "operator" "keda")) }}',
+        "mariadb": '{{- if (include "platform.operator-create" (dict "context" $ "operator" "mariadbOperator")) }}',
     }
     files = sorted(VENDORED.glob("*.yaml"))
     assert len(files) == EXPECTED_COMPARED, [path.name for path in files]

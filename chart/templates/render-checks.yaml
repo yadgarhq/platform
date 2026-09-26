@@ -4,11 +4,14 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. The mixed-release refusal below is the only
-one of the second kind, and everything that makes a capability check awkward —
-`--api-versions`, the offline-render rule, the default-false rule — does not apply
-to it. Its red and green cases in `scripts/tests/test_render_checks.py` are two
-BARE renders, and that is the design rather than an omission.
+release's own values and nothing else. THREE of the second kind live below — the
+two arms of the `operators` shape refusal and then the mixed-release refusal —
+and everything that makes a capability check awkward — `--api-versions`, the
+offline-render rule, the default-false rule — does not apply to any of them.
+Their red and green cases are BARE renders, and that is the design rather than an
+omission. `scripts/tests/test_render_checks.py` owns the mixed-release pair and
+the count of all three; `scripts/tests/test_operators_shape.py` owns what the two
+shape arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the ten internal leaves and the edge leaf all come from
@@ -28,6 +31,124 @@ THE CONDITION IS THE OR OF EVERY TOGGLE THAT RENDERS A `cert-manager.io/v1`
 OBJECT. Each of the three defaults false, so a render that asks for nothing is
 never refused for a cluster it was never going to touch.
 */}}
+
+{{/*
+AN `operators` KEY NOTHING CAN READ, REFUSED BY NAME — IN TWO ARMS, BECAUSE THE
+TWO CASES ARE VISIBLE FROM DIFFERENT PLACES (ADR-0794).
+
+WHAT AN ADOPTER WRITES. `operators: true` is what somebody writes who thinks the
+toggle IS the block rather than a key inside it; `operators: false` is what
+somebody writes who read "default false" and wanted to be explicit; and a bare
+`operators:` with nothing under it is YAML `null`. Before this refusal existed
+the first two got a Go stack trace out of whichever of the nineteen sites
+reading the key helm reached first — `templates/vendored-crds/` renders before
+this file, because helm executes the deepest template path first.
+
+AND NONE OF THESE SHAPES IS MERELY UNREADABLE. THEY ARE DANGEROUS, and in the
+one direction nobody expects. Each of the five operators is declared
+`condition: operators.<op>.create,operators.create`, and HELM LEAVES A DEPENDENCY
+ENABLED WHEN NO PATH OF A MULTI-PATH `condition:` RESOLVES — measured, not read.
+So a value in any of these shapes does NOT turn the operators off: it installs
+all five, while `templates/_operators.tpl` correctly skips every CRD this chart
+vendored for them and `keda.crds.install` is false. That is KEDA installed with
+none of its own CRDs, at exit 0. Going quiet here would convert a loud failure
+into the silent one ADR-0794 exists to forbid.
+
+THE TEST IS `kindIs "map"` ON THE RAW VALUE, NEVER ON THE RESULT OF A `default`.
+Sprig's `default` substitutes only on an EMPTY value, so `default dict false` is
+`dict` and a kind test after it permits `false`, `0`, `""`, `[]` and an absent
+key — five of the eight shapes, and the five most likely to be written.
+
+── ARM ONE: AN ABSENT KEY, REFUSED WHEREVER THIS CHART RUNS ────────────────────
+
+`hasKey` COMES FIRST AND DRIVES THE BRANCH, because `kindOf` answers `invalid`
+for an absent key and for an explicit `null` alike and cannot tell them apart.
+ADR-0794 prefers `hasKey` for that reason; here it is load-bearing for a case
+that ADR did not anticipate.
+
+AN ABSENT `operators` IS UNAMBIGUOUS HERE, and that is what makes this arm
+unconditional. `chart/values.yaml` SHIPS `operators.create: false`, so the key is
+present in every render this chart was given as written. Helm deletes a key whose
+value is null — and it deletes it WITHOUT putting the chart's own default back —
+so the key can only be missing because somebody wrote `operators: null`, or wrote
+`operators:` with nothing under it.
+
+AND THIS ARM IS THE ONLY THING IN THE ESTATE THAT CAN SEE THAT CASE. Measured
+2026-09-26 on helm v4.3.0, `platform.operators: null` against `yadgarhq/chart`:
+
+  platform.operators omitted   -> 32 objects, 0 from the operator subcharts
+  platform.operators {create: false} -> 32 objects, 0 from the operator subcharts
+  platform.operators null      -> 197 objects, 165 FROM THE OPERATOR SUBCHARTS,
+                                  0 vendored CRDs, EXIT 0
+  platform.operators {create: true}  -> exit 1, the parent refuses the path
+
+The parent cannot refuse the third row. Helm resolves a dependency's `condition:`
+against the RAW user values, where the key is null, so the five operators go in;
+by the time any template runs the key has been deleted, and the parent measures
+`hasKey` FALSE — indistinguishable from an adopter who never wrote the key at
+all, which is every other adopter. The information exists only here, in the one
+chart whose own defaults guarantee the key. So this arm refuses regardless of
+whether this chart is the root or a subchart: deferring it defers to nobody.
+
+── ARM TWO: A PRESENT NON-MAP, REFUSED ONLY WHEN THIS CHART IS THE ROOT ────────
+
+`yadgarhq/chart` pins this chart and carries its own refusal for this case, in
+`chart/templates/_validate.tpl`, naming the path the adopter actually typed:
+`platform.operators`. It CAN see a present non-map — `true`, `false`, `0`, `""`,
+`[]` and `[a]` all survive coalescing — so the diagnosis belongs there.
+
+AND THE SUBCHART'S MESSAGE ALWAYS WINS, which is why this arm must stand down —
+measured on helm v3.20.2 and v4.3.0, 2026-09-26: when a subchart and its parent
+both abort, helm executes the deepest template path first, so a parent `fail` can
+never pre-empt a child's. Refusing here unconditionally would make that parent
+clause dead code AND make its own test pass against THIS message, which is a gate
+that would stay green with the thing it tests deleted. ADR-0794's own rejected
+alternatives put it directly: the child's guard "puts the diagnosis in the wrong
+chart".
+
+A STANDALONE `helm install platform` STILL GETS A KEY NAME rather than a stack
+trace, which is what this arm is for.
+
+`.Template.BasePath` IS THE DISCRIMINATOR AND IT IS MEASURED ON BOTH PINS. As
+the root chart it is `platform/templates`; under a parent it is
+`<parent>/charts/platform/templates`. `contains "/charts/"` separates the two,
+identically on helm v3.20.2 and v4.3.0.
+
+THE RESIDUAL, STATED RATHER THAN HIDDEN: a parent that pins this chart and
+carries NO refusal of its own gets the silent fail-open for the six present
+non-map shapes. `yadgarhq/chart` is the only parent this estate ships and it
+carries one. `test_a_parent_with_no_refusal_is_the_residual_this_chart_documents`
+measures that hole rather than asserting it away.
+
+BOTH ARMS ARE DECLARED FIRST, BEFORE THE MIXED-RELEASE REFUSAL AND BEFORE THE
+CAPABILITY CHECKS, and the order is load-bearing for the same reason theirs is:
+`fail` aborts at the FIRST failing check, and a shape these arms name also
+reaches the ones below them.
+*/}}
+{{- if not (hasKey .Values "operators") }}
+{{- fail (join "" (list
+      "platform: the operators key has been deleted from this release's values, and this chart ships it. "
+      "`operators: null` — or a bare `operators:` with nothing under it — makes helm REMOVE the key rather than "
+      "read it, and the chart's own `operators.create: false` goes with it. "
+      "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
+      "and helm leaves a dependency ENABLED when no path of a multi-path condition resolves — so this does not "
+      "turn the operators off, it installs all five while this chart skips every CustomResourceDefinition it "
+      "vendored for them. "
+      "Write `operators:` as a mapping: `create: false` to leave the operators out, `create: true` to install them "
+      "in a release of their own (ADR-0787). To accept the chart's default, omit the key entirely.")) }}
+{{- else if not (contains "/charts/" .Template.BasePath) }}
+{{- if not (kindIs "map" .Values.operators) }}
+{{- fail (printf (join "" (list
+      "platform: operators is a %s rather than a mapping, so no operator key can be read out of it. "
+      "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
+      "and helm leaves a dependency ENABLED when no path of a multi-path condition resolves — "
+      "so a value in this shape does not turn the operators off, it installs all five while this chart "
+      "skips every CustomResourceDefinition it vendored for them. "
+      "Write `operators:` as a mapping: `create: false` to leave the operators out, `create: true` to install them "
+      "in a release of their own (ADR-0787)."))
+      (kindOf .Values.operators)) }}
+{{- end }}
+{{- end }}{{/* end of the two operators-shape arms */}}
 
 {{/*
 THE MIXED RELEASE, REFUSED HERE RATHER THAN HALF-WAY THROUGH AN APPLY (ADR-0787,
@@ -68,6 +189,13 @@ alone misses the sub-key shape entirely.
 `test_a_guard_reading_only_the_register_key_misses_the_sub_key_case` constructs that
 wrong guard and watches the sub-key shape stop being refused.
 
+THAT RESOLUTION NOW LIVES IN `templates/_operators.tpl`, AND SO DOES THE KEY NAME
+THIS REFUSAL PRINTS. The helper is the shared one the plan asked for: the same
+expression the eighteen vendored CRDs guard on, returning the key that turned the
+operator on rather than a bare boolean, so the name below is derived where the
+resolution is rather than beside it. It carries the type arm too, which is why
+nothing here dereferences `operators` before its shape is known.
+
 THE SECOND CONJUNCT IS EVERY OTHER `create` TOGGLE THIS CHART CARRIES, not only the
 ones that render a CRD-backed kind. The rule being enforced is the release SHAPE —
 operators alone, then everything else — and a rule stated over a subset is a rule an
@@ -76,15 +204,16 @@ it is nested: `templates/bootstrap-secrets.yaml` renders its block only inside t
 `bootstrap.create` guard that opens the file, so the OR below already covers it.
 
 BOTH LISTS ARE GATED AGAINST THEIR SOURCES rather than kept in step by attention —
-against `Chart.yaml`'s dependencies and against `values.yaml`'s own keys. The plan
-asks for one helper shared with the vendored-CRD guards of its step 2; no such
-helper exists yet, and those two gates stand in for it until one does.
+against `Chart.yaml`'s dependencies and against `values.yaml`'s own keys. The plan's
+shared helper NOW EXISTS — `templates/_operators.tpl`, called from here and from
+all eighteen vendored-CRD guards of its step 2 — so the resolution is stated once;
+these two gates keep the LISTS in step, which the helper says nothing about.
 */}}
-{{- $operators := .Values.operators }}
 {{- $operatorKeysOn := list }}
 {{- range $operator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator") }}
-{{- if (dig $operator "create" $operators.create $operators) }}
-{{- $operatorKeysOn = append $operatorKeysOn (ternary (printf "operators.%s.create" $operator) "operators.create" (hasKey $operators $operator)) }}
+{{- $key := (include "platform.operator-create" (dict "context" $ "operator" $operator)) }}
+{{- if $key }}
+{{- $operatorKeysOn = append $operatorKeysOn $key }}
 {{- end }}
 {{- end }}
 {{- $otherKeysOn := list }}
