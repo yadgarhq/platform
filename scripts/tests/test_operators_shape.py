@@ -80,6 +80,8 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
+CHART_MANIFEST = CHART / "Chart.yaml"
+CHART_VALUES = CHART / "values.yaml"
 VENDORED = CHART / "templates" / "vendored-crds"
 RENDER_CHECKS = CHART / "templates" / "render-checks.yaml"
 OPERATORS_PARTIAL = CHART / "templates" / "_operators.tpl"
@@ -140,6 +142,130 @@ THE_DELETED_KEY = ("operators-is-null", "null")
 # the two fired, and two messages sharing a phrase could not discriminate.
 THE_SHAPE_REFUSAL = "rather than a mapping"
 THE_DELETED_KEY_REFUSAL = "the operators key has been deleted"
+
+# ── THE REGISTER KEYS, ONE LEVEL DOWN, AND THE HOLE THE EIGHT SHAPES LEFT ────
+# THE EIGHT SHAPES ABOVE ARE ALL SHAPES OF THE BLOCK. Not one of them is a shape
+# of the key helm's `condition:` actually reads, and the two arms that refuse
+# them stopped exactly one level too high. `operators` written as a MAPPING whose
+# `create` is unusable walked straight through both.
+#
+# THE RULE THIS FILE NOW ENFORCES, AND IT IS WIDER THAN THE ONE THE TWO ARMS
+# WERE WRITTEN FOR. A key that ANY dependency `condition:` reads, and that some
+# chart in the tree DECLARES, must arrive at template time as a BOOL. Neither
+# half of that is optional and neither half is the other:
+#
+#   - `hasKey` alone is not enough. `operators: {create: {}}` is a PRESENT key
+#     and installs all five operators at exit 0 with no warning at all.
+#   - `kindIs "bool"` alone cannot word the message. A deleted key and a `null`
+#     both answer `invalid`, and the adopter needs different advice.
+#
+# PATH COUNT IS IRRELEVANT, which is where the rule ADR-0794 was written under
+# is too narrow. That ADR reasons about the MULTI-path `condition:` the five
+# operators carry. `nats` carries a SINGLE-path `condition: nats.create` and
+# fails open in the same direction for the same reason: helm leaves a dependency
+# ENABLED when the path its condition names does not resolve, and it does not
+# care how many paths were on offer.
+#
+# MEASURED 2026-09-26 against `chart/` as the ROOT chart, on helm v3.20.2 and
+# v4.3.0 alike, both lines identical. Objects from the five operator subcharts,
+# against a baseline of 0:
+#
+#   operators.create: false   ->     0 subchart objects, 0 vendored CRDs   (the default)
+#   operators.create: true    ->   165 subchart objects, 18 vendored CRDs  (asked for)
+#   operators.create: <null>  ->   165 subchart objects,  0 vendored CRDs  no warning
+#   operators.create: {}      ->   165 subchart objects,  0 vendored CRDs  no warning
+#   operators.create: 0       ->   165 subchart objects,  0 vendored CRDs  warns
+#   operators.create: ""      ->   165 subchart objects,  0 vendored CRDs  warns
+#   operators.create: []      ->   165 subchart objects,  0 vendored CRDs  warns
+#   operators.create: "yes"   ->   165 subchart objects, 18 vendored CRDs  warns
+#   operators.create: "no"    ->   165 subchart objects, 18 vendored CRDs  warns
+#   operators.create: 1       ->   165 subchart objects, 18 vendored CRDs  warns
+#
+# `"no"` INSTALLS ALL FIVE, and that row alone settles the argument. Every shape
+# but the two bools installs cert-manager, KEDA, argo-cd, Envoy Gateway and
+# mariadb-operator CLUSTER-WIDE; the truthy ones at least bring the vendored
+# CRDs, and the falsy ones leave KEDA and mariadb without theirs. ADR-0787
+# defaults the toggle false because a second cert-manager "can break the existing
+# tenant's certificate issuance".
+#
+# TWO OF THE TEN ARE NOT EVEN WARNED ABOUT. helm emits `Condition path
+# 'operators.create' ... returned non-bool value` for a scalar it cannot read,
+# and NOTHING for a deleted key or for `{}`. So the loudest signal available to
+# an adopter is absent in exactly the two rows they are most likely to write.
+#
+# EACH ROW: (name, what is written under `operators:`, the kind reported).
+THE_REGISTER_KEY_IS_NOT_A_BOOL = (
+    ("operators-create-is-the-yaml-yes-string", '"yes"', "string"),
+    ("operators-create-is-the-yaml-no-string", '"no"', "string"),
+    ("operators-create-is-zero", "0", "float64"),
+    ("operators-create-is-one", "1", "float64"),
+    ("operators-create-is-an-empty-string", '""', "string"),
+    ("operators-create-is-an-empty-list", "[]", "slice"),
+    ("operators-create-is-an-empty-map", "{}", "map"),
+)
+
+# THE ELEVENTH SHAPE, AND IT IS THE ONE THAT NEEDS ITS OWN WORDING. `create:`
+# with nothing after it deletes the key — `hasKey` FALSE — where every row above
+# leaves it present and unusable.
+THE_DELETED_REGISTER_KEY = ("operators-create-is-null", "")
+
+# ── THE SAME CLASS ON THE BROKER, WHICH CARRIES A SINGLE-PATH CONDITION ──────
+# `nats` IS THE FOURTH MEMBER, and finding it is what widened the rule above.
+# Measured the same day, the same two helm lines, against `chart/` as the root.
+# Documents from the `nats` subchart, against a baseline of 0:
+#
+#   nats.create: false   -> 0 subchart docs                       (the default)
+#   nats.create: true    -> 5 subchart docs + the NetworkPolicy   (asked for)
+#   nats.create: <null>  -> 5 subchart docs, NO NetworkPolicy     warns
+#   nats.create: "yes"   -> 5 subchart docs, NO NetworkPolicy     warns
+#   nats.create: 0       -> 5 subchart docs, NO NetworkPolicy     warns
+#   nats.create: {}      -> 5 subchart docs, NO NetworkPolicy     no warning
+#   nats: <null>         -> 8 subchart docs, NO NetworkPolICY     no warning
+#
+# THE LAST ROW IS THE WORST OF THEM AND IT IS THE QUIETEST. `nats:` with nothing
+# under it deletes the WHOLE block, so the broker renders on the UPSTREAM chart's
+# own defaults — eight documents rather than five, because none of this chart's
+# settings survived: no authorization users, `natsBox` back on. A broker with no
+# accounts, no NetworkPolicy, and no warning.
+#
+# A PRESENT NON-MAP `nats` NEEDS NO ARM HERE, AND THAT IS MEASURED RATHER THAN
+# ASSUMED: `nats: true` and `nats: []` are refused by HELM ITSELF, `type mismatch
+# on nats`, before any template runs. The `operators` block has no subchart of
+# its own to be coalesced against, which is why it gets no such protection and
+# needs arms one and two.
+THE_BROKER_REGISTER_IS_NOT_A_BOOL = (
+    ("nats-create-is-null", "nats:\n  create:\n", "invalid"),
+    ("nats-create-is-the-yaml-yes-string", 'nats:\n  create: "yes"\n', "string"),
+    ("nats-create-is-zero", "nats:\n  create: 0\n", "float64"),
+    ("nats-create-is-an-empty-map", "nats:\n  create: {}\n", "map"),
+)
+THE_DELETED_BROKER_BLOCK = ("nats-is-null", "nats:\n")
+
+# The phrases the two register-key refusals write. DIFFERENT FROM EACH OTHER AND
+# FROM BOTH ARMS ABOVE, for the reason `THE_SHAPE_REFUSAL` and
+# `THE_DELETED_KEY_REFUSAL` are different from each other: the assertions below
+# say which one of the four fired, and a shared phrase could not discriminate.
+# `THE_DELETED_KEY_REFUSAL` is `the operators key has been deleted`, which is NOT
+# a substring of `operators.create has been deleted` — checked rather than
+# assumed, by `test_no_two_refusal_phrases_are_substrings_of_one_another`.
+THE_REGISTER_KEY_REFUSAL = "rather than true or false"
+THE_DELETED_OPERATORS_REGISTER_REFUSAL = "operators.create has been deleted"
+THE_DELETED_BROKER_REGISTER_REFUSAL = "nats.create has been deleted"
+
+# WHERE THE TWO REGISTER ARMS OPEN AND CLOSE, so the red cases below can cut
+# exactly one of them out. LITERALS, asserted present before each mutation runs:
+# a mutation that silently matched nothing would leave the chart intact and the
+# red case would pass for the guard's reason rather than its own.
+#
+# THEY ARE THEIR OWN BLOCKS RATHER THAN A THIRD BRANCH OF THE `if/else if` ABOVE,
+# and that is placement rather than taste. `test_deleting_arm_one_...` cuts
+# between arm one's opening and arm two's pivot; a register arm wedged between
+# them would be removed by that mutation too, and its stated reason — "cut arm
+# one out" — would stop being true.
+REGISTER_ARM_OPENS = '{{- if kindIs "map" .Values.operators }}'
+REGISTER_ARM_CLOSES = "{{- end }}{{/* end of the operators register-key arm */}}\n"
+BROKER_ARM_OPENS = '{{- if kindIs "map" .Values.nats }}'
+BROKER_ARM_CLOSES = "{{- end }}{{/* end of the nats register-key arm */}}\n"
 
 # THE THREE TEXTS A RAISE LEAVES IN STDERR (ADR-0794). A refusal and a raise both
 # exit 1, so the exit code alone cannot tell a named key from a stack trace — and
@@ -287,6 +413,27 @@ def render_under_parent(
                 f"platform:\n  operators: {scalar}\n",
             )
         ),
+    )
+
+
+def render_under_parent_body(
+    tmp_path: Path, parent: Path, name: str, body: str
+) -> subprocess.CompletedProcess[str]:
+    """`render_under_parent` for a body deeper than one scalar.
+
+    The register-key shapes are two levels down — `platform.operators.create` —
+    so they cannot be written as the `operators: <scalar>` that function builds.
+    The body is INDENTED WHOLE rather than interpolated line by line, because an
+    overlay that lands under the wrong parent key measures nothing and looks
+    green, which is the incident `values_file` above records.
+    """
+    indented = "".join(f"  {line}\n" for line in body.splitlines())
+    return helm(
+        "template",
+        "yadgar",
+        str(parent),
+        "-f",
+        str(values_file(tmp_path / f"{parent.name}-{name}.yaml", f"platform:\n{indented}")),
     )
 
 
@@ -598,6 +745,277 @@ def test_the_helper_resolves_exactly_what_the_dependency_condition_resolves(tmp_
     print("operators-shape: 4 usable shapes resolve exactly as helm's condition does")
 
 
+# ═══ THE REGISTER KEY ITSELF, ONE LEVEL DOWN FROM THE EIGHT SHAPES ═══════════
+
+
+def test_no_two_refusal_phrases_are_substrings_of_one_another():
+    """The discriminators discriminate. PURE, and it reads no chart.
+
+    Every assertion in this file of the form "arm X fired and arm Y did not" is
+    only as good as the four phrases being genuinely distinct. `the operators key
+    has been deleted` and `operators.create has been deleted` are close enough to
+    each other that the next person to reword one could make the pair overlap
+    without noticing, at which point several tests below would stop measuring
+    what they say.
+    """
+    phrases = (
+        THE_SHAPE_REFUSAL,
+        THE_DELETED_KEY_REFUSAL,
+        THE_REGISTER_KEY_REFUSAL,
+        THE_DELETED_OPERATORS_REGISTER_REFUSAL,
+        THE_DELETED_BROKER_REGISTER_REFUSAL,
+    )
+    overlapping = [
+        (one, other)
+        for one in phrases
+        for other in phrases
+        if one != other and one in other
+    ]
+    assert overlapping == [], (
+        f"these refusal phrases contain one another, so the assertions that say "
+        f"which arm fired cannot tell them apart: {overlapping}"
+    )
+    print(f"operators-shape: {len(phrases)} refusal phrases, none a substring of another")
+
+
+def test_a_register_key_that_is_not_a_bool_is_refused_by_name(tmp_path):
+    """Seven present-but-unusable `operators.create` values, seven refusals.
+
+    EVERY ONE OF THEM INSTALLS ALL FIVE OPERATORS TODAY, at exit 0 — the table
+    beside `THE_REGISTER_KEY_IS_NOT_A_BOOL` is the measurement. Two of the seven
+    do not even draw helm's `non-bool value` warning.
+
+    ASSERTED ON THE ABSENCE OF A RAISE, not on the exit code, for the reason
+    every case in this file is: a refusal and a raise both exit 1.
+    """
+    for name, scalar, kind in THE_REGISTER_KEY_IS_NOT_A_BOOL:
+        result = render_root(tmp_path, name, f"operators:\n  create: {scalar}\n")
+        assert result.returncode != 0, (
+            f"`operators.create: {scalar}` rendered exit 0. helm leaves every "
+            f"operator dependency ENABLED when no path of its `condition:` "
+            f"resolves, so this installs five operators cluster-wide out of a "
+            f"value helm could not read.\n{result.stdout[:2000]}"
+        )
+        assert f"operators.create is a {kind} rather than true or false" in result.stderr, (
+            f"`{name}` refused without naming what the adopter wrote: {result.stderr}"
+        )
+        assert THE_DELETED_OPERATORS_REGISTER_REFUSAL not in result.stderr, (
+            f"`{name}` tripped the DELETED-key arm, which is the wrong diagnosis "
+            f"for a key that is present: {result.stderr}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, (
+                f"`{name}` RAISED instead of refusing: {result.stderr}"
+            )
+    print(
+        f"operators-shape: {len(THE_REGISTER_KEY_IS_NOT_A_BOOL)} non-bool register "
+        f"values refused by name"
+    )
+
+
+def test_a_deleted_register_key_is_refused_wherever_this_chart_runs(tmp_path):
+    """THE DEFECT THIS ARM WAS BUILT FOR, and it refuses as a subchart too.
+
+    `operators:` followed by `create:` with nothing after it is the shape an
+    adopter writes who started to state the toggle and stopped. helm DELETES the
+    key and does not put this chart's own `operators.create: false` back, so the
+    five dependencies' `condition:` finds no path it can resolve and leaves every
+    one of them ENABLED. Measured against `yadgarhq/chart` at 5d23f59 with
+    `platform` 0.1.11, on helm v3.20.2 and v4.3.0 alike:
+
+        platform.operators.create omitted  ->  32 objects,   0 from the operator subcharts
+        platform.operators.create: false   ->  32 objects,   0 from the operator subcharts
+        platform.operators.create: <null>  -> 197 objects, 165 from the operator
+                                              subcharts, 0 vendored CRDs, EXIT 0
+
+    WHY IT REFUSES AS A SUBCHART, WHICH IS NOT ARM ONE'S REASON. Arm one is
+    unconditional because NOTHING else in the estate can see a deleted `operators`
+    block — the parent measures `hasKey` false and cannot tell it from the adopter
+    who never wrote the key. THAT ARGUMENT IS FALSE HERE and it was measured
+    rather than assumed: a parent probe reads `hasKey $platform.operators
+    "create"` FALSE for this shape and TRUE for `operators: {}`, for the key
+    omitted, and for `operators: {keda: {create: true}}`. The parent CAN see it.
+
+    IT IS UNCONDITIONAL ON HARM INSTEAD. Arm two defers because `yadgarhq/chart`
+    carries a refusal for those seven shapes and the parent names the path the
+    adopter typed. NO CHART IN THIS ESTATE CARRIES ONE FOR THIS SHAPE, so
+    deferring here defers to nothing and the adopter gets the 165-object install.
+    The day a parent grows one, this arm is what shadows it — and
+    `yadgarhq/chart`'s own row for this shape asserts that THIS message is the one
+    that arrives, so the two repositories cannot drift into both refusing without
+    a test going red.
+    """
+    name, scalar = THE_DELETED_REGISTER_KEY
+    body = f"operators:\n  create: {scalar}\n"
+    parent = parent_around(tmp_path, with_refusal=True)
+    cases = (
+        ("as the root chart", render_root(tmp_path, name, body)),
+        ("as a subchart", render_under_parent_body(tmp_path, parent, name, body)),
+    )
+    for label, result in cases:
+        assert result.returncode != 0, (
+            f"{label}: a deleted `operators.create` rendered exit 0, which is the "
+            f"165-object fail-open.\n{result.stdout[:2000]}"
+        )
+        assert THE_DELETED_OPERATORS_REGISTER_REFUSAL in result.stderr, (
+            f"{label}: refused without naming the deleted register key: {result.stderr}"
+        )
+        assert THE_REGISTER_KEY_REFUSAL not in result.stderr, (
+            f"{label}: the PRESENT-non-bool arm fired for an absent key, which is "
+            f"the wrong diagnosis: {result.stderr}"
+        )
+        assert THE_DELETED_KEY_REFUSAL not in result.stderr, (
+            f"{label}: arm one fired, and the `operators` block is present here: "
+            f"{result.stderr}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, (
+                f"{label} RAISED instead of refusing: {result.stderr}"
+            )
+    assert THE_PARENT_REFUSAL not in cases[1][1].stderr, (
+        "the throwaway parent refused a deleted register key as well, so this arm "
+        "shadows a live parent refusal and the division of labour needs re-arguing: "
+        f"{cases[1][1].stderr}"
+    )
+    print("operators-shape: a deleted operators.create is refused as root AND as a subchart")
+
+
+def test_the_brokers_register_key_must_be_a_bool_too(tmp_path):
+    """THE FOURTH CLASS MEMBER, and its `condition:` names ONE path.
+
+    `nats` is declared `condition: nats.create`, a single path, and it fails open
+    exactly as the five operators do — which is what widened the rule from
+    ADR-0794's multi-path wording. Every row installs the broker at exit 0 while
+    this chart's own `nats-ingress` NetworkPolicy skips, because that template
+    reads the same unusable value and reads it as false.
+    """
+    for name, body, kind in THE_BROKER_REGISTER_IS_NOT_A_BOOL:
+        result = render_root(tmp_path, name, body)
+        assert result.returncode != 0, (
+            f"`{name}` rendered exit 0, which is a NATS broker installed out of a "
+            f"value helm could not read, with no NetworkPolicy in front of it."
+            f"\n{result.stdout[:2000]}"
+        )
+        assert f"nats.create is a {kind} rather than true or false" in result.stderr, (
+            f"`{name}` refused without naming what the adopter wrote: {result.stderr}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, (
+                f"`{name}` RAISED instead of refusing: {result.stderr}"
+            )
+    print(
+        f"operators-shape: {len(THE_BROKER_REGISTER_IS_NOT_A_BOOL)} non-bool "
+        f"nats.create values refused by name"
+    )
+
+
+def test_a_deleted_nats_block_is_refused_and_is_the_quietest_row(tmp_path):
+    """`nats:` with nothing under it — the row that renders MORE than `true` does.
+
+    Deleting the block takes this chart's authorization users and its `natsBox:
+    {enabled: false}` with it, so the broker renders on the upstream chart's own
+    defaults: EIGHT documents where `nats.create: true` renders five, no accounts,
+    and no warning from helm at all.
+    """
+    name, body = THE_DELETED_BROKER_BLOCK
+    result = render_root(tmp_path, name, body)
+    assert result.returncode != 0, (
+        f"a deleted `nats` block rendered exit 0, which is an unconfigured broker "
+        f"on upstream defaults.\n{result.stdout[:2000]}"
+    )
+    assert THE_DELETED_BROKER_REGISTER_REFUSAL in result.stderr, (
+        f"refused without naming the deleted register key: {result.stderr}"
+    )
+    assert THE_REGISTER_KEY_REFUSAL not in result.stderr, (
+        f"the PRESENT-non-bool arm fired for an absent key: {result.stderr}"
+    )
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in result.stderr, (
+            f"RAISED instead of refusing: {result.stderr}"
+        )
+    print("operators-shape: a deleted nats block is refused by name")
+
+
+def test_every_condition_path_in_chart_yaml_has_a_guarded_register_key():
+    """THE LIST IS GATED AGAINST ITS SOURCE, never kept in step by attention.
+
+    A SEVENTH dependency added to `Chart.yaml` tomorrow brings a `condition:` of
+    its own, and its register key is in this class the moment `values.yaml`
+    declares it. Nothing about the arms below notices. This reads the conditions
+    OFF the manifest and asserts each register key is named in the guard, so the
+    gate goes red in the pull request that adds the dependency rather than the
+    first time an adopter mistypes the new key.
+
+    THE REGISTER KEY IS THE LAST PATH of a `condition:`, which is helm's own
+    fallback: `operators.<op>.create,operators.create` falls back to
+    `operators.create`, and a single-path `nats.create` is its own fallback. The
+    per-operator paths are NOT in the class and this gate does not ask for them —
+    `values.yaml` declares none of them, so a null there is not deleted, which
+    `test_a_sub_key_is_not_in_this_class` measures.
+    """
+    manifest = yaml.safe_load(CHART_MANIFEST.read_text())
+    registers = sorted(
+        {
+            dependency["condition"].split(",")[-1].strip()
+            for dependency in manifest.get("dependencies", [])
+            if dependency.get("condition")
+        }
+    )
+    assert registers, "no dependency in Chart.yaml declares a condition"
+    values = yaml.safe_load(CHART_VALUES.read_text())
+    guard = RENDER_CHECKS.read_text()
+    unguarded = []
+    for register in registers:
+        block, _, leaf = register.partition(".")
+        # Only a key this chart DECLARES is in the class: helm deletes a null on
+        # a declared key, and leaves an undeclared one present and unreadable.
+        if leaf not in (values.get(block) or {}):
+            continue
+        # THE TWO EXPRESSIONS THE ARM IS MADE OF, read off the template source.
+        # Not the refusal's wording: that is assembled by `printf` at render time
+        # and no literal of it exists in the file, so a test looking for one would
+        # be asserting against a string that is never there.
+        presence = f'hasKey .Values.{block} "create"'
+        shape = f'kindIs "bool" (index .Values.{block} "create")'
+        if presence not in guard or shape not in guard:
+            unguarded.append(register)
+    assert unguarded == [], (
+        f"{unguarded} are register keys a Chart.yaml `condition:` reads and "
+        f"values.yaml declares, with no arm in {RENDER_CHECKS.name} refusing an "
+        f"unusable value for them. helm leaves the dependency ENABLED when the "
+        f"condition cannot be resolved."
+    )
+    print(f"operators-shape: {len(registers)} condition register keys, all guarded")
+
+
+def test_a_sub_key_is_not_in_this_class(tmp_path):
+    """THE BOUNDARY OF THE CLASS, MEASURED — `operators.<op>` is OUT of it.
+
+    The rule is: a key a `condition:` reads AND some chart DECLARES. `values.yaml`
+    deliberately declares no per-operator sub-key, so helm does NOT delete a null
+    written there, and the shape cannot become the silent fail-open the register
+    keys do. It raises instead — ADR-0794's knowingly-open residual, recorded here
+    as a measurement rather than left to be rediscovered.
+
+    THIS TEST ASSERTS THE RESIDUAL, NOT DESIRED BEHAVIOUR. If a later change
+    closes it, this goes red; delete it together with the residual paragraph in
+    `_operators.tpl`.
+    """
+    result = render_root(
+        tmp_path, "sub-key-null", "operators:\n  create: false\n  keda:\n"
+    )
+    assert result.returncode != 0
+    assert any(text in result.stderr for text in THE_TEXTS_A_RAISE_LEAVES), (
+        f"`operators.keda: null` no longer raises, so the residual this test "
+        f"records has changed: {result.stderr}"
+    )
+    assert THE_REGISTER_KEY_REFUSAL not in result.stderr, (
+        "the register-key arm claimed a sub-key, which it does not examine: "
+        f"{result.stderr}"
+    )
+    print("operators-shape: a null sub-key still raises — the documented residual")
+
+
 # ═══ THE CONSTRUCTED RED CASES ═══════════════════════════════════════════════
 
 
@@ -745,6 +1163,144 @@ def test_deleting_arm_one_lets_the_165_object_fail_open_through(tmp_path):
     print(
         f"operators-shape: red case 4 — without arm one, a deleted key renders "
         f"{len(documents(result.stdout))} objects and 0 vendored CRDs at exit 0"
+    )
+
+
+def subchart_documents(stdout: str) -> int:
+    """How many documents came from a subchart of this chart, by `# Source:`.
+
+    READ OFF THE COMMENT AND NOT OFF THE PARSED STREAM, because what is being
+    counted is provenance rather than kind. The `---` split that
+    `vendored_crd_names` avoids is avoided here too: this counts the `# Source:`
+    lines themselves, which no quoted description contains at column zero.
+    """
+    return sum(
+        1 for line in stdout.splitlines() if line.startswith("# Source: platform/charts/")
+    )
+
+
+def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_path):
+    """RED CASE 5 — the measurement that makes the register-key arm necessary.
+
+    Cut the `operators` register arm out and render `operators: {create: }`. The
+    five dependencies go in, the eighteen vendored CRDs do not, and nothing says
+    so. That is KEDA and mariadb-operator installed with none of their own
+    CustomResourceDefinitions, at exit 0.
+
+    THE COUNT IS ASSERTED AS AN INEQUALITY. 165 is what the five operator charts
+    render at the versions `Chart.yaml` pins today; a version bump moves it for a
+    reason that has nothing to do with this guard, and a row that reddens for the
+    wrong reason is worse than one that does not redden at all. What must stay
+    true is that a LOT of subchart objects arrive where the baseline renders NONE.
+    """
+    copy = chart_copy(tmp_path, "no-register-arm")
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    opening = REGISTER_ARM_OPENS
+    closing = REGISTER_ARM_CLOSES
+    assert opening in original, f"the register arm no longer opens with {opening!r}"
+    assert closing in original, f"the register arm no longer closes with {closing!r}"
+    head, rest = original.split(opening, 1)
+    _, tail = rest.split(closing, 1)
+    template.write_text(head + tail)
+    assert template.read_text() != original
+
+    result = helm(
+        "template",
+        "platform",
+        str(copy),
+        "-f",
+        str(values_file(tmp_path / "no-register-arm.yaml", "operators:\n  create:\n")),
+    )
+    assert result.returncode == 0, (
+        f"the chart without the register arm still refused, so this case does not "
+        f"measure what that arm buys: {result.stderr}"
+    )
+    assert vendored_crd_names(result.stdout) == [], (
+        "the vendored CRDs rendered, so the harm this case records is not the one "
+        "described"
+    )
+    arrived = subchart_documents(result.stdout)
+    assert arrived > 100, (
+        f"only {arrived} documents arrived from the operator subcharts, so the "
+        f"fail-open this case records did not happen"
+    )
+    deployments = [
+        (d.get("metadata") or {}).get("name")
+        for d in documents(result.stdout)
+        if d.get("kind") == "Deployment"
+    ]
+    assert any(name and "keda" in name for name in deployments), (
+        f"no KEDA deployment rendered: {sorted(n for n in deployments if n)}"
+    )
+    print(
+        f"operators-shape: red case 5 — without the register arm, a deleted "
+        f"`operators.create` renders {arrived} subchart documents and 0 vendored "
+        f"CRDs at exit 0"
+    )
+
+
+def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
+    """RED CASE 6 — the same measurement on the single-path `condition:`.
+
+    `nats:` with nothing under it, with the broker arm cut out: the NATS subchart
+    renders on ITS OWN defaults, because this chart's whole `nats` block went with
+    the deleted key. More documents than `nats.create: true` produces, and no
+    `nats-ingress` NetworkPolicy in front of any of them.
+    """
+    copy = chart_copy(tmp_path, "no-broker-arm")
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    assert BROKER_ARM_OPENS in original, (
+        f"the broker arm no longer opens with {BROKER_ARM_OPENS!r}"
+    )
+    assert BROKER_ARM_CLOSES in original, (
+        f"the broker arm no longer closes with {BROKER_ARM_CLOSES!r}"
+    )
+    head, rest = original.split(BROKER_ARM_OPENS, 1)
+    _, tail = rest.split(BROKER_ARM_CLOSES, 1)
+    template.write_text(head + tail)
+    assert template.read_text() != original
+
+    asked = helm(
+        "template",
+        "platform",
+        str(copy),
+        "-f",
+        str(values_file(tmp_path / "broker-asked.yaml", "nats:\n  create: true\n")),
+    )
+    assert asked.returncode == 0, asked.stderr
+    deleted = helm(
+        "template",
+        "platform",
+        str(copy),
+        "-f",
+        str(values_file(tmp_path / "broker-deleted.yaml", "nats:\n")),
+    )
+    assert deleted.returncode == 0, (
+        f"the chart without the broker arm still refused, so this case does not "
+        f"measure what that arm buys: {deleted.stderr}"
+    )
+    assert subchart_documents(deleted.stdout) > subchart_documents(asked.stdout), (
+        f"a deleted `nats` block rendered {subchart_documents(deleted.stdout)} "
+        f"subchart documents and an explicit `nats.create: true` rendered "
+        f"{subchart_documents(asked.stdout)}. The harm this case records is that "
+        f"the deleted key renders MORE, on upstream defaults."
+    )
+    policies = [
+        (d.get("metadata") or {}).get("name")
+        for d in documents(deleted.stdout)
+        if d.get("kind") == "NetworkPolicy"
+    ]
+    assert not any(name and "nats" in name for name in policies), (
+        f"a nats NetworkPolicy rendered, so the harm is not the one described: "
+        f"{sorted(n for n in policies if n)}"
+    )
+    print(
+        f"operators-shape: red case 6 — without the broker arm, a deleted `nats` "
+        f"block renders {subchart_documents(deleted.stdout)} subchart documents "
+        f"against {subchart_documents(asked.stdout)} for an explicit true, and no "
+        f"NetworkPolicy"
     )
 
 
