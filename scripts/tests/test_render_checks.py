@@ -64,10 +64,10 @@ THE CHART DECLARES TWO KINDS OF CHECK, AND ONLY ONE OF THEM IS CONSTRUCTED THE W
 EVERYTHING ABOVE DESCRIBES. A CAPABILITY check calls `platform.require-api` and reads
 `.Capabilities.APIVersions.Has`, so every paragraph above applies to it: the trap, the
 filler, and the `--api-versions` construction on both halves. A VALUES check reads the
-release's own values and nothing else — this chart carries five, the mixed-release
-refusal, the two arms of the `operators` shape refusal and the two register-key arms,
-whose behaviour `scripts/tests/test_operators_shape.py` owns — and for it NONE of that
-applies. It
+release's own values and nothing else — this chart carries seven, the mixed-release
+refusal, the two arms of the `operators` shape refusal and two branches each of the two
+register-key arms, whose behaviour `scripts/tests/test_operators_shape.py` owns — and
+for it NONE of that applies. It
 touches no `.Capabilities`, so a bare
 render answers it exactly as a cluster would, and ITS RED AND GREEN CASES ARE TWO BARE
 RENDERS. THE FILLER TRIPWIRE DOES NOT APPLY TO IT AND MUST NOT BE ADDED TO IT: there is
@@ -126,23 +126,26 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and five values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and seven values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted.
-EXPECTED_RENDER_CHECKS = 7
+EXPECTED_RENDER_CHECKS = 9
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
-# FIVE: the mixed-release refusal, the TWO ARMS of the `operators` shape refusal
+# SEVEN: the mixed-release refusal, the TWO ARMS of the `operators` shape refusal
 # — a deleted key, refused wherever this chart runs, and a present non-map,
-# refused only when it is the root — and the TWO REGISTER-KEY arms, one per
-# dependency `condition:` this chart declares, which refuse an `operators.create`
-# or a `nats.create` helm cannot resolve a condition from. They are counted
-# separately because each is its own `fail` with its own message and its own red
-# case; `scripts/tests/test_operators_shape.py` owns what the five of them DO,
-# and this number is only the count, which is what a deletion moves. Each has a
-# pair of BARE renders.
-EXPECTED_VALUES_CHECKS = 5
+# refused only when it is the root — and TWO BRANCHES EACH for the two
+# register-key arms, one arm per dependency `condition:` this chart declares. Each
+# arm splits the same way the shape refusal does: a DELETED `create`, refused
+# wherever this chart runs because the parent's guard cannot reach it, and a
+# PRESENT non-bool `create`, refused only at the root because `yadgarhq/chart`
+# already names it. They are counted separately because each is its own `fail`
+# with its own message and its own red case;
+# `scripts/tests/test_operators_shape.py` owns what the seven of them DO, and this
+# number is only the count, which is what a deletion moves. Each has a pair of
+# BARE renders.
+EXPECTED_VALUES_CHECKS = 7
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
@@ -1007,13 +1010,22 @@ def test_deleting_the_values_check_reddens_the_count(tmp_path):
     assert f"expected {EXPECTED_VALUES_CHECKS} values checks, found 0" in message, message
 
 
-def test_an_eighth_check_reddens_the_count(tmp_path):
-    """RED AT 8: the `include` half of the count, watched going red.
+def test_one_more_check_reddens_the_count(tmp_path):
+    """RED AT ONE MORE THAN THE CHART DECLARES: the `include` half, going red.
 
     THE OTHER ADDEND ON PURPOSE. The case above deletes a values check and this one
     adds a capability check, so each half of the sum has been seen moving the total.
     Two mutations of the same addend would leave the other half unproved.
+
+    THE EXPECTED NUMBER IS `EXPECTED_RENDER_CHECKS + 1` AND NOT A SECOND LITERAL,
+    which is the one place in this file where a derived number is the right answer.
+    The property being shown is the DELTA — one check added moves the count by one
+    — and the literal it is derived from is the one under test, so an implementation
+    that counted nothing still fails. A second literal buys nothing and has already
+    gone stale twice: it was written as 6 when the chart declared five checks, and
+    every arm added since has had to rename this test.
     """
+    expected = EXPECTED_RENDER_CHECKS + 1
     copy = tmp_path / "chart"
     shutil.copytree(CHART, copy)
     template = copy / "templates" / "render-checks.yaml"
@@ -1023,18 +1035,20 @@ def test_an_eighth_check_reddens_the_count(tmp_path):
         '{{- include "platform.require-api" (dict\n'
         '      "context" $\n'
         '      "apiVersion" "example.invalid/v1"\n'
-        '      "operator" "an eighth check"\n'
+        '      "operator" "one more check"\n'
         '      "toggle" "valkey.create") }}\n'
         "{{- end }}\n"
     )
-    assert declared_check_count(copy) == 8, "the eighth check was not counted at all"
+    assert declared_check_count(copy) == expected, (
+        "the added check was not counted at all"
+    )
 
     failures = check_count_failures(copy)
     message = "\n".join(failures)
-    assert failures, "an eighth check was added and the count said nothing"
+    assert failures, "a check was added and the count said nothing"
     assert (
         f"expected {EXPECTED_RENDER_CHECKS} render checks declared in "
-        f"templates/render-checks.yaml, found 8" in message
+        f"templates/render-checks.yaml, found {expected}" in message
     ), message
 
 

@@ -266,6 +266,10 @@ REGISTER_ARM_OPENS = '{{- if kindIs "map" .Values.operators }}'
 REGISTER_ARM_CLOSES = "{{- end }}{{/* end of the operators register-key arm */}}\n"
 BROKER_ARM_OPENS = '{{- if kindIs "map" .Values.nats }}'
 BROKER_ARM_CLOSES = "{{- end }}{{/* end of the nats register-key arm */}}\n"
+# The root-only pivot each register arm carries, which RED CASE 7 switches off.
+# THE SAME LINE ARM TWO USES, deliberately: one idiom for one question, so a
+# reader does not have to check whether two spellings mean the same thing.
+THE_ROOT_ONLY_PIVOT = '{{- else if not (contains "/charts/" .Template.BasePath) }}'
 
 # THE THREE TEXTS A RAISE LEAVES IN STDERR (ADR-0794). A refusal and a raise both
 # exit 1, so the exit code alone cannot tell a named key from a stack trace — and
@@ -291,6 +295,18 @@ THE_PARENT_REFUSAL = "THE-PARENT-NAMED-THE-KEY"
 # key has. `test_a_deleted_operators_key_is_refused_wherever_this_chart_runs`
 # asserts this double stays shut on that shape, which is what makes this chart's
 # unconditional arm one necessary rather than merely defensible.
+#
+# IT DOES CARRY A `create`-SHAPE ARM, BECAUSE `yadgarhq/chart` CARRIES ONE.
+# Measured against that parent at 5d23f59 with `platform` 0.1.11 — the parent
+# standing alone, before the register arms existed — every PRESENT non-bool
+# `platform.operators.create` and `platform.nats.create` is refused there, by a
+# message naming the key and `rather than a boolean`. That is the contract the
+# register arms' present-non-bool branch defers to, so the stand-in has to
+# reproduce it or the deferral would be tested against a parent that refuses
+# nothing. IT STILL HAS NO ARM FOR A DELETED `create`, and neither does
+# `yadgarhq/chart`: that parent ranges over the `create` toggles it can FIND, and
+# a deleted key is not one. The three EXIT 0 rows in `render-checks.yaml`'s prose
+# are that hole measured.
 THE_PARENT_CLAUSE = """{{- $platform := .Values.platform | default dict }}
 {{- $shape := "" }}
 {{- if hasKey $platform "operators" }}
@@ -301,6 +317,16 @@ THE_PARENT_CLAUSE = """{{- $platform := .Values.platform | default dict }}
 {{- end }}
 {{- if $shape }}
 {{- fail (printf "REFUSAL_MARKER: platform.operators is a %s rather than a mapping" $shape) }}
+{{- end }}
+{{- range $block := (list "operators" "nats") }}
+{{- $values := index $platform $block }}
+{{- if kindIs "map" $values }}
+{{- if hasKey $values "create" }}
+{{- if not (kindIs "bool" $values.create) }}
+{{- fail (printf "REFUSAL_MARKER: platform.%s.create is a %s rather than a boolean" $block (kindOf $values.create)) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 """
 
@@ -778,12 +804,19 @@ def test_no_two_refusal_phrases_are_substrings_of_one_another():
     print(f"operators-shape: {len(phrases)} refusal phrases, none a substring of another")
 
 
-def test_a_register_key_that_is_not_a_bool_is_refused_by_name(tmp_path):
+def test_a_register_key_that_is_not_a_bool_is_refused_at_the_root_by_name(tmp_path):
     """Seven present-but-unusable `operators.create` values, seven refusals.
 
     EVERY ONE OF THEM INSTALLS ALL FIVE OPERATORS TODAY, at exit 0 — the table
     beside `THE_REGISTER_KEY_IS_NOT_A_BOOL` is the measurement. Two of the seven
     do not even draw helm's `non-bool value` warning.
+
+    AT THE ROOT, WHICH IS ARM TWO'S DIVISION OF LABOUR AND NOT A NARROWING.
+    `yadgarhq/chart` already refuses every one of these shapes by a message that
+    names `platform.operators.create`, measured at `platform` 0.1.11 before this
+    arm existed. A subchart `fail` would SHADOW it, so this branch stands down as
+    a subchart and `test_the_parent_is_the_one_that_names_a_non_bool_register_key`
+    is what holds the other half.
 
     ASSERTED ON THE ABSENCE OF A RAISE, not on the exit code, for the reason
     every case in this file is: a refusal and a raise both exit 1.
@@ -836,11 +869,16 @@ def test_a_deleted_register_key_is_refused_wherever_this_chart_runs(tmp_path):
     "create"` FALSE for this shape and TRUE for `operators: {}`, for the key
     omitted, and for `operators: {keda: {create: true}}`. The parent CAN see it.
 
-    IT IS UNCONDITIONAL ON HARM INSTEAD. Arm two defers because `yadgarhq/chart`
-    carries a refusal for those seven shapes and the parent names the path the
-    adopter typed. NO CHART IN THIS ESTATE CARRIES ONE FOR THIS SHAPE, so
-    deferring here defers to nothing and the adopter gets the 165-object install.
-    The day a parent grows one, this arm is what shadows it — and
+    IT IS UNCONDITIONAL BECAUSE THE PARENT'S GUARD CANNOT REACH IT, which is a
+    different blindness from arm one's and was measured rather than argued.
+    `yadgarhq/chart` refuses every PRESENT non-bool `platform.operators.create` —
+    `"true"`, `"yes"`, `"no"`, `0`, `1`, `[]`, `""` and `{}` all exit 1 there at
+    `platform` 0.1.11, naming the key — because its guard ranges over the `create`
+    toggles it can FIND. A DELETED key is not one of them, so that range passes
+    over it in silence and the row above renders 197 objects at exit 0. The
+    present-non-bool branch of this same arm therefore stands down as a subchart
+    and this one does not.
+
     `yadgarhq/chart`'s own row for this shape asserts that THIS message is the one
     that arrives, so the two repositories cannot drift into both refusing without
     a test going red.
@@ -888,6 +926,10 @@ def test_the_brokers_register_key_must_be_a_bool_too(tmp_path):
     ADR-0794's multi-path wording. Every row installs the broker at exit 0 while
     this chart's own `nats-ingress` NetworkPolicy skips, because that template
     reads the same unusable value and reads it as false.
+
+    AT THE ROOT, for the same reason the operators' present-non-bool branch is:
+    `yadgarhq/chart` refuses `platform.nats.create: "yes"`, `0` and `{}` itself,
+    measured at `platform` 0.1.11, and a subchart `fail` would shadow it.
     """
     for name, body, kind in THE_BROKER_REGISTER_IS_NOT_A_BOOL:
         result = render_root(tmp_path, name, body)
@@ -934,6 +976,52 @@ def test_a_deleted_nats_block_is_refused_and_is_the_quietest_row(tmp_path):
             f"RAISED instead of refusing: {result.stderr}"
         )
     print("operators-shape: a deleted nats block is refused by name")
+
+
+def test_the_parent_is_the_one_that_names_a_non_bool_register_key(tmp_path):
+    """The other half of the root-only branch, and the half that is easy to lose.
+
+    `yadgarhq/chart` refuses every present non-bool `platform.operators.create`
+    and `platform.nats.create` by a message that names the path the adopter
+    actually typed. helm executes the deepest template path first, so if this
+    chart refused as a subchart its message would be the one the adopter saw and
+    that parent's clause would be unreachable — the same defect arms one and two
+    were built around, one level down.
+
+    BOTH HALVES ARE ASSERTED: the parent's phrase is present AND this chart's is
+    absent. The positive assertion comes first and would fail loudly, because
+    asserting only the negative would pass against a chart that refused too.
+    """
+    parent = parent_around(tmp_path, with_refusal=True)
+    rows = [
+        (f"operators-{name}", f"operators:\n  create: {scalar}\n", "operators", kind)
+        for name, scalar, kind in THE_REGISTER_KEY_IS_NOT_A_BOOL
+    ] + [
+        (name, body, "nats", kind)
+        for name, body, kind in THE_BROKER_REGISTER_IS_NOT_A_BOOL
+    ]
+    for name, body, block, kind in rows:
+        result = render_under_parent_body(tmp_path, parent, f"deferred-{name}", body)
+        assert result.returncode != 0, f"`{name}` was not refused: {result.stdout[:2000]}"
+        assert THE_PARENT_REFUSAL in result.stderr, (
+            f"`{name}`: the parent's refusal did not reach the adopter. This chart "
+            f"shadowed it.\n{result.stderr}"
+        )
+        assert f"platform.{block}.create is a {kind} rather than a boolean" in result.stderr, (
+            f"`{name}`: the parent refused without naming what the adopter wrote: "
+            f"{result.stderr}"
+        )
+        assert THE_REGISTER_KEY_REFUSAL not in result.stderr, (
+            f"`{name}`: this chart refused as well as the parent: {result.stderr}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, (
+                f"`{name}` RAISED inside the subchart: {result.stderr}"
+            )
+    print(
+        f"operators-shape: {len(rows)} non-bool register values deferred to the "
+        f"parent's refusal"
+    )
 
 
 def test_every_condition_path_in_chart_yaml_has_a_guarded_register_key():
@@ -1301,6 +1389,50 @@ def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
         f"block renders {subchart_documents(deleted.stdout)} subchart documents "
         f"against {subchart_documents(asked.stdout)} for an explicit true, and no "
         f"NetworkPolicy"
+    )
+
+
+def test_refusing_a_non_bool_register_key_from_the_subchart_would_shadow_the_parent(
+    tmp_path,
+):
+    """RED CASE 7 — the register arm's root-only branch is load-bearing too.
+
+    Drop the `.Template.BasePath` test from the `operators` register arm and this
+    chart refuses a present non-bool `create` everywhere. The parent's named
+    refusal then never reaches the adopter, which is the same defect RED CASE 3
+    records one level up.
+    """
+    copy = chart_copy(tmp_path, "register-always-refuses")
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    start = original.index(REGISTER_ARM_OPENS)
+    end = original.index(REGISTER_ARM_CLOSES, start)
+    arm = original[start:end]
+    assert arm.count(THE_ROOT_ONLY_PIVOT) == 1, (
+        f"the operators register arm no longer carries exactly one "
+        f"{THE_ROOT_ONLY_PIVOT!r}, so this mutation would cut at the wrong place"
+    )
+    template.write_text(
+        original[:start] + arm.replace(THE_ROOT_ONLY_PIVOT, "{{- else if true }}") + original[end:]
+    )
+    assert template.read_text() != original
+
+    parent = build_parent(tmp_path / "parent-register-shadowed", copy)
+    (parent / "templates" / "validate.yaml").write_text(
+        THE_PARENT_CLAUSE.replace("REFUSAL_MARKER", THE_PARENT_REFUSAL)
+    )
+    result = render_under_parent_body(
+        tmp_path, parent, "register-shadowed", 'operators:\n  create: "yes"\n'
+    )
+    assert result.returncode != 0
+    assert THE_REGISTER_KEY_REFUSAL in result.stderr, result.stderr
+    assert THE_PARENT_REFUSAL not in result.stderr, (
+        "the parent's refusal reached the adopter even with the subchart refusing, "
+        "so the root-only branch guards nothing and this case proves nothing"
+    )
+    print(
+        "operators-shape: red case 7 — a subchart that refuses a non-bool register "
+        "key shadows the parent's message"
     )
 
 

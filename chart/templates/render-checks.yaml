@@ -4,15 +4,14 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. FIVE of the second kind live below — the
-two arms of the `operators` shape refusal, the two register-key arms, and then the
-mixed-release refusal — and everything that makes a capability check awkward —
-`--api-versions`, the offline-render rule, the default-false rule — does not apply
-to any of them. Their red and green cases are BARE renders, and that is the design
-rather than an omission. `scripts/tests/test_render_checks.py` owns the
-mixed-release pair and the count of all five;
-`scripts/tests/test_operators_shape.py` owns what the four shape and register arms
-do.
+release's own values and nothing else. SEVEN of the second kind live below — the
+two arms of the `operators` shape refusal, two branches each of the two register-key
+arms, and then the mixed-release refusal — and everything that makes a capability
+check awkward — `--api-versions`, the offline-render rule, the default-false rule —
+does not apply to any of them. Their red and green cases are BARE renders, and that
+is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
+the mixed-release pair and the count of all seven;
+`scripts/tests/test_operators_shape.py` owns what the shape and register arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the ten internal leaves and the edge leaf all come from
@@ -165,13 +164,14 @@ at 5d23f59 with `platform` 0.1.11, on helm v3.20.2 and v4.3.0 alike, 2026-09-26:
   platform.operators.create: <null>  -> 197 objects, 165 FROM THE OPERATOR SUBCHARTS,
                                         0 vendored CRDs, EXIT 0, NO WARNING
 
-THE TEST IS `kindIs "bool"`, AND `hasKey` ALONE WOULD NOT HAVE DONE. Nine of the
-ten values an adopter can write install all five. `create: {}` and a deleted
-`create` are the two helm does not even warn about; `create: "no"` — which reads
-as OFF to a human — installs everything, because sprig's `dig` finds a non-empty
-string and calls it true. `hasKey` is still what WORDS the refusal, because a
-deleted key and an explicit `null` both answer `invalid` to `kindOf` and the
-adopter needs different advice for each (ADR-0794's own rule about the two).
+NINE OF THE TEN VALUES AN ADOPTER CAN WRITE INSTALL ALL FIVE, which is why the
+shape test is `kindIs "bool"` and not merely `hasKey`. `create: {}` is a PRESENT
+key that installs everything, and helm does not warn about it; `create: "no"` —
+which reads as OFF to a human — installs everything too, because sprig's `dig`
+finds a non-empty string and calls it true. `hasKey` is what SPLITS the two arms
+below, because a deleted key and an explicit `null` both answer `invalid` to
+`kindOf` and cannot be told apart by the value (ADR-0794's own rule about the
+two).
 
 PATH COUNT IS NOT WHAT PUTS A KEY IN THIS CLASS, and that correction is the
 reason this block covers `nats` as well as `operators`. ADR-0794 reasons about
@@ -186,17 +186,36 @@ leaves an undeclared one present and unreadable.
 conditions off `Chart.yaml` rather than trusting this paragraph, so a seventh
 dependency arrives with its register key guarded or reddens the suite.
 
-BOTH ARMS REFUSE WHEREVER THIS CHART RUNS, AND NOT FOR ARM ONE'S REASON. Arm one
-is unconditional because nothing else in the estate CAN see a deleted `operators`
-block. That argument is false here and it was measured rather than assumed: a
-parent probe reads `hasKey $platform.operators "create"` FALSE for this shape and
-TRUE for `operators: {}`, for the key omitted, and for a per-operator sub-key.
-The parent can see it. IT IS UNCONDITIONAL ON HARM INSTEAD — arm two defers
-because `yadgarhq/chart` carries a refusal for its seven shapes, and NO CHART IN
-THIS ESTATE CARRIES ONE FOR THESE, so deferring here defers to nothing and the
-adopter gets the 165-object install. `yadgarhq/chart`'s own row for this shape
-asserts that THIS message is the one that arrives, so the two repositories cannot
-drift into both refusing without a test going red.
+THE SPLIT BETWEEN THE TWO BRANCHES IS THE PARENT'S MEASURED COVERAGE, NOT A
+GUESS, and it is the same division of labour arms one and two already draw.
+Measured against `yadgarhq/chart` at 5d23f59 with `platform` 0.1.11 — that is,
+against the parent standing ALONE, before these arms existed — on helm v4.3.0:
+
+  platform.operators.create: "true" / "yes" / "no" / 0 / 1 / [] / "" / {}
+                                  -> EXIT 1, the PARENT refuses, naming the key
+                                     and `rather than a boolean`
+  platform.operators.create: <null> -> EXIT 0, 197 objects, 165 from the subcharts
+  platform.nats.create: "yes" / 0 / {}  -> EXIT 1, the PARENT refuses
+  platform.nats.create: <null>    -> EXIT 0, the broker in, no NetworkPolicy
+  platform.nats: <null>           -> EXIT 0, the broker in on upstream defaults
+
+SO THE PRESENT-NON-BOOL BRANCH IS ROOT-ONLY, for arm two's reason exactly: the
+parent already refuses every one of those shapes, by a message that names the
+path the adopter actually typed, and a subchart `fail` would SHADOW it — helm
+executes the deepest template path first, so a parent `fail` can never pre-empt a
+child's. Refusing here unconditionally would make `yadgarhq/chart`'s own clause
+dead code and make its test pass against THIS message.
+`test_the_parent_is_the_one_that_names_a_non_bool_register_key` is the gate.
+
+AND THE DELETED BRANCH IS UNCONDITIONAL, because the parent is STRUCTURALLY blind
+to it. Not blind in arm one's way — a parent probe reads `hasKey
+$platform.operators "create"` FALSE for this shape and TRUE for `operators: {}`,
+for the key omitted and for a per-operator sub-key, so the information is there.
+It is that the parent's own guard ranges over `create` toggles it can FIND, and a
+deleted key is not one. The three rows above at EXIT 0 are that hole measured.
+`yadgarhq/chart`'s own row for these shapes asserts that THIS message is the one
+that arrives, so the two repositories cannot drift into both refusing without a
+test going red.
 
 THE SUB-KEYS ARE STILL OUT OF THE CLASS, and that is measured rather than
 asserted: `values.yaml` declares no `operators.<op>`, so helm does not delete a
@@ -209,45 +228,59 @@ refused by HELM ITSELF, `type mismatch on nats`, before any template runs. The
 why it gets no such protection and needs arms one and two.
 */}}
 {{- if kindIs "map" .Values.operators }}
-{{- if not (kindIs "bool" (index .Values.operators "create")) }}
-{{- $wrote := printf "is a %s rather than true or false, which is not a value helm can resolve a dependency condition from" (kindOf (index .Values.operators "create")) }}
 {{- if not (hasKey .Values.operators "create") }}
-{{- $wrote = (join "" (list
-      "has been deleted from this release's values, and this chart ships it. Writing `create:` with nothing "
-      "after it — or `create: null` — makes helm REMOVE the key rather than read it, and the chart's own "
-      "`operators.create: false` is not put back")) }}
-{{- end }}
-{{- fail (printf (join "" (list
-      "platform: operators.create %s. "
+{{- fail (join "" (list
+      "platform: operators.create has been deleted from this release's values, and this chart ships it. "
+      "Writing `create:` with nothing after it — or `create: null` — makes helm REMOVE the key rather than "
+      "read it, and the chart's own `operators.create: false` is not put back. "
       "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
       "and helm leaves a dependency ENABLED when no path of a condition resolves — so this does not turn the "
       "operators off, it installs cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD CLUSTER-WIDE, "
-      "and whether the CustomResourceDefinitions this chart vendored for them go too depends on whether the "
-      "value happens to read as truthy. "
+      "while this chart skips every CustomResourceDefinition it vendored for them. "
       "Write `operators.create: false` to leave the operators out, or `operators.create: true` to install them "
-      "in a release of their own (ADR-0787). To accept the chart's default, omit the key entirely."))
-      $wrote) }}
+      "in a release of their own (ADR-0787). To accept the chart's default, omit the key entirely.")) }}
+{{- else if not (contains "/charts/" .Template.BasePath) }}
+{{- if not (kindIs "bool" (index .Values.operators "create")) }}
+{{- fail (printf (join "" (list
+      "platform: operators.create is a %s rather than true or false, which is not a value helm can resolve a "
+      "dependency condition from. "
+      "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
+      "and helm leaves a dependency ENABLED when no path of a condition resolves — so a value in this shape does "
+      "not turn the operators off, it installs cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD "
+      "CLUSTER-WIDE, and whether the CustomResourceDefinitions this chart vendored for them go too depends on "
+      "whether the value happens to read as truthy. "
+      "Write `operators.create: false` to leave the operators out, or `operators.create: true` to install them "
+      "in a release of their own (ADR-0787)."))
+      (kindOf (index .Values.operators "create"))) }}
+{{- end }}
 {{- end }}
 {{- end }}{{/* end of the operators register-key arm */}}
 
 {{- if kindIs "map" .Values.nats }}
-{{- if not (kindIs "bool" (index .Values.nats "create")) }}
-{{- $wrote := printf "is a %s rather than true or false, which is not a value helm can resolve a dependency condition from" (kindOf (index .Values.nats "create")) }}
 {{- if not (hasKey .Values.nats "create") }}
-{{- $wrote = (join "" (list
-      "has been deleted from this release's values, and this chart ships it. Writing `nats:` with nothing "
-      "under it — or `nats: null` — makes helm REMOVE THE WHOLE BLOCK rather than read it, and this chart's "
-      "`nats.create: false`, its authorization users and every other broker setting beside them go with it")) }}
-{{- end }}
-{{- fail (printf (join "" (list
-      "platform: nats.create %s. "
+{{- fail (join "" (list
+      "platform: nats.create has been deleted from this release's values, and this chart ships it. "
+      "Writing `nats:` with nothing under it — or `nats: null` — makes helm REMOVE THE WHOLE BLOCK rather than "
+      "read it, and this chart's `nats.create: false`, its authorization users and every other broker setting "
+      "beside them go with it. "
       "The broker is a dependency declared `condition: nats.create`, and helm leaves a dependency ENABLED when "
-      "the path its condition names does not resolve — so this does not turn the broker off, it installs one "
-      "while this chart's own nats-ingress NetworkPolicy reads the same unusable value as false and skips, "
-      "leaving the broker with nothing in front of it. "
+      "the path its condition names does not resolve — so this does not turn the broker off, it installs one on "
+      "the upstream chart's OWN defaults, with none of the settings above and with no nats-ingress "
+      "NetworkPolicy in front of it. "
       "Write `nats.create: false` to leave the broker out, or `nats.create: true` to install it. "
-      "To accept the chart's default, omit the key entirely."))
-      $wrote) }}
+      "To accept the chart's default, omit the key entirely.")) }}
+{{- else if not (contains "/charts/" .Template.BasePath) }}
+{{- if not (kindIs "bool" (index .Values.nats "create")) }}
+{{- fail (printf (join "" (list
+      "platform: nats.create is a %s rather than true or false, which is not a value helm can resolve a "
+      "dependency condition from. "
+      "The broker is a dependency declared `condition: nats.create`, and helm leaves a dependency ENABLED when "
+      "the path its condition names does not resolve — so a value in this shape does not turn the broker off, "
+      "it installs one while this chart's own nats-ingress NetworkPolicy reads the same unusable value as false "
+      "and skips, leaving the broker with nothing in front of it. "
+      "Write `nats.create: false` to leave the broker out, or `nats.create: true` to install it."))
+      (kindOf (index .Values.nats "create"))) }}
+{{- end }}
 {{- end }}
 {{- end }}{{/* end of the nats register-key arm */}}
 
