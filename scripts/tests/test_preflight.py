@@ -60,6 +60,7 @@ Run: python3 -m pytest scripts/tests/ -q
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -2841,6 +2842,802 @@ def test_a_gateway_tie_that_stops_following_its_toggle_reddens_the_agreement_gat
     )
 
 
+# ── THE RESPONSE THE MATCHER READS, AND WHO DECIDES ITS SHAPE ────────────────
+# THE API SERVER PRETTY-PRINTS FOR ANY CLIENT WHOSE `User-Agent` BEGINS WITH
+# `curl`, AND `preflight.image` IS `curlimages/curl`. Measured in-cluster against
+# kind-yadgar (Kubernetes v1.36.1), one pod, three requests to one URL:
+#
+#   default agent (curl/…)   12 lines
+#   ?pretty=false             1 line
+#   a non-curl agent          1 line
+#
+# WHAT IT COST. cert-manager issued the probe Certificate in about one second —
+# `Ready=True` at t=1s, Secret created — and the preflight Job still failed at its
+# 120-second bound reporting that cert-manager's CONTROLLER was not running. The
+# post-install probe failed identically beside an `edge` Gateway reading
+# `Programmed=True`. Both Jobs report the one thing that was not wrong.
+#
+# THE MATCHER IS NOT AT FAULT AND IS NOT WHAT CHANGES. `condition_matches` is a
+# LINE matcher over a body it splits on the literal `},{`, and a pretty body
+# defeats it TWICE OVER with no grep fix for either half:
+#
+#   1. `"type": "Ready"` carries a space after the colon, so the needle
+#      `'"type":"Ready"'` matches nothing at all.
+#   2. `type` and `status` land on SEPARATE LINES, so no single line the pipeline
+#      sees can carry both — the `grep | grep` chain cannot succeed however the
+#      needles are written.
+#
+# So the three gates below are three different jobs and only the middle one moves
+# when the fix lands:
+#
+#   THE REASON      the lifted matcher REFUSES a pretty body whose condition is
+#                   present. True before the fix and after it, forever. It is why
+#                   the request layer has to guarantee compact.
+#   THE END TO END  the lifted `request()` and the lifted `condition_matches()`
+#                   run together against a fake `curl` that implements the API
+#                   SERVER's own pretty rule. RED before the fix, green after.
+#   THE ARGV        the properties the fix rests on, read off what `curl` was
+#                   actually called with: an agent that cannot trigger the rule,
+#                   `pretty=false` on every request, the right join character, and
+#                   a URL that does not grow across polls.
+#
+# EVERY ONE OF THEM RUNS THE RENDERED SHELL. A grep for `pretty=false` in a
+# template is not evidence the probe works: `case "$path" in *?*)` — the escape
+# dropped — sends EVERY path down the `&` branch and requests
+# `/apis/…&pretty=false`, and a template grep passes that.
+
+# BOTH CALL SITES, BY NAME. `condition_matches` and `request` are DUPLICATED in the
+# two templates rather than shared, so a fix in one leaves the class alive in the
+# other. The gates below iterate this map and the count is asserted, so deleting
+# half the fix reddens rather than quietly passing.
+EXPECTED_MATCHING_SCRIPTS = 2
+
+# The agent the templates set, read off the rendered script. Optional by design:
+# the red cases below delete it.
+USER_AGENT_ASSIGNMENT = re.compile(r"^[ ]*USER_AGENT=.*$", re.MULTILINE)
+
+
+# The rendered `request()`, lifted the way `CONDITION_MATCHER` lifts the matcher.
+REQUEST_FUNCTION = re.compile(
+    r"^(?P<indent>[ ]*)request\(\) \{\n(?:.*\n)*?(?P=indent)\}$",
+    re.MULTILINE,
+)
+
+# The preflight's `await` calls. A SECOND REGEX RATHER THAN A WIDENING OF
+# `AWAIT_CALL`, which requires a quoted message and a quoted operator: the
+# preflight passes no message at all, quotes its status on one arm
+# (`"True|False"`) and not on the other, and quotes neither operator.
+PREFLIGHT_AWAIT_CALL = re.compile(
+    r'^[ ]*await\s+"(?P<path>[^"]+)"\s+(?P<condition>\w+)\s+'
+    r'"?(?P<status>[^"\s]+)"?\s+(?P<operator>\S+)\s*$',
+    re.MULTILINE,
+)
+
+# `curl`'s own default agent, restated so the fake below is the real client's
+# stand-in rather than a convenient one. It is the value that triggers the rule.
+CURLS_OWN_AGENT = "curl/8.16.0"
+
+# The two agents the API server pretty-prints for. Asserted as PROPERTIES of
+# whatever agent the templates choose rather than against a literal: a chart that
+# picked `curl-platform-preflight` would satisfy any grep for its own new string
+# and still be pretty-printed on every request.
+PRETTY_PRINTING_AGENT_PREFIX = "curl"
+PRETTY_PRINTING_AGENT_SUBSTRING = "mozilla"
+
+# A path that already carries a query, and the one the probes actually use.
+# `?dryRun=All` is the mariadb arm's, so the join character is a real case and not
+# a hypothetical one.
+PATH_WITH_A_QUERY = "/apis/k8s.mariadb.com/v1alpha1/namespaces/yadgar/mariadbs?dryRun=All"
+PATH_WITHOUT_A_QUERY = "/apis/cert-manager.io/v1/namespaces/yadgar/certificates/preflight-probe"
+
+# A message no implementation could plausibly contain, for the bodies this suite
+# builds itself. The estate's fixture rule: never the real constant.
+BODY_SENTINEL = "sentinel-of-the-body"
+
+# One DELETE, two GETs of one path, and a POST to a path that already carries a
+# query. Asserted, so a gate cannot report a pass having examined fewer.
+EXPECTED_DRIVEN_REQUESTS = 4
+
+
+def matching_scripts(documents: list[dict]) -> dict[str, str]:
+    """The two rendered scripts that carry a `condition_matches`, BY NAME.
+
+    Named rather than collected, so a gate cannot pass by having found one.
+    """
+    scripts = {
+        "preflight": preflight_script(documents),
+        "envoy-gateway-probe": post_install_probe_script(documents),
+    }
+    assert len(scripts) == EXPECTED_MATCHING_SCRIPTS, (
+        f"this suite knows {len(scripts)} scripts carrying the matcher and the "
+        f"chart has {EXPECTED_MATCHING_SCRIPTS}"
+    )
+    for name, script in scripts.items():
+        assert CONDITION_MATCHER.search(script), (
+            f"the rendered {name} script defines no `condition_matches()`, so the "
+            f"gates below would examine nothing for it"
+        )
+        assert REQUEST_FUNCTION.search(script), (
+            f"the rendered {name} script defines no `request()`, so the gates below "
+            f"would examine nothing for it"
+        )
+    return scripts
+
+
+def condition_body(condition: str, status: str, message: str) -> dict:
+    """An object carrying the condition an `await` waits for, and a decoy beside it.
+
+    THE DECOY IS NOT DECORATION. A body holding one condition is matched by a
+    pipeline that ignores the type entirely, so it cannot tell a reader of `type`
+    from a reader of nothing.
+    """
+    return {
+        "apiVersion": "probe.invalid/v1",
+        "kind": "Probe",
+        "metadata": {"name": "preflight-probe", "namespace": RELEASE_NAMESPACE},
+        "status": {
+            "conditions": [
+                {
+                    "type": "NotTheOneWaitedFor",
+                    "status": "Unknown",
+                    "reason": "NotTheOneWaitedFor",
+                    "message": BODY_SENTINEL,
+                },
+                {
+                    "type": condition,
+                    "status": status,
+                    "reason": condition,
+                    "message": message,
+                },
+            ]
+        },
+    }
+
+
+def healthy_cases(name: str, script: str) -> list[tuple[str, str, dict]]:
+    """For each `await` the script makes: (label, the matcher call, a body that satisfies it).
+
+    THE NEEDLES ARE TAKEN FROM THE CALL SITE rather than retyped, so a probe changed
+    to demand something else is exercised as changed. PURE.
+    """
+    if name == "envoy-gateway-probe":
+        call = await_call(script)
+        return [
+            (
+                f"{name}/{call.group('condition')}",
+                " ".join(
+                    [
+                        "condition_matches",
+                        call.group("condition"),
+                        call.group("status"),
+                        '"' + call.group("message") + '"',
+                    ]
+                ),
+                json.loads(
+                    gateway_body("True", ADDRESS_ASSIGNED, "True", LISTENER_TRANSLATED)
+                ),
+            )
+        ]
+
+    cases = []
+    for call in PREFLIGHT_AWAIT_CALL.finditer(script):
+        status = call.group("status")
+        # `True|False` is an alternation the matcher hands to `grep -E`. The body
+        # carries ONE of them, and the first is what a healthy cluster writes.
+        cases.append(
+            (
+                f"{name}/{call.group('operator')}",
+                " ".join(
+                    [
+                        "condition_matches",
+                        call.group("condition"),
+                        "'" + status + "'",
+                    ]
+                ),
+                condition_body(call.group("condition"), status.split("|")[0], BODY_SENTINEL),
+            )
+        )
+    assert cases, (
+        f"the rendered {name} script makes no `await` call this suite can read, so "
+        f"these gates would run the matcher against no needle at all"
+    )
+    return cases
+
+
+def compact(body: dict) -> str:
+    """The bytes the API server writes for a client it does not pretty-print for."""
+    return json.dumps(body, separators=(",", ":"))
+
+
+def pretty(body: dict) -> str:
+    """The bytes it writes for one it does.
+
+    `json.MarshalIndent(obj, "", "  ")` is what `k8s.io/apiserver` calls, and
+    `indent=2` is its Python spelling: a space after every `:`, and one field per
+    line. Both halves of the defect are in that sentence.
+    """
+    return json.dumps(body, indent=2)
+
+
+def matcher_only_harness(script: str, call: str) -> str:
+    """The lifted matcher and nothing else, run against a body named on argv."""
+    function = CONDITION_MATCHER.search(script)
+    assert function, "the rendered script defines no `condition_matches()`"
+    lines = ["set -u", 'body="$1"']
+    assignment = PROGRAMMED_MESSAGE_ASSIGNMENT.search(script)
+    if assignment:
+        lines.append(assignment.group(0).strip())
+    lines += [textwrap.dedent(function.group(0)), call, ""]
+    return "\n".join(lines)
+
+
+# The fake `curl`, and it implements THE API SERVER'S RULE rather than the probe's
+# wishes. `k8s.io/apiserver/pkg/endpoints/handlers/negotiation` reads an explicit
+# `pretty` query parameter first and falls back to the agent, pretty-printing when
+# it begins with `curl` or contains `mozilla` in any case. A fake that only honoured
+# `pretty=false` would report the agent half of the fix as working whether it was
+# there or not.
+#
+# A SHELL FUNCTION, so it shadows the real binary on PATH inside the lifted
+# `request()` — including as the last element of its `printf | curl` pipeline.
+FAKE_CURL = r"""
+curl() {
+  printf -- '--CALL--\n' >>"$RECORD"
+  for word in "$@"; do printf '%s\n' "$word" >>"$RECORD"; done
+
+  agent=''
+  out=''
+  url=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --user-agent|-A) agent="$2"; shift 2 ;;
+      --header|-H)
+        case "$2" in
+          [Uu]ser-[Aa]gent:*) agent="${2#*:}"; agent="${agent# }" ;;
+        esac
+        shift 2 ;;
+      --output|-o) out="$2"; shift 2 ;;
+      --cacert|--request|-X|--write-out|-w|--data-binary|-d) shift 2 ;;
+      -*) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+
+  [ -n "$out" ] || { printf '000'; return 1; }
+  [ -n "$url" ] || { printf '000'; return 1; }
+  [ -n "$agent" ] || agent="$CURLS_OWN_AGENT"
+
+  chosen="$COMPACT_BODY"
+  case "$url" in
+    *pretty=false*) chosen="$COMPACT_BODY" ;;
+    *pretty=true*) chosen="$PRETTY_BODY" ;;
+    *)
+      lowered="$(printf '%s' "$agent" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
+      case "$agent" in
+        curl*) chosen="$PRETTY_BODY" ;;
+        *) case "$lowered" in *mozilla*) chosen="$PRETTY_BODY" ;; esac ;;
+      esac
+      ;;
+  esac
+
+  cat "$chosen" >"$out"
+  printf '200'
+}
+"""
+
+
+def request_harness(script: str, driver: str) -> str:
+    """The lifted `request()` and `condition_matches()` over the fake API server.
+
+    Everything the lifted text reads — `$api`, `$sa`, `$token`, `$body` — is bound
+    here exactly as the Job's own preamble binds it. PURE.
+    """
+    request = REQUEST_FUNCTION.search(script)
+    matcher = CONDITION_MATCHER.search(script)
+    assert request and matcher, "the rendered script is missing `request()` or the matcher"
+    agent = USER_AGENT_ASSIGNMENT.search(script)
+    lines = [
+        "set -u",
+        f'api="{THE_API}"',
+        'sa="/var/run/secrets/kubernetes.io/serviceaccount"',
+        f'ns="{RELEASE_NAMESPACE}"',
+        'token="a-token-the-fake-never-reads"',
+        'body="$SCRATCH/answer"',
+        'STATUS=""',
+        FAKE_CURL,
+    ]
+    # ABSENT IS NOT AN ERROR HERE. Before the fix there is no assignment, and this
+    # harness has to RUN in that state — that is the whole point of the red case.
+    if agent:
+        lines.append(agent.group(0).strip())
+    assignment = PROGRAMMED_MESSAGE_ASSIGNMENT.search(script)
+    if assignment:
+        lines.append(assignment.group(0).strip())
+    lines += [
+        textwrap.dedent(request.group(0)),
+        textwrap.dedent(matcher.group(0)),
+        driver,
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_harness(harness: Path, scratch: Path, body: dict, *arguments: str):
+    """Run a harness with the fake API server's two renderings of `body` in hand."""
+    binary = shutil.which("sh")
+    # NOT A SKIP, and ADR-0650 is why — the same decision `helm()` above makes.
+    assert binary, (
+        "no POSIX shell is on PATH. These gates RUN the probe's own request path, "
+        "and the probe's container runs it under `sh` too"
+    )
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "compact.json").write_text(compact(body))
+    (scratch / "pretty.json").write_text(pretty(body))
+    record = scratch / "argv"
+    record.write_text("")
+    return subprocess.run(
+        [binary, str(harness), *arguments],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "SCRATCH": str(scratch),
+            "RECORD": str(record),
+            "COMPACT_BODY": str(scratch / "compact.json"),
+            "PRETTY_BODY": str(scratch / "pretty.json"),
+            "CURLS_OWN_AGENT": CURLS_OWN_AGENT,
+        },
+    )
+
+
+def recorded_calls(scratch: Path) -> list[list[str]]:
+    """What `curl` was invoked with, one list of words per call."""
+    calls: list[list[str]] = []
+    for line in (scratch / "argv").read_text().splitlines():
+        if line == "--CALL--":
+            calls.append([])
+        elif calls:
+            calls[-1].append(line)
+    return calls
+
+
+# The API the Jobs' own preamble binds `$api` to. `url_of` anchors on it rather
+# than on `http`, which a future `--proxy` or `--referer` VALUE would also satisfy.
+THE_API = "https://kubernetes.default.svc"
+
+
+def url_of(words: list[str]) -> str:
+    """The URL a recorded call requested: the one word that is the API's own."""
+    urls = [word for word in words if word.startswith(THE_API)]
+    assert len(urls) == 1, f"expected one {THE_API} word in {words}, found {urls}"
+    return urls[0]
+
+
+def agent_of(words: list[str]) -> str | None:
+    for index, word in enumerate(words[:-1]):
+        if word in ("--user-agent", "-A"):
+            return words[index + 1]
+        if word in ("--header", "-H") and words[index + 1].lower().startswith("user-agent:"):
+            return words[index + 1].split(":", 1)[1].strip()
+    return None
+
+
+# ── THE REASON: THE MATCHER CANNOT READ A PRETTY BODY, AND NEVER WILL ────────
+
+
+def matcher_shape_failures(name: str, script: str, tmp_path: Path) -> list[str]:
+    """The lifted matcher over the same object in both renderings. PURE of the fix.
+
+    THIS DOES NOT MOVE WHEN THE FIX LANDS, and that is what it is for. It states the
+    standing fact the fix rests on: the matcher reads compact JSON and refuses the
+    pretty rendering of the very same object. A future reader tempted to drop
+    `pretty=false` because "the agent handles it" meets this case first.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    failures = []
+    for label, call, body in healthy_cases(name, script):
+        harness = tmp_path / f"matcher-{label.replace('/', '-')}.sh"
+        harness.write_text(matcher_only_harness(script, call))
+        for shape, render_body, must_accept in (
+            ("compact", compact(body), True),
+            ("pretty", pretty(body), False),
+        ):
+            path = tmp_path / f"body-{label.replace('/', '-')}-{shape}.json"
+            path.write_text(render_body)
+            accepted = matcher_verdict(harness, path) == 0
+            if accepted == must_accept:
+                continue
+            if must_accept:
+                failures.append(
+                    f"{label}: the rendered matcher REFUSES the compact body its own "
+                    f"`await` asks for, so this gate is reading the wrong condition "
+                    f"and proves nothing about the pretty one"
+                )
+            else:
+                failures.append(
+                    f"{label}: the rendered matcher ACCEPTS the PRETTY rendering of "
+                    f"that body. It is a line matcher over a body split on `}}{{`, and "
+                    f"a pretty body puts a space after every `:` and `type` and "
+                    f"`status` on separate lines — if it accepts one, this gate has "
+                    f"stopped describing the matcher that ships"
+                )
+    return failures
+
+
+def test_the_matcher_reads_compact_json_and_refuses_the_pretty_rendering(tmp_path):
+    """Why `request()` has to guarantee compact, stated as a property of the matcher."""
+    documents = adopter_render()
+    failures = []
+    for name, script in matching_scripts(documents).items():
+        failures += matcher_shape_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+# ── THE END TO END: THE PROBE'S OWN REQUEST PATH AGAINST THE API SERVER'S RULE ─
+
+
+def probe_reading_failures(name: str, script: str, tmp_path: Path) -> list[str]:
+    """Does the probe, making its own request, read a healthy cluster as healthy?
+
+    THE FAILING CASE THIS SUITE WAS MISSING. `request()` and `condition_matches()`
+    are lifted TOGETHER and run against a `curl` that pretty-prints by the API
+    server's rule, so the verdict answers the question the Job answers: with
+    cert-manager having written `Ready=True`, does the preflight pass?
+    """
+    failures = []
+    for label, call, body in healthy_cases(name, script):
+        scratch = tmp_path / label.replace("/", "-")
+        harness = scratch / "probe.sh"
+        scratch.mkdir(parents=True, exist_ok=True)
+        harness.write_text(
+            request_harness(
+                script,
+                "\n".join(
+                    [
+                        f'request GET "{PATH_WITHOUT_A_QUERY}" ""',
+                        '[ "$STATUS" = "200" ] || exit 2',
+                        call,
+                    ]
+                ),
+            )
+        )
+        result = run_harness(harness, scratch, body)
+        if result.returncode == 0:
+            continue
+        if result.returncode == 2:
+            failures.append(f"{label}: the harness never got a 200 from the fake API server")
+            continue
+        calls = recorded_calls(scratch)
+        requested = url_of(calls[-1]) if calls else "<no request was made>"
+        failures.append(
+            f"{label}: the probe REFUSES a healthy cluster. Its own `request()` "
+            f"asked for {requested}, the API server pretty-printed the answer "
+            f"because of it, and the matcher could not read a condition that IS "
+            f"present. This is the preflight failing at its bound reporting that an "
+            f"operator which answered in about one second is not running. "
+            f"stderr: {result.stderr.strip()!r}"
+        )
+    return failures
+
+
+def test_each_probe_reads_a_healthy_cluster_as_healthy(tmp_path):
+    """R1 of this section: the defect itself, through the shell that ships."""
+    documents = adopter_render()
+    failures = []
+    for name, script in matching_scripts(documents).items():
+        failures += probe_reading_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+# ── THE ARGV: THE FOUR PROPERTIES THE FIX RESTS ON ───────────────────────────
+
+
+def argv_failures(name: str, script: str, tmp_path: Path) -> list[str]:
+    """Every property of what `curl` was actually called with. PURE of the template text.
+
+    FOUR PROPERTIES, EACH WITH ITS OWN WAY OF BEING WRONG WHILE A TEMPLATE GREP
+    PASSES:
+
+      THE AGENT      must not begin with `curl` and must not contain `mozilla`.
+                     Asserted as a property, never against a literal: the API
+                     server reads both, and `curl-platform-preflight` satisfies any
+                     grep for the chart's own new string and is still pretty-
+                     printed.
+      THE PARAMETER  `pretty=false` on EVERY request, both branches. Covering only
+                     the POST leaves every GET pretty, and every condition the
+                     probes read comes back on a GET.
+      THE JOIN       `?dryRun=All&pretty=false`, never `?dryRun=All?pretty=false`.
+                     `case "$path" in *?*)` with the escape dropped sends every
+                     path down the `&` branch instead, and requests
+                     `/apis/…&pretty=false`.
+      IDEMPOTENCE    two successive calls with one path request byte-identical
+                     URLs. POSIX `sh` has no locals and `await` re-calls `request`
+                     with the same `path` on every poll, so a fix that appends to
+                     `path` grows the query by one `&pretty=false` per second.
+    """
+    scratch = tmp_path / name
+    harness = scratch / "argv.sh"
+    scratch.mkdir(parents=True, exist_ok=True)
+    harness.write_text(
+        request_harness(
+            script,
+            "\n".join(
+                [
+                    # `remove()` DELETEs before anything is created and then GETs
+                    # the same path until it answers 404, and `await` GETs it
+                    # again on every poll. Driving only the two verbs the probe
+                    # reads conditions with would let a join wrong on DELETE pass.
+                    f'request DELETE "{PATH_WITHOUT_A_QUERY}" ""',
+                    f'request GET "{PATH_WITHOUT_A_QUERY}" ""',
+                    f'request GET "{PATH_WITHOUT_A_QUERY}" ""',
+                    f'request POST "{PATH_WITH_A_QUERY}" \'{{"kind":"Probe"}}\'',
+                ]
+            ),
+        )
+    )
+    body = condition_body("Ready", "True", BODY_SENTINEL)
+    result = run_harness(harness, scratch, body)
+    calls = recorded_calls(scratch)
+    if len(calls) != EXPECTED_DRIVEN_REQUESTS:
+        return [
+            f"{name}: the harness made {len(calls)} requests where "
+            f"{EXPECTED_DRIVEN_REQUESTS} were driven, so this gate would examine "
+            f"less than it was asked to. stderr: {result.stderr.strip()!r}"
+        ]
+
+    failures = []
+    delete, first_get, second_get, post = calls
+    for label, words in (("DELETE", delete), ("GET", first_get), ("POST", post)):
+        agent = agent_of(words)
+        if agent is None:
+            failures.append(
+                f"{name}: the {label} branch sends no `User-Agent`, so `curl` sends "
+                f"its own and the API server pretty-prints the answer"
+            )
+        else:
+            if agent.startswith(PRETTY_PRINTING_AGENT_PREFIX):
+                failures.append(
+                    f"{name}: the {label} branch's agent {agent!r} BEGINS WITH "
+                    f"{PRETTY_PRINTING_AGENT_PREFIX!r}, which is exactly what the API "
+                    f"server pretty-prints for"
+                )
+            if PRETTY_PRINTING_AGENT_SUBSTRING in agent.lower():
+                failures.append(
+                    f"{name}: the {label} branch's agent {agent!r} contains "
+                    f"{PRETTY_PRINTING_AGENT_SUBSTRING!r}, the API server's other "
+                    f"pretty-print trigger"
+                )
+        url = url_of(words)
+        if "pretty=false" not in url:
+            failures.append(
+                f"{name}: the {label} branch requested {url}, which carries no "
+                f"`pretty=false`. The agent alone is the whole guarantee, and a "
+                f"future agent change silently removes it"
+            )
+
+    bare_url = url_of(first_get)
+    if "?pretty=false" not in bare_url:
+        failures.append(
+            f"{name}: a path carrying NO query was requested as {bare_url}. A path "
+            f"with no query joins its first parameter with `?` — `&pretty=false` on "
+            f"a bare path is not a query at all, it is part of the path, and the API "
+            f"server pretty-prints the answer exactly as before. This is what "
+            f"`case \"$path\" in *?*)` does with the escape dropped, and a template "
+            f"grep for `pretty=false` passes it"
+        )
+
+    post_url = url_of(post)
+    if "?dryRun=All&pretty=false" not in post_url:
+        failures.append(
+            f"{name}: a path that already carries a query was requested as "
+            f"{post_url}. `?dryRun=All&pretty=false` is the only valid join — a "
+            f"second `?` makes `dryRun=All?pretty=false` one opaque parameter value "
+            f"and the dry run stops being a dry run"
+        )
+
+    if url_of(first_get) != url_of(second_get):
+        failures.append(
+            f"{name}: two successive requests with ONE path asked for "
+            f"{url_of(first_get)} then {url_of(second_get)}. `await` polls with the "
+            f"same `path` until the bound, so a URL that grows is a query that grows "
+            f"once a second"
+        )
+    return failures
+
+
+def test_every_request_asks_for_a_response_the_matcher_can_read(tmp_path):
+    """The four properties, over both scripts."""
+    documents = adopter_render()
+    failures = []
+    for name, script in matching_scripts(documents).items():
+        failures += argv_failures(name, script, tmp_path)
+    assert failures == [], "\n".join(failures)
+
+
+def test_the_fix_covers_both_call_sites_and_this_suite_knows_how_many():
+    """THE COUNT, SO DELETING HALF THE FIX REDDENS RATHER THAN QUIETLY PASSING.
+
+    The matcher and the request function are duplicated across two templates. Every
+    gate in this section iterates `matching_scripts`, and a gate that iterated ONE
+    would pass with the other still broken — which is the shape that made this
+    defect survive its own first fix elsewhere.
+    """
+    scripts = matching_scripts(adopter_render())
+    assert sorted(scripts) == ["envoy-gateway-probe", "preflight"], sorted(scripts)
+
+
+# ── THE CONSTRUCTED RED CASES, ONE PER TEMPLATE ──────────────────────────────
+# ONE PER TEMPLATE AND NEVER BOTH AT ONCE. A red case that reverts the fix in both
+# files proves only that the gate notices SOMETHING; it is satisfied by a gate
+# reading one script. Reverting one at a time is what requires the gate to read
+# each.
+
+THE_FIXED_TEMPLATES = {
+    "preflight": "preflight.yaml",
+    "envoy-gateway-probe": "envoy-gateway-probe.yaml",
+}
+
+
+def chart_without_the_compact_response_guarantee(destination: Path, template_name: str) -> Path:
+    """The chart as it stood when the defect was measured, in ONE of the two files."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    job = copy / "templates" / template_name
+    text = job.read_text()
+
+    agent = USER_AGENT_ASSIGNMENT.search(text)
+    assert agent, f"{template_name} assigns no USER_AGENT; this red case is testing nothing"
+    text = text.replace(agent.group(0) + "\n", "", 1)
+
+    flag = '                    --user-agent "$USER_AGENT" \\\n'
+    assert text.count(flag) == 2, (
+        f"{template_name} passes `--user-agent` on {text.count(flag)} of its two curl "
+        f"branches; this red case is testing nothing"
+    )
+    text = text.replace(flag, "")
+
+    join = (
+        '                case "$path" in\n'
+        '                  *\\?*) query="&pretty=false" ;;\n'
+        '                  *) query="?pretty=false" ;;\n'
+        "                esac\n"
+    )
+    assert join in text, (
+        f"{template_name}'s `pretty=false` join moved; this red case is testing nothing"
+    )
+    text = text.replace(join, "", 1)
+    assert text.count('"$api$path$query")"') == 2, (
+        f"{template_name} does not build both its URLs from `$query`; this red case is "
+        f"testing nothing"
+    )
+    text = text.replace('"$api$path$query")"', '"$api$path")"')
+
+    job.write_text(text)
+    return copy
+
+
+def red_case_failures(broken: str, tmp_path: Path) -> list[str]:
+    """Every failure the three gates report with the fix reverted in `broken` only."""
+    documents = adopter_render(
+        chart_without_the_compact_response_guarantee(tmp_path / broken, THE_FIXED_TEMPLATES[broken])
+    )
+    failures = []
+    for name, script in matching_scripts(documents).items():
+        failures += probe_reading_failures(name, script, tmp_path / broken / "e2e" / name)
+        failures += argv_failures(name, script, tmp_path / broken / "argv")
+    return failures
+
+
+def scripts_reported_broken(failures: list[str]) -> set[str]:
+    """Which script each end-to-end refusal named. Its label is `<script>/<await>`."""
+    return {
+        failure.split("/", 1)[0]
+        for failure in failures
+        if "REFUSES a healthy cluster" in failure
+    }
+
+
+def test_reverting_the_fix_in_the_preflight_alone_reddens_the_gates(tmp_path):
+    """The measured defect, put back in one file. It must be named, and alone."""
+    failures = red_case_failures("preflight", tmp_path)
+    message = "\n".join(failures)
+    assert failures, (
+        "the preflight's compact-response guarantee was deleted and every gate passed, "
+        "so the Job that failed at its 120-second bound against a cert-manager which "
+        "answered in one second would ship again"
+    )
+    assert scripts_reported_broken(failures) == {"preflight"}, (
+        f"reverting the PREFLIGHT ALONE had the end-to-end gate name "
+        f"{sorted(scripts_reported_broken(failures))}. Naming more is a gate that is "
+        f"not reading the script it reports; naming fewer is a gate that would pass "
+        f"with half the fix deleted.\n{message}"
+    )
+
+
+def test_reverting_the_fix_in_the_gateway_probe_alone_reddens_the_gates(tmp_path):
+    """The same defect in the other copy — the half a single-file fix leaves alive."""
+    failures = red_case_failures("envoy-gateway-probe", tmp_path)
+    message = "\n".join(failures)
+    assert failures, (
+        "the post-install probe's compact-response guarantee was deleted and every "
+        "gate passed, so the probe that failed beside an `edge` Gateway reading "
+        "`Programmed=True` would ship again"
+    )
+    assert scripts_reported_broken(failures) == {"envoy-gateway-probe"}, (
+        f"reverting the GATEWAY PROBE ALONE had the end-to-end gate name "
+        f"{sorted(scripts_reported_broken(failures))}. Naming more is a gate that is "
+        f"not reading the script it reports; naming fewer is a gate that would pass "
+        f"with half the fix deleted.\n{message}"
+    )
+
+
+def chart_whose_join_glob_is_unescaped(destination: Path) -> Path:
+    """The mutation a template grep for `pretty=false` cannot see.
+
+    `*?*` is the shell's glob for "at least one character", so EVERY path takes the
+    `&` branch and the probe requests `/apis/…&pretty=false`. The parameter is in
+    the template, in the URL, and doing nothing.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    for template_name in THE_FIXED_TEMPLATES.values():
+        job = copy / "templates" / template_name
+        text = job.read_text()
+        escaped = '                  *\\?*) query="&pretty=false" ;;\n'
+        assert escaped in text, f"{template_name}'s join moved; this red case is testing nothing"
+        job.write_text(text.replace(escaped, '                  *?*) query="&pretty=false" ;;\n', 1))
+    return copy
+
+
+def test_dropping_the_escape_from_the_join_glob_reddens_the_argv_gate(tmp_path):
+    """A `pretty=false` that is present, requested, and joined to nothing."""
+    documents = adopter_render(chart_whose_join_glob_is_unescaped(tmp_path))
+    failures = []
+    for name, script in matching_scripts(documents).items():
+        failures += argv_failures(name, script, tmp_path / "argv")
+    message = "\n".join(failures)
+    assert failures, (
+        "the escape was dropped from the join glob and the argv gate passed, so a "
+        "probe requesting `/apis/...&pretty=false` — one path, no query at all — "
+        "would ship with `pretty=false` visible in the template"
+    )
+    assert "a path carrying NO query was requested as" in message, message
+
+
+def chart_whose_agent_still_begins_with_curl(destination: Path) -> Path:
+    """The agent named for the chart and still triggering the rule.
+
+    NOT AN INVENTED MUTATION. `curl-yadgar-platform` is what a reader who knew the
+    image and not the rule would write, and it is why the gate asserts a PROPERTY.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    for template_name in THE_FIXED_TEMPLATES.values():
+        job = copy / "templates" / template_name
+        text = job.read_text()
+        agent = USER_AGENT_ASSIGNMENT.search(text)
+        assert agent, f"{template_name} assigns no USER_AGENT; this red case is testing nothing"
+        indent = agent.group(0)[: len(agent.group(0)) - len(agent.group(0).lstrip())]
+        job.write_text(
+            text.replace(agent.group(0), f"{indent}USER_AGENT='curl-yadgar-platform'", 1)
+        )
+    return copy
+
+
+def test_an_agent_that_still_begins_with_curl_reddens_the_argv_gate(tmp_path):
+    documents = adopter_render(chart_whose_agent_still_begins_with_curl(tmp_path))
+    failures = []
+    for name, script in matching_scripts(documents).items():
+        failures += argv_failures(name, script, tmp_path / "argv")
+    message = "\n".join(failures)
+    assert failures, (
+        "the agent was renamed to one that still begins with `curl` and the argv gate "
+        "passed, so the gate is reading the chart's own literal rather than the rule "
+        "the API server applies"
+    )
+    assert "BEGINS WITH 'curl'" in message, message
+
+
 # ── THE CENSUS, PRINTED AS WELL AS ASSERTED ──────────────────────────────────
 
 
@@ -2887,6 +3684,7 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
         ),
         "request bodies at R3": len(HEREDOC.findall(r3_script)),
         "post-install request bodies at R2": len(HEREDOC.findall(post_script)),
+        "scripts carrying the matcher and its request": len(matching_scripts(r2)),
     }
     with capsys.disabled():
         print("\n  preflight census")
@@ -2914,6 +3712,9 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
         "post-install probe Role rules at R2": 1,
         "request bodies at R3": EXPECTED_REQUEST_BODIES,
         "post-install request bodies at R2": EXPECTED_PROBE_REQUEST_BODIES,
+        # Duplicated rather than shared, so a fix in one leaves the class alive in
+        # the other. Every gate in the compact-response section iterates both.
+        "scripts carrying the matcher and its request": EXPECTED_MATCHING_SCRIPTS,
     }
 
 

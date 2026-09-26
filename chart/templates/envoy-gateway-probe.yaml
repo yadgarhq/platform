@@ -158,6 +158,43 @@ spec:
               # of what it made.
               CREATED=""
 
+              # ── THE RESPONSE HAS TO BE COMPACT JSON, AND THIS REQUEST DECIDES IT ─
+              # THE API SERVER PRETTY-PRINTS FOR ANY CLIENT WHOSE `User-Agent`
+              # BEGINS WITH `curl`, and `preflight.image` is `curlimages/curl`.
+              # MEASURED in-cluster against kind-yadgar (Kubernetes v1.36.1), one
+              # pod, three requests to one URL: the default agent answered 12
+              # lines, `?pretty=false` answered 1, a non-curl agent answered 1.
+              #
+              # `condition_matches` BELOW IS A LINE MATCHER, and a pretty body
+              # defeats it TWICE OVER with no grep fix for either half.
+              # `"type": "Ready"` carries a space after the colon, so the needle
+              # matches nothing; and `type` and `status` land on SEPARATE LINES,
+              # so no single line the pipeline sees can carry both. So the
+              # RESPONSE is made deterministic here rather than the matcher made
+              # cleverer.
+              #
+              # WHAT THIS COST BEFORE IT WAS FIXED: cert-manager issued the probe
+              # Certificate in about one second — `Ready=True` at t=1s, Secret
+              # created — and this Job still failed at its bound reporting that
+              # cert-manager's CONTROLLER was not running. The post-install probe
+              # failed the same way beside an `edge` Gateway reading
+              # `Programmed=True`. Both Jobs reported the one thing that was not
+              # wrong, and `preflight.enabled` defaults TRUE into a PreSync hook
+              # whose Application self-heals.
+              #
+              # BOTH MECHANISMS, BECAUSE THEY FAIL DIFFERENTLY. `?pretty=false` is
+              # the explicit parameter and the API server honours it whatever the
+              # agent is; the agent is what stops the DEFAULT from being pretty at
+              # all, including on any request a later reader adds without the
+              # parameter. Either alone would do today, on a probe that gates a
+              # sync.
+              #
+              # THE AGENT IS A LITERAL AND NOT A VALUES KEY. Its whole job is to
+              # NOT begin with `curl` and to NOT contain `mozilla`, which are the
+              # two strings the API server reads; a key would be a weakening
+              # direction nothing else in this chart needs.
+              USER_AGENT='yadgar-platform-envoy-gateway-probe'
+
               # ── THE API, AND THE ONE PLACE A REQUEST IS MADE ──────────────
               # The status lands in `STATUS` and the answer in `$body`. NOTHING
               # HERE EXITS: a caller decides what a status means, because a 404 is
@@ -167,21 +204,40 @@ spec:
                 method="$1"
                 path="$2"
                 payload="$3"
+                # `?` OR `&`, AND THE GLOB IS ESCAPED. `*\?*` asks whether the
+                # path already carries a query — the mariadb arm's
+                # `?dryRun=All` does. UNESCAPED, `*?*` is the shell's glob for
+                # "at least one character", EVERY path takes the `&` branch, and
+                # this probe requests `/apis/...&pretty=false`: one path, no
+                # query at all. A grep for `pretty=false` in this template
+                # passes that, which is why the gate runs the rendered shell.
+                #
+                # THE QUERY GOES IN ITS OWN VARIABLE AND `path` IS NEVER APPENDED
+                # TO. POSIX `sh` has no locals: `await` sets `path="$1"` and
+                # re-calls `request` with it on EVERY poll, so appending would
+                # grow the query by one `&pretty=false` per second until the
+                # bound.
+                case "$path" in
+                  *\?*) query="&pretty=false" ;;
+                  *) query="?pretty=false" ;;
+                esac
                 if [ -n "$payload" ]; then
                   STATUS="$(printf '%s' "$payload" | curl --silent --show-error \
+                    --user-agent "$USER_AGENT" \
                     --cacert "$sa/ca.crt" \
                     --header "Authorization: Bearer $token" \
                     --header "Content-Type: application/json" \
                     --request "$method" --data-binary @- \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path")"
+                    "$api$path$query")"
                 else
                   STATUS="$(curl --silent --show-error \
+                    --user-agent "$USER_AGENT" \
                     --cacert "$sa/ca.crt" \
                     --header "Authorization: Bearer $token" \
                     --request "$method" \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path")"
+                    "$api$path$query")"
                 fi
               }
 
