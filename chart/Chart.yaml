@@ -54,3 +54,37 @@ dependencies:
     version: 2.14.6
     repository: https://nats-io.github.io/k8s/helm/charts
     condition: nats.create
+
+  # THE FIVE OPERATORS, EACH A CHART DEPENDENCY AND NOTHING UPSTREAM COPIED
+  # (ADR-0787, ADR-0792). `operators.create` is the one register-facing key; every
+  # adopter who wants all five sets it and nothing else. A SECOND PATH in each
+  # `condition:` gives per-operator selection without a second register key: helm
+  # reads the FIRST valid path in a comma-separated `condition:` and stops, so
+  # `operators.<op>.create` — unset by default — wins for a chart the moment an
+  # adopter states it, and `operators.create` decides for every chart until they
+  # do. No per-operator key is written into `chart/values.yaml`: an unset path is
+  # not a valid first path, and a key present-and-false would make it one.
+  #
+  # `condition:` IS LOAD-BEARING here for the same reason it is on `nats` above —
+  # a declared dependency renders UNCONDITIONALLY without one, so every adopter's
+  # default render would grow by all five operator releases the day this lands.
+  - name: cert-manager
+    version: v1.21.1
+    repository: https://charts.jetstack.io
+    condition: operators.certManager.create,operators.create
+  - name: keda
+    version: 2.20.2
+    repository: https://kedacore.github.io/charts
+    condition: operators.keda.create,operators.create
+  - name: mariadb-operator
+    version: 26.6.0
+    repository: https://helm.mariadb.com/mariadb-operator
+    condition: operators.mariadbOperator.create,operators.create
+  - name: gateway-helm
+    version: v1.9.1
+    repository: oci://docker.io/envoyproxy
+    condition: operators.envoyGateway.create,operators.create
+  - name: argo-cd
+    version: 8.6.1
+    repository: https://argoproj.github.io/argo-helm
+    condition: operators.argoCd.create,operators.create

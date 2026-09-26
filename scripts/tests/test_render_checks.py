@@ -60,6 +60,24 @@ every object. But what goes red is that check's own red case, reported as "this 
 case did not refuse", which names a symptom rather than the cause. The second
 assertion names the cause, which is why it runs first.
 
+THE CHART DECLARES TWO KINDS OF CHECK, AND ONLY ONE OF THEM IS CONSTRUCTED THE WAY
+EVERYTHING ABOVE DESCRIBES. A CAPABILITY check calls `platform.require-api` and reads
+`.Capabilities.APIVersions.Has`, so every paragraph above applies to it: the trap, the
+filler, and the `--api-versions` construction on both halves. A VALUES check reads the
+release's own values and nothing else — the mixed-release refusal is the one this chart
+carries — and for it NONE of that applies. It touches no `.Capabilities`, so a bare
+render answers it exactly as a cluster would, and ITS RED AND GREEN CASES ARE TWO BARE
+RENDERS. THE FILLER TRIPWIRE DOES NOT APPLY TO IT AND MUST NOT BE ADDED TO IT: there is
+no group whose absence it refuses over, so `--api-versions` on either half would add a
+capability set to a check that reads none and would suggest, to the next reader, that the
+bare pair was the defect rather than the design. This paragraph exists because that next
+reader's instinct will be to "fix" the bare pair into the construction above.
+
+`EXPECTED_RENDER_CHECKS` counts BOTH kinds, because the count exists so that a check
+DELETED from `templates/render-checks.yaml` reddens the suite, and a deletion of either
+kind is the thing it guards against. `EXPECTED_CAPABILITY_CHECKS` is the denominator of
+the red/green construction above, and it is the smaller of the two.
+
 IT ASSERTS HOW MANY PAIRS IT EXERCISED, against a number written here. The rule the
 number is computed from is ONE PAIR PER RENDER CHECK THE CHART DECLARES — not per
 CRD-backed kind, and not per API GROUP either, because one toggle can render several
@@ -95,13 +113,25 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
+CHART_MANIFEST = CHART / "Chart.yaml"
+CHART_VALUES = CHART / "values.yaml"
+RENDER_CHECKS = CHART / "templates" / "render-checks.yaml"
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
 # ── WHAT THE CHART DECLARES, WRITTEN DOWN ────────────────────────────────────
 # A LITERAL, for the reason every expected count in this estate is a literal: a
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
-EXPECTED_RENDER_CHECKS = 2
+#
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and one values check,
+# and the module docstring is where the difference between them lives. It is the
+# number a DELETION reddens, whichever kind was deleted.
+EXPECTED_RENDER_CHECKS = 3
+# The denominator of the `--api-versions` construction, which exercises the
+# capability checks and only those. `EXPECTED_CHECKS` below names them.
+EXPECTED_CAPABILITY_CHECKS = 2
+# The mixed-release refusal, and nothing else so far. Two bare renders are its pair.
+EXPECTED_VALUES_CHECKS = 1
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
@@ -180,12 +210,126 @@ def declaration_failures(chart: Path, expected: dict[str, str]) -> list[str]:
     failures = []
     if len(found) != len(expected):
         failures.append(
-            f"expected {len(expected)} render checks declared in the chart, "
+            # "CAPABILITY checks" and not "render checks", because `check_count_failures`
+            # reports a DIFFERENT and larger number under a name that would otherwise be
+            # the same one: the chart declares three render checks, two of which are the
+            # capability checks this function counts. Two gates printing one phrase with
+            # two numbers is a reader believing whichever they meet first.
+            f"expected {len(expected)} capability checks declared in the chart, "
             f"found {len(found)}: expected {sorted(expected)}, found {sorted(found)}"
         )
     if found != expected:
         failures.append(f"expected the checks {expected}, found {found}")
     return failures
+
+
+# ── THE VALUES CHECK, READ OFF THE SAME FILE ─────────────────────────────────
+# A `fail` CALLED DIRECTLY FROM `templates/render-checks.yaml`, which is what a
+# values check is: it reads the release's values and refuses on them, with no
+# partial and no `.Capabilities` anywhere in it.
+DIRECT_FAIL = re.compile(r"\{\{-?\s+fail\s")
+# The two lists the mixed-release guard ranges over, read off the template so the
+# gates below compare the GUARD with `Chart.yaml` and `values.yaml` rather than
+# with a copy of itself.
+GUARD_OPERATORS = re.compile(r"range \$operator := \(list (?P<names>[^)]*)\)")
+GUARD_TOGGLES = re.compile(r"range \$toggle := \(list (?P<names>[^)]*)\)")
+QUOTED = re.compile(r'"([^"]+)"')
+# The one line the sub-key mutation below rewrites, and the plausible-but-wrong
+# guard it rewrites it into — the guard whose first conjunct is `operators.create`
+# alone, which is the form the estate's own plan names as the one to get wrong.
+RESOLVED_OPERATOR_LINE = '{{- if (dig $operator "create" $operators.create $operators) }}'
+UNRESOLVED_OPERATOR_LINE = "{{- if $operators.create }}"
+# The first capability check's guard, and the boundary the deletion red case cuts at.
+CERT_MANAGER_GUARD = "{{- if or .Values.internalCA.create"
+
+
+def declared_values_checks(chart: Path) -> int:
+    """How many `fail`s `templates/render-checks.yaml` calls DIRECTLY. PURE.
+
+    SCOPED TO THAT ONE FILE ON PURPOSE, and this is the difference between a count
+    that means something and a count that drifts. Other rendered templates call
+    `fail` too — `valkey.yaml` twice and `envoy-gateway-probe.yaml` once, measured
+    2026-09-25 — and those are VALUES-AGREEMENT refusals about one object's own
+    fields, not render checks about a missing prerequisite. Counting every `fail`
+    in `templates/` would start this number above the count of checks and move
+    whenever an unrelated template gained a guard.
+
+    The capability checks are NOT counted here: they call `platform.require-api`
+    and the `fail` lives in the partial, so `declared_checks` is what finds them.
+    """
+    template = chart / "templates" / "render-checks.yaml"
+    return len(DIRECT_FAIL.findall(template.read_text()))
+
+
+def declared_check_count(chart: Path) -> int:
+    """Every check `templates/render-checks.yaml` declares, of both kinds. PURE."""
+    return len(declared_checks(chart)) + declared_values_checks(chart)
+
+
+def check_count_failures(chart: Path) -> list[str]:
+    """How the checks the chart declares disagree with the count written here. PURE.
+
+    A FUNCTION RATHER THAN AN INLINE ASSERT, for the reason `declaration_failures` is
+    one: the red cases below have to WATCH this go red on a mutated chart, and an
+    assertion that only ever runs against the real chart is a gate nobody has seen
+    fail. Both addends are reported, so a total that is right because one kind gained
+    a check while the other lost one is still named.
+    """
+    failures = []
+    total = declared_check_count(chart)
+    if total != EXPECTED_RENDER_CHECKS:
+        failures.append(
+            f"expected {EXPECTED_RENDER_CHECKS} render checks declared in "
+            f"templates/render-checks.yaml, found {total}"
+        )
+    capability = len(declared_checks(chart))
+    if capability != EXPECTED_CAPABILITY_CHECKS:
+        failures.append(
+            f"expected {EXPECTED_CAPABILITY_CHECKS} capability checks, found {capability}"
+        )
+    values_checks = declared_values_checks(chart)
+    if values_checks != EXPECTED_VALUES_CHECKS:
+        failures.append(
+            f"expected {EXPECTED_VALUES_CHECKS} values checks, found {values_checks}"
+        )
+    return failures
+
+
+def guard_list(pattern: re.Pattern[str], chart: Path) -> list[str]:
+    """The quoted names of one `range` list in the mixed-release guard. PURE."""
+    text = (chart / "templates" / "render-checks.yaml").read_text()
+    match = pattern.search(text)
+    assert match, (
+        f"the mixed-release guard no longer carries a list matching {pattern.pattern}, "
+        f"so the gates that compare it with Chart.yaml and values.yaml read nothing"
+    )
+    return QUOTED.findall(match.group("names"))
+
+
+def operator_names_from_chart_manifest(manifest: Path) -> list[str]:
+    """The five operator sub-key names, read off each dependency's `condition:`. PURE.
+
+    `operators.<op>.create,operators.create` is the two-path form; its FIRST path's
+    middle segment is the sub-key name. `nats.create` has two segments and is not an
+    operator, which is what the length test below excludes rather than a name list.
+    """
+    declared = yaml.safe_load(manifest.read_text()).get("dependencies", [])
+    names = []
+    for dependency in declared:
+        first = dependency.get("condition", "").split(",")[0].split(".")
+        if len(first) == 3 and first[0] == "operators":
+            names.append(first[1])
+    return names
+
+
+def create_toggles_from_values(values: Path) -> list[str]:
+    """Every top-level `<key>.create` the chart's own values file carries. PURE."""
+    loaded = yaml.safe_load(values.read_text())
+    return [
+        key
+        for key, value in loaded.items()
+        if isinstance(value, dict) and "create" in value
+    ]
 
 
 def api_versions(groups: Iterable[str]) -> tuple[str, ...]:
@@ -450,15 +594,24 @@ BOTH_FIXTURE_TOGGLES_ON = (
 
 
 def test_the_chart_declares_the_checks_this_harness_exercises():
-    """The denominator, asserted against the chart rather than assumed."""
-    assert len(EXPECTED_CHECKS) == EXPECTED_RENDER_CHECKS, (
+    """The denominator, asserted against the chart rather than assumed.
+
+    BOTH KINDS OF CHECK ARE COUNTED, and the two addends are asserted separately
+    as well as summed: a total that is right because one kind gained a check while
+    the other lost one is the arithmetic a bare sum cannot see.
+    """
+    assert len(EXPECTED_CHECKS) == EXPECTED_CAPABILITY_CHECKS, (
         f"EXPECTED_CHECKS names {len(EXPECTED_CHECKS)} checks and "
-        f"EXPECTED_RENDER_CHECKS says {EXPECTED_RENDER_CHECKS}"
+        f"EXPECTED_CAPABILITY_CHECKS says {EXPECTED_CAPABILITY_CHECKS}"
+    )
+    assert EXPECTED_CAPABILITY_CHECKS + EXPECTED_VALUES_CHECKS == EXPECTED_RENDER_CHECKS, (
+        f"{EXPECTED_CAPABILITY_CHECKS} capability checks and {EXPECTED_VALUES_CHECKS} "
+        f"values checks do not add up to the {EXPECTED_RENDER_CHECKS} this file expects"
     )
     assert declaration_failures(CHART, EXPECTED_CHECKS) == [], declaration_failures(
         CHART, EXPECTED_CHECKS
     )
-    assert len(declared_checks(CHART)) == EXPECTED_RENDER_CHECKS
+    assert check_count_failures(CHART) == [], check_count_failures(CHART)
 
 
 def test_deleting_a_check_from_the_chart_reddens_the_count(tmp_path):
@@ -476,8 +629,8 @@ def test_deleting_a_check_from_the_chart_reddens_the_count(tmp_path):
     message = "\n".join(failures)
     assert failures, "a check was deleted from the chart and the harness said nothing"
     assert (
-        f"expected {EXPECTED_RENDER_CHECKS} render checks declared in the chart, found 0"
-        in message
+        f"expected {EXPECTED_CAPABILITY_CHECKS} capability checks declared in the chart, "
+        f"found 0" in message
     )
 
 
@@ -490,7 +643,7 @@ def test_the_harness_exercises_one_red_green_pair_per_declared_check(tmp_path):
     refuses whatever the target holds and proves nothing about the check.
     """
     exercise_one_pair_per_declared_check(
-        CHART, ("-f", str(ADOPTER_VALUES)), EXPECTED_RENDER_CHECKS, tmp_path
+        CHART, ("-f", str(ADOPTER_VALUES)), EXPECTED_CAPABILITY_CHECKS, tmp_path
     )
 
 
@@ -607,3 +760,310 @@ def test_the_checks_are_unreachable_at_the_chart_defaults():
     defaults = render(CHART)
     assert defaults.returncode == 0, defaults.stderr
     assert objects(defaults.stdout) == []
+
+
+# ── THE MIXED-RELEASE REFUSAL: A VALUES CHECK, AND ITS PAIR IS TWO BARE RENDERS ──
+# `plans/the-operators-toggle.md` step 3. `operators.create: true` names a release
+# that installs the five operators and NOTHING ELSE, because a release that installs
+# an operator and also renders an object of a kind that operator provides cannot
+# work: the CRD does not exist at discovery time, so this chart's own capability
+# check refuses first on a bare cluster, and helm is in any case understood to
+# resolve every kind in a release before it applies anything. That second mechanism
+# is READ rather than measured and nothing here rests on it.
+#
+# EVERY CASE BELOW IS A BARE RENDER, and that is the design rather than an
+# oversight — see the module docstring. Do not add `--api-versions` to any of them.
+
+ONLY_OPERATORS = ("--set", "operators.create=true")
+OPERATORS_AND_CERTIFICATES = (
+    "--set",
+    "operators.create=true",
+    "--set",
+    "certificates.create=true",
+)
+# THE SUB-KEY SHAPE, AND IT IS A PROOF OF THIS CHECK RATHER THAN A FOOTNOTE. The
+# register key is FALSE here and cert-manager installs anyway, because the
+# dependency's `condition:` reads `operators.certManager.create` first. Measured on
+# 2026-09-25 at the step-1 head: this shape WITHOUT `certificates.create` renders 50
+# objects, which is cert-manager installing with the register key off.
+SUB_KEY_AND_CERTIFICATES = (
+    "--set",
+    "operators.create=false",
+    "--set",
+    "operators.certManager.create=true",
+    "--set",
+    "certificates.create=true",
+)
+
+
+def assert_it_is_the_mixed_release_refusal(
+    result: subprocess.CompletedProcess[str], *keys: str
+) -> None:
+    """The refusal is THIS check's, it names every key given, and it is a bare render.
+
+    `--api-versions` ABSENT FROM stderr IS THE LOAD-BEARING CLAUSE, and it is what
+    makes the refusal attributable to this check. Every shape below also trips the
+    cert-manager CAPABILITY check — `certificates.create` is true in all of them and
+    a bare render has no `cert-manager.io/v1` — so both checks would refuse and both
+    exits are non-zero. The capability refusal ends by telling the reader to pass
+    `--api-versions cert-manager.io/v1`; this one never mentions the flag. That
+    clause is therefore the only thing distinguishing "the mixed-release check fired"
+    from "the check declared after it fired instead", which is exactly what a later
+    reader who moves this check down the file would cause.
+    """
+    assert result.returncode != 0, (
+        f"the mixed release rendered instead of being refused: {result.stdout[:400]}"
+    )
+    for key in keys:
+        assert key in result.stderr, (
+            f"the refusal does not name {key}, so it tells an adopter to turn off "
+            f"something other than what they set: {result.stderr}"
+        )
+    assert "--api-versions" not in result.stderr, (
+        "the refusal came from a capability check rather than from the mixed-release "
+        f"check — it is declared after another check that this shape also trips: "
+        f"{result.stderr}"
+    )
+    assert "--api-versions" not in result.args, (
+        f"this case is not a bare render any more: {result.args}"
+    )
+
+
+def test_operators_alone_render_and_that_is_the_green_half():
+    """`operators.create: true` with every other toggle false is release 1, and it renders.
+
+    THE GREEN HALF OF THE PAIR, and it is a BARE render: this check reads no
+    `.Capabilities`, so nothing here needs `--api-versions`. It asserts CRDs are among
+    the objects rather than merely that something rendered — the operators' own
+    CustomResourceDefinitions are what tells this render apart from a render of this
+    chart's ordinary objects, and a green half that cannot tell those apart would pass
+    on a chart where the dependencies never resolved.
+    """
+    green = render(CHART, *ONLY_OPERATORS)
+    assert green.returncode == 0, (
+        f"the operators-only release was refused, and it is the shape the refusal "
+        f"below tells adopters to use: {green.stderr}"
+    )
+    rendered = objects(green.stdout)
+    assert rendered, "the operators-only release rendered nothing"
+    crds = [
+        document
+        for document in rendered
+        if document.get("kind") == "CustomResourceDefinition"
+    ]
+    assert crds, (
+        "the operators-only release rendered no CustomResourceDefinition, so the "
+        "operator subcharts did not render — run `helm dependency build chart/`"
+    )
+    assert "--api-versions" not in green.args, green.args
+
+
+def test_the_mixed_release_is_refused_and_the_refusal_names_both_keys():
+    """THE RED HALF: operators beside an object of a kind those operators provide."""
+    assert_it_is_the_mixed_release_refusal(
+        render(CHART, *OPERATORS_AND_CERTIFICATES),
+        "operators.create",
+        "certificates.create",
+    )
+
+
+def test_the_mixed_release_is_refused_through_a_per_operator_sub_key_too():
+    """THE SHAPE THE OBVIOUS GUARD MISSES, and it is a proof of this check.
+
+    `operators.create` is FALSE here. cert-manager installs anyway, because the
+    dependency's `condition:` reads `operators.certManager.create` first and helm
+    stops at the first valid path. A guard whose first conjunct is `operators.create`
+    alone is false in this shape and never fires — and
+    `test_a_guard_reading_only_the_register_key_misses_the_sub_key_case` below
+    constructs exactly that guard and watches this case stop being refused.
+    """
+    assert_it_is_the_mixed_release_refusal(
+        render(CHART, *SUB_KEY_AND_CERTIFICATES),
+        "operators.certManager.create",
+        "certificates.create",
+    )
+
+
+def test_a_guard_reading_only_the_register_key_misses_the_sub_key_case(tmp_path):
+    """THE CONSTRUCTED RED CASE FOR THE GUARD'S SHAPE (ADR-0793).
+
+    The mutation is one line: the guard resolves each operator the way helm resolves
+    the dependency's own two-path `condition:` — `dig`, with the register key as the
+    FALLBACK — and this rewrites it to read the register key ALONE. That is the
+    plausible-but-wrong guard, and under it the sub-key shape is no longer refused by
+    this check: the render falls through to the cert-manager capability check, which
+    refuses for a different reason and says to pass `--api-versions`.
+
+    IT ASSERTS THE MUTATION LANDED BEFORE IT ASSERTS ANYTHING ABOUT THE RENDER. A
+    rewrite whose pattern no longer matches leaves the correct guard in place, and
+    this case would then "pass" having changed nothing at all.
+    """
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    assert RESOLVED_OPERATOR_LINE in original, (
+        f"the guard no longer contains the line this mutation rewrites, so the "
+        f"mutation would change nothing: {RESOLVED_OPERATOR_LINE}"
+    )
+    template.write_text(original.replace(RESOLVED_OPERATOR_LINE, UNRESOLVED_OPERATOR_LINE))
+    assert template.read_text() != original
+
+    weakened = render(copy, *SUB_KEY_AND_CERTIFICATES)
+    assert "operators.certManager.create" not in weakened.stderr, (
+        "the guard reading the register key alone still refused the sub-key shape, so "
+        f"the mutation did not weaken what this case claims it weakens: {weakened.stderr}"
+    )
+    # What it does instead: falls through to the capability check declared after it,
+    # which refuses for the renderer's reason and names the flag. Asserted so the case
+    # records the ACTUAL behaviour of the wrong guard rather than only an absence.
+    assert "--api-versions" in weakened.stderr, weakened.stderr
+
+    # AND THE HARM ITSELF, MEASURED. Give the capability check the group it wants and
+    # the wrong guard lets the mixed release through outright: cert-manager installing
+    # beside Certificates of the kind it has not registered yet. The correct chart
+    # refuses the same argv, which is the whole difference between the two guards and
+    # the only assertion here phrased on an exit code rather than on a message.
+    # THIS PAIR IS THE ONE PLACE `--api-versions` APPEARS IN A MIXED-RELEASE CASE, and
+    # it is here to quiet the OTHER check rather than to feed this one — the module
+    # docstring's rule that this check's own pair is two bare renders is unaffected.
+    quieted = ("--api-versions", "cert-manager.io/v1")
+    permitted = render(copy, *SUB_KEY_AND_CERTIFICATES, *quieted)
+    assert permitted.returncode == 0, (
+        f"the weakened guard refused anyway, so this case no longer measures what the "
+        f"wrong guard permits: {permitted.stderr}"
+    )
+    assert objects(permitted.stdout), "the weakened guard rendered nothing"
+    refused = render(CHART, *SUB_KEY_AND_CERTIFICATES, *quieted)
+    assert refused.returncode != 0, (
+        "the chart's own guard permitted the mixed release once the capability check "
+        "was satisfied, which is the shape it exists to refuse"
+    )
+
+
+def test_the_values_check_is_declared_BEFORE_the_capability_checks():
+    """ORDER IS LOAD-BEARING, and this names the cause the red cases name a symptom of.
+
+    `fail` aborts the whole render at the FIRST failing check. Every mixed shape also
+    trips the cert-manager capability check, so with this check declared after it the
+    bare renders above would refuse with the capability message and the mixed-release
+    check would be unproved. Declaring it first is also what makes the plan's "two
+    bare renders" literally true — the alternative is passing `--api-versions` to
+    quiet the other check, which drags a capability set into a check that reads none.
+    """
+    text = RENDER_CHECKS.read_text()
+    fail_at = DIRECT_FAIL.search(text)
+    include_at = INVOCATION.search(text)
+    assert fail_at and include_at, text[:400]
+    assert fail_at.start() < include_at.start(), (
+        "the mixed-release check is declared after a capability check, so every shape "
+        "that trips both is refused with the capability check's message and the "
+        "mixed-release check is no longer attributable"
+    )
+
+
+def test_deleting_the_values_check_reddens_the_count(tmp_path):
+    """RED AT 2: the `fail` half of the count, watched going red.
+
+    Deletes the mixed-release check and leaves the two capability checks standing, so
+    the total falls to two — the number this file carried before step 3 of
+    `plans/the-operators-toggle.md`. Without this, a deleted values check leaves a
+    harness that counts what it happens to find and reports a pass.
+    """
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    # Everything above the first capability check goes, which is the values check and
+    # the header comment; the two capability checks below it stay standing.
+    first_capability_check = original.index(CERT_MANAGER_GUARD)
+    assert DIRECT_FAIL.search(original).start() < first_capability_check, original[:400]
+    template.write_text(original[first_capability_check:])
+    assert declared_values_checks(copy) == 0, "the values check survived the deletion"
+
+    failures = check_count_failures(copy)
+    message = "\n".join(failures)
+    assert failures, "the values check was deleted and the count said nothing"
+    assert (
+        f"expected {EXPECTED_RENDER_CHECKS} render checks declared in "
+        f"templates/render-checks.yaml, found 2" in message
+    ), message
+    assert f"expected {EXPECTED_VALUES_CHECKS} values checks, found 0" in message, message
+
+
+def test_a_fourth_check_reddens_the_count(tmp_path):
+    """RED AT 4: the `include` half of the count, watched going red.
+
+    THE OTHER ADDEND ON PURPOSE. The case above deletes a values check and this one
+    adds a capability check, so each half of the sum has been seen moving the total.
+    Two mutations of the same addend would leave the other half unproved.
+    """
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    template.write_text(
+        template.read_text()
+        + "\n{{- if .Values.valkey.create }}\n"
+        '{{- include "platform.require-api" (dict\n'
+        '      "context" $\n'
+        '      "apiVersion" "example.invalid/v1"\n'
+        '      "operator" "a fourth check"\n'
+        '      "toggle" "valkey.create") }}\n'
+        "{{- end }}\n"
+    )
+    assert declared_check_count(copy) == 4, "the fourth check was not counted at all"
+
+    failures = check_count_failures(copy)
+    message = "\n".join(failures)
+    assert failures, "a fourth check was added and the count said nothing"
+    assert (
+        f"expected {EXPECTED_RENDER_CHECKS} render checks declared in "
+        f"templates/render-checks.yaml, found 4" in message
+    ), message
+
+
+def test_the_guard_names_every_operator_THE_CHART_DECLARES():
+    """The guard's operator list against `Chart.yaml`, and neither is a copy of the other.
+
+    THE DRIFT THIS CLOSES. `plans/the-operators-toggle.md` asks for one helper shared
+    between this guard and the vendored-CRD guards of its step 2, because two
+    statements of which operators exist drift apart. No such helper exists yet — step
+    2 as built writes its `dig` per file — so this gate stands in for it: a sixth
+    operator declared as a dependency and not added to this guard is a hole in the
+    refusal, and it reddens here instead of shipping.
+    """
+    declared = operator_names_from_chart_manifest(CHART_MANIFEST)
+    assert len(declared) == 5, (
+        f"expected five operator dependencies with a two-path condition, found "
+        f"{declared} — the guard's list below is checked against this one"
+    )
+    assert sorted(guard_list(GUARD_OPERATORS, CHART)) == sorted(declared), (
+        f"the mixed-release guard ranges over {guard_list(GUARD_OPERATORS, CHART)} and "
+        f"Chart.yaml declares {declared}: an operator missing from the guard installs "
+        f"beside the estate's own objects and is never refused"
+    )
+
+
+def test_the_guard_names_every_OTHER_create_toggle_the_values_file_carries():
+    """The guard's other half against `values.yaml`, for the same reason.
+
+    The plan states the second conjunct as the OR of every OTHER `create` toggle the
+    chart carries, so a toggle added to `values.yaml` and not to the guard leaves a
+    mixed release that renders. `operators` is the one exclusion and it is the subject
+    of the first conjunct.
+
+    `bootstrap.iamKeys.create` IS NOT IN EITHER LIST AND THAT IS CORRECT. It is
+    nested, and `templates/bootstrap-secrets.yaml` renders its block only inside the
+    `{{- if .Values.bootstrap.create }}` that opens the file, so it reaches nothing
+    the OR over `bootstrap.create` does not already cover. This comparison is over
+    TOP-LEVEL keys for that reason.
+    """
+    carried = sorted(
+        key for key in create_toggles_from_values(CHART_VALUES) if key != "operators"
+    )
+    assert carried, "values.yaml carries no create toggles at all, which cannot be right"
+    assert sorted(guard_list(GUARD_TOGGLES, CHART)) == carried, (
+        f"the mixed-release guard ranges over {sorted(guard_list(GUARD_TOGGLES, CHART))} "
+        f"and values.yaml carries {carried}: a toggle missing from the guard renders "
+        f"its objects beside the operators and is never refused"
+    )

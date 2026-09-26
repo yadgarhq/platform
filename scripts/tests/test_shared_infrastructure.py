@@ -73,7 +73,25 @@ DECLARED_API_VERSIONS = ("cert-manager.io/v1", "gateway.envoyproxy.io/v1alpha1")
 EXPECTED_GATEWAY_LISTENER_OBJECTS = 3  # GatewayClass, Gateway, EnvoyProxy
 EXPECTED_VALKEY_OBJECTS = 2  # Deployment, Service
 EXPECTED_INGRESS_POLICIES = 2  # valkey-ingress, nats-ingress
-EXPECTED_DECLARED_DEPENDENCIES = 1  # nats
+EXPECTED_DECLARED_DEPENDENCIES = 6  # nats, cert-manager, keda, mariadb-operator, gateway-helm, argo-cd
+
+# THE `condition:` OF EVERY DEPENDENCY, BY NAME. LITERAL, for the reason every
+# expected number and string in this file is: a value derived from the chart
+# agrees with whatever the chart happens to declare. This is the register no
+# gate read before this test — `declared_dependencies` returns names only, and
+# a chart that declares six dependencies with one condition transposed onto the
+# wrong name still passes every other gate in this suite, because nothing else
+# reads `dependencies[].condition`. Measured against
+# `plans/the-operators-toggle.md`'s dependency table and `chart/Chart.yaml`
+# itself, both at `origin/main` on 2026-09-25.
+EXPECTED_DECLARED_CONDITIONS = {
+    "nats": "nats.create",
+    "cert-manager": "operators.certManager.create,operators.create",
+    "keda": "operators.keda.create,operators.create",
+    "mariadb-operator": "operators.mariadbOperator.create,operators.create",
+    "gateway-helm": "operators.envoyGateway.create,operators.create",
+    "argo-cd": "operators.argoCd.create,operators.create",
+}
 
 # The clients each policy admits, by value, because they belong to other charts.
 EXPECTED_VALKEY_CLIENTS = ["gateway"]
@@ -1364,6 +1382,12 @@ def declared_dependencies(chart: Path) -> list[str]:
     )
 
 
+def declared_conditions(chart: Path) -> dict[str, str]:
+    """Every dependency's `condition:`, by name. PURE."""
+    manifest = yaml.safe_load((chart / "Chart.yaml").read_text())
+    return {d["name"]: d.get("condition", "") for d in manifest.get("dependencies", [])}
+
+
 def vendored_members(archive: Path) -> list[str]:
     """Every `<top>/charts/<name>/Chart.yaml` member of a packaged chart. PURE."""
     with tarfile.open(archive) as tarball:
@@ -1393,7 +1417,46 @@ def vendoring_failures(declared: list[str], members: list[str]) -> list[str]:
 def test_the_chart_declares_the_dependencies_this_suite_expects():
     declared = declared_dependencies(CHART)
     assert len(declared) == EXPECTED_DECLARED_DEPENDENCIES, declared
-    assert declared == ["nats"], declared
+    assert declared == [
+        "argo-cd",
+        "cert-manager",
+        "gateway-helm",
+        "keda",
+        "mariadb-operator",
+        "nats",
+    ], declared
+
+
+def test_the_chart_declares_the_condition_this_suite_expects_for_each_dependency():
+    """The two-path `condition:` mechanism, given ZERO coverage until this gate.
+
+    ORDER IS THE WHOLE MECHANISM, and this is why it is asserted rather than
+    merely counted. Helm evaluates only the FIRST VALID path in a
+    comma-separated `condition:` and ignores the rest — so
+    `operators.<op>.create,operators.create` gives the per-operator sub-key
+    precedence over the register key `operators.create` ONLY because that
+    sub-key is written first. Every dependency here passed
+    `test_the_chart_declares_the_dependencies_this_suite_expects` above while
+    carrying another dependency's `condition:` outright — that test reads
+    names, never conditions — and a chart in that state renders the wrong
+    operator for an adopter's per-operator override while 154 unrelated tests
+    stay green.
+
+    THE FAILURE THIS GATE CATCHES, NAMED. With `cert-manager`'s and
+    `argo-cd`'s conditions transposed, an adopter who sets
+    `operators.certManager.create=true` (with `operators.create=false`) gets
+    Argo CD — 53 objects — where they asked for cert-manager — 50.
+
+    THE RED CASE IS MANUAL, AND SAID SO PLAINLY. Transposing the two
+    `condition:` lines in `chart/Chart.yaml` by hand and rerunning this
+    assertion was reproduced on 2026-09-25; the assertion above goes red on
+    that edit, naming both `cert-manager` and `argo-cd`. There is no second,
+    automated test constructing that transposition — this docstring is the
+    only place the red case is recorded.
+    """
+    assert declared_conditions(CHART) == EXPECTED_DECLARED_CONDITIONS, declared_conditions(
+        CHART
+    )
 
 
 def test_the_package_carries_every_declared_subchart(tmp_path):
