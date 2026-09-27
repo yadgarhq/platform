@@ -39,9 +39,11 @@ keys sorted, after deleting the fields that legitimately differ between a vendor
 copy and an upstream render. THE STRIP LIST IS RE-DERIVED FROM THE RENDER rather
 than written from convention, and an earlier draft's was wrong in four ways:
 
-  - `helm.sh/resource-policy` — deleted on both sides. `platform` adds it on
-    purpose and upstream does not carry it. This is the only deletion that is
-    load-bearing TODAY, which is why the green case passing at all proves it works.
+  - `helm.sh/resource-policy` and `argocd.argoproj.io/sync-options` — both
+    deleted on both sides. `platform` adds both on purpose (B1,
+    plans/the-one-application-install.md) and upstream carries neither. These
+    are the only deletions that are load-bearing TODAY, which is why the green
+    case passing at all proves it works.
   - KEDA labels `helm.sh/chart`, `app.kubernetes.io/version`,
     `app.kubernetes.io/managed-by`, and — the two the earlier list MISSED —
     `app.kubernetes.io/name` and `app.kubernetes.io/part-of`, which both render
@@ -171,6 +173,15 @@ EXPECTED_LINE = (
 # NOTHING ELSE IN THIS FILE WOULD NOTICE ITS ABSENCE — hence its own test.
 KEEP_ANNOTATION = "helm.sh/resource-policy"
 KEEP_VALUE = "keep"
+
+# B1's SECOND guard (plans/the-one-application-install.md, ADR-0803). `keep` above
+# is helm's own uninstall guard; it says nothing to Argo CD's OWN prune, which acts
+# on `Prune=false` and not on `keep`. Stripped before the digest for the same
+# reason `KEEP_ANNOTATION` is: `platform` adds it on purpose and upstream does not
+# carry it, so leaving it in the comparison would redden the drift gate on every
+# vendored file without a single upstream byte having moved.
+PRUNE_ANNOTATION = "argocd.argoproj.io/sync-options"
+PRUNE_VALUE = "Prune=false"
 
 # ── RED CASE 3'S UPSTREAM VERSION, MEASURED RATHER THAN CHOSEN ───────────────
 # `plans/the-operators-toggle.md` deliberately names no version here and says the
@@ -381,6 +392,7 @@ def stripped(document: dict, strip_labels: tuple[str, ...]) -> dict:
     annotations = metadata.get("annotations")
     if isinstance(annotations, dict):
         annotations.pop(KEEP_ANNOTATION, None)
+        annotations.pop(PRUNE_ANNOTATION, None)
         if not annotations:
             metadata.pop("annotations", None)
     labels = metadata.get("labels")
@@ -578,29 +590,140 @@ def test_every_vendored_document_carries_the_keep_annotation():
     )
 
 
-def test_the_upstream_documents_carry_no_such_annotation():
-    """ADR-0792's condition 1, asserted rather than quoted.
+def unguarded_by_either_annotation(chart: Path) -> list[str]:
+    """Names of the vendored CRDs missing `keep`, `Prune=false`, or both. PURE."""
+    return sorted(
+        document["metadata"]["name"]
+        for document in vendored_documents(chart)
+        if document["metadata"].get("annotations", {}).get(KEEP_ANNOTATION) != KEEP_VALUE
+        or document["metadata"].get("annotations", {}).get(PRUNE_ANNOTATION) != PRUNE_VALUE
+    )
 
-    The property cannot exist at release time BECAUSE upstream does not ship it and
-    resolution copies upstream bytes faithfully. The day either chart starts
-    shipping it, this test goes red — and that red is the revisit trigger firing,
-    not a defect: condition 4 says the copies should then be DELETED rather than
-    maintained.
+
+def test_every_vendored_document_carries_both_prune_guard_annotations(capsys):
+    """B1's GATE (plans/the-one-application-install.md): both guards, every file.
+
+    D3's `automated.prune: false` on the operators Application is the FIRST guard
+    against Argo CD prune, and it is the only one that covers the 27 upstream CRDs
+    this repository does not vendor and that carry no `Prune=false` of their own —
+    MEASURED on the operators render (`--include-crds`, 45 CRDs total): 21 are
+    Envoy Gateway's and the Gateway API's (8 `gateway.envoyproxy.io` +
+    10 `gateway.networking.k8s.io` + 3 `gateway.networking.x-k8s.io`), and 6 are
+    cert-manager's, which carries `helm.sh/resource-policy: keep` on its own CRDs
+    but no `Prune=false`. `argocd.argoproj.io/sync-options: Prune=false` is the
+    SECOND guard, on the 18 this file does own, beside the pre-existing
+    `helm.sh/resource-policy: keep` — Argo's own prune honours `Prune=false`, not
+    `keep`, so `keep` alone protects against `helm uninstall` and nothing against
+    an Argo-driven prune.
+
+    Prints the count examined, per this step's gate: ADR-0792 condition 3's
+    "prints the count it examined" carries over to this second annotation.
+    """
+    rendered = vendored_documents(CHART)
+    assert len(rendered) == EXPECTED_COMPARED
+
+    unprotected = unguarded_by_either_annotation(CHART)
+    assert unprotected == [], (
+        f"{len(unprotected)} vendored CRDs are missing {KEEP_ANNOTATION}: "
+        f"{KEEP_VALUE} or {PRUNE_ANNOTATION}: {PRUNE_VALUE}: {unprotected}"
+    )
+
+    with capsys.disabled():
+        print(
+            f"vendored-crds: examined {len(rendered)} CRDs for "
+            f"{KEEP_ANNOTATION}: {KEEP_VALUE} and {PRUNE_ANNOTATION}: {PRUNE_VALUE}"
+        )
+
+
+def test_stripping_the_prune_annotation_from_one_file_names_it(tmp_path):
+    """B1's RED CASE: one file loses `Prune=false`, and the failure names it.
+
+    The annotation is a plain YAML line inside the guarded body — unlike the
+    schema-mutation red cases above, no template guard has to be unwrapped to
+    remove it.
+    """
+    copy = chart_copy(tmp_path)
+    target = copy / "templates" / "vendored-crds" / "keda-scaledjobs.yaml"
+    text = target.read_text()
+    line = f"    {PRUNE_ANNOTATION}: {PRUNE_VALUE}\n"
+    assert line in text, f"{target} does not carry the line this red case strips"
+    target.write_text(text.replace(line, "", 1))
+
+    unprotected = unguarded_by_either_annotation(copy)
+
+    assert unprotected == ["scaledjobs.keda.sh"], unprotected
+
+
+def upstream_annotation_violations(documents: list[dict]) -> list[str]:
+    """Names of documents upstream that carry `keep` OR `Prune=false`. PURE.
+
+    F4's fix. `compare()`'s `stripped()` deletes both annotations from EVERY
+    document before the digest comparison, on either side, because `platform`
+    adds both on purpose — so that comparison alone would stay green if upstream
+    started shipping either one WITH A DIFFERENT VALUE than this file's own
+    (`keep`, `Prune=false`): the digest would compare two documents with the same
+    key already missing from both, blind to whatever value upstream carried. This
+    function is the check that is not blind to it — ADR-0792's condition 1 and
+    B1's equivalent for `Prune=false`, both asserted here rather than only in the
+    digest.
+    """
+    return [
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("metadata", {}).get("annotations", {}).get(KEEP_ANNOTATION)
+        or document.get("metadata", {}).get("annotations", {}).get(PRUNE_ANNOTATION)
+    ]
+
+
+def test_the_upstream_documents_carry_no_such_annotation():
+    """ADR-0792's condition 1 and B1's equivalent for `Prune=false`, both asserted.
+
+    The property cannot exist at release time BECAUSE upstream does not ship
+    either annotation and resolution copies upstream bytes faithfully. The day
+    either chart starts shipping either one, this test goes red — and that red is
+    the revisit trigger firing, not a defect: condition 4 says the copies should
+    then be DELETED rather than maintained.
     """
     pins = declared_dependencies(CHART)
     protected: list[str] = []
     for upstream in SETS:
         pinned = str(pins[upstream.dependency]["version"])
         tarball = upstream_tarball(CHART, upstream.dependency, pinned)
-        for document in crds(render(tarball, upstream.release, *upstream.settings)):
-            if document["metadata"].get("annotations", {}).get(KEEP_ANNOTATION):
-                protected.append(document["metadata"]["name"])
+        protected.extend(
+            upstream_annotation_violations(
+                crds(render(tarball, upstream.release, *upstream.settings))
+            )
+        )
 
     assert protected == [], (
-        f"{sorted(protected)} now ship {KEEP_ANNOTATION} upstream. ADR-0792's "
-        f"revisit trigger has fired: delete the vendored copies rather than "
-        f"renewing them."
+        f"{sorted(protected)} now ship {KEEP_ANNOTATION} or {PRUNE_ANNOTATION} "
+        f"upstream. The revisit trigger has fired: delete the vendored copies "
+        f"rather than renewing them."
     )
+
+
+def test_an_upstream_doc_carrying_sync_options_reddens_the_revisit_trigger():
+    """F4's RED CASE: upstream shipping its OWN `sync-options`, any value.
+
+    `scaledjobs.keda.sh` never carries this upstream today; this manufactures the
+    day it does, with a value (`ServerSideApply=true`) that is not this file's
+    `Prune=false` — proving the check reads PRESENCE of the key, not equality
+    against this file's own literal, so a same-named annotation with a different
+    upstream value cannot slip past it the way it would slip past a digest that
+    only strips an exact match.
+    """
+    synthetic = [
+        {
+            "metadata": {
+                "name": "scaledjobs.keda.sh",
+                "annotations": {PRUNE_ANNOTATION: "ServerSideApply=true"},
+            }
+        }
+    ]
+
+    violations = upstream_annotation_violations(synthetic)
+
+    assert violations == ["scaledjobs.keda.sh"], violations
 
 
 # ═══ THE THREE RED CASES, EACH REDDENING A DIFFERENT ASSERTION ═══════════════
