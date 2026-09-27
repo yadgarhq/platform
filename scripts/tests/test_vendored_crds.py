@@ -604,9 +604,14 @@ def test_every_vendored_document_carries_both_prune_guard_annotations(capsys):
     """B1's GATE (plans/the-one-application-install.md): both guards, every file.
 
     D3's `automated.prune: false` on the operators Application is the FIRST guard
-    against Argo CD prune, and it is the only one that covers the 21 upstream CRDs
-    this repository does not vendor. `argocd.argoproj.io/sync-options: Prune=false`
-    is the SECOND, on the 18 this file does own, beside the pre-existing
+    against Argo CD prune, and it is the only one that covers the 27 upstream CRDs
+    this repository does not vendor and that carry no `Prune=false` of their own —
+    MEASURED on the operators render (`--include-crds`, 45 CRDs total): 21 are
+    Envoy Gateway's and the Gateway API's (8 `gateway.envoyproxy.io` +
+    10 `gateway.networking.k8s.io` + 3 `gateway.networking.x-k8s.io`), and 6 are
+    cert-manager's, which carries `helm.sh/resource-policy: keep` on its own CRDs
+    but no `Prune=false`. `argocd.argoproj.io/sync-options: Prune=false` is the
+    SECOND guard, on the 18 this file does own, beside the pre-existing
     `helm.sh/resource-policy: keep` — Argo's own prune honours `Prune=false`, not
     `keep`, so `keep` alone protects against `helm uninstall` and nothing against
     an Argo-driven prune.
@@ -649,29 +654,76 @@ def test_stripping_the_prune_annotation_from_one_file_names_it(tmp_path):
     assert unprotected == ["scaledjobs.keda.sh"], unprotected
 
 
-def test_the_upstream_documents_carry_no_such_annotation():
-    """ADR-0792's condition 1, asserted rather than quoted.
+def upstream_annotation_violations(documents: list[dict]) -> list[str]:
+    """Names of documents upstream that carry `keep` OR `Prune=false`. PURE.
 
-    The property cannot exist at release time BECAUSE upstream does not ship it and
-    resolution copies upstream bytes faithfully. The day either chart starts
-    shipping it, this test goes red — and that red is the revisit trigger firing,
-    not a defect: condition 4 says the copies should then be DELETED rather than
-    maintained.
+    F4's fix. `compare()`'s `stripped()` deletes both annotations from EVERY
+    document before the digest comparison, on either side, because `platform`
+    adds both on purpose — so that comparison alone would stay green if upstream
+    started shipping either one WITH A DIFFERENT VALUE than this file's own
+    (`keep`, `Prune=false`): the digest would compare two documents with the same
+    key already missing from both, blind to whatever value upstream carried. This
+    function is the check that is not blind to it — ADR-0792's condition 1 and
+    B1's equivalent for `Prune=false`, both asserted here rather than only in the
+    digest.
+    """
+    return [
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("metadata", {}).get("annotations", {}).get(KEEP_ANNOTATION)
+        or document.get("metadata", {}).get("annotations", {}).get(PRUNE_ANNOTATION)
+    ]
+
+
+def test_the_upstream_documents_carry_no_such_annotation():
+    """ADR-0792's condition 1 and B1's equivalent for `Prune=false`, both asserted.
+
+    The property cannot exist at release time BECAUSE upstream does not ship
+    either annotation and resolution copies upstream bytes faithfully. The day
+    either chart starts shipping either one, this test goes red — and that red is
+    the revisit trigger firing, not a defect: condition 4 says the copies should
+    then be DELETED rather than maintained.
     """
     pins = declared_dependencies(CHART)
     protected: list[str] = []
     for upstream in SETS:
         pinned = str(pins[upstream.dependency]["version"])
         tarball = upstream_tarball(CHART, upstream.dependency, pinned)
-        for document in crds(render(tarball, upstream.release, *upstream.settings)):
-            if document["metadata"].get("annotations", {}).get(KEEP_ANNOTATION):
-                protected.append(document["metadata"]["name"])
+        protected.extend(
+            upstream_annotation_violations(
+                crds(render(tarball, upstream.release, *upstream.settings))
+            )
+        )
 
     assert protected == [], (
-        f"{sorted(protected)} now ship {KEEP_ANNOTATION} upstream. ADR-0792's "
-        f"revisit trigger has fired: delete the vendored copies rather than "
-        f"renewing them."
+        f"{sorted(protected)} now ship {KEEP_ANNOTATION} or {PRUNE_ANNOTATION} "
+        f"upstream. The revisit trigger has fired: delete the vendored copies "
+        f"rather than renewing them."
     )
+
+
+def test_an_upstream_doc_carrying_sync_options_reddens_the_revisit_trigger():
+    """F4's RED CASE: upstream shipping its OWN `sync-options`, any value.
+
+    `scaledjobs.keda.sh` never carries this upstream today; this manufactures the
+    day it does, with a value (`ServerSideApply=true`) that is not this file's
+    `Prune=false` — proving the check reads PRESENCE of the key, not equality
+    against this file's own literal, so a same-named annotation with a different
+    upstream value cannot slip past it the way it would slip past a digest that
+    only strips an exact match.
+    """
+    synthetic = [
+        {
+            "metadata": {
+                "name": "scaledjobs.keda.sh",
+                "annotations": {PRUNE_ANNOTATION: "ServerSideApply=true"},
+            }
+        }
+    ]
+
+    violations = upstream_annotation_violations(synthetic)
+
+    assert violations == ["scaledjobs.keda.sh"], violations
 
 
 # ═══ THE THREE RED CASES, EACH REDDENING A DIFFERENT ASSERTION ═══════════════
