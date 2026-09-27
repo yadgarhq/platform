@@ -51,9 +51,12 @@ metadata:
   name: {{ $edge.name }}
 spec:
   secretName: {{ $edge.name }}
-  commonName: {{ $edge.commonName }}
+  {{- /* `edgeTLS.commonName` and `edgeTLS.dnsNames`, else `global.hostname`
+  (ADR-0808); see `_hostname.tpl` for the order. An empty `dnsNames` becomes a
+  list of the one resolved hostname. */}}
+  commonName: {{ include "platform.hostname" (dict "local" $edge.commonName "context" $) }}
   dnsNames:
-    {{- range $edge.dnsNames }}
+    {{- range ($edge.dnsNames | default (list (include "platform.hostname" (dict "local" "" "context" $)))) }}
     - {{ . }}
     {{- end }}
   duration: {{ $edge.duration }}

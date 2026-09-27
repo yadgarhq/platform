@@ -21,9 +21,11 @@
 # chart does not own: this organisation's is a hand-minted ClusterIssuer whose
 # key is held outside the cluster, and yours is yours.)
 #
-# `edgeTLS.commonName` and `edgeTLS.dnsNames` — the host your edge answers on.
-# The chart ships this organisation's as a stated starting value rather than
-# leaving it blank; it is not a constant.
+# `global.hostname` — the host your edge answers on, stated once (ADR-0808).
+# `edgeTLS.commonName`, `edgeTLS.dnsNames` and `gatewayListener.hostname` all
+# fall back to it when left empty, and to `gateway.yadgar.internal` when it is
+# empty too. Under the parent chart you set it there, not here. A per-key value
+# still wins if you need one to differ.
 #
 # ─── what you should not change without reading first ────────────────────────
 #
@@ -58,7 +60,7 @@ edgeTLS:
 # `gatewayListener.hostname` AND `edgeTLS.dnsNames` MUST AGREE, and the chart's
 # gate says so rather than the render failing later: verification fails after
 # signing succeeds when they do not, which is a confusing place to find a typo.
-# Both ship this organisation's value as a stated starting point.
+# Left empty, both derive from `global.hostname`, so they agree by construction.
 #
 # `envoyProxy.serviceType` DEFAULTS TO `LoadBalancer` AND IS NOT RESTATED HERE.
 # That is the right answer on a cluster with a load-balancer controller, which is
