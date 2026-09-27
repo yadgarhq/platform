@@ -39,9 +39,11 @@ keys sorted, after deleting the fields that legitimately differ between a vendor
 copy and an upstream render. THE STRIP LIST IS RE-DERIVED FROM THE RENDER rather
 than written from convention, and an earlier draft's was wrong in four ways:
 
-  - `helm.sh/resource-policy` — deleted on both sides. `platform` adds it on
-    purpose and upstream does not carry it. This is the only deletion that is
-    load-bearing TODAY, which is why the green case passing at all proves it works.
+  - `helm.sh/resource-policy` and `argocd.argoproj.io/sync-options` — both
+    deleted on both sides. `platform` adds both on purpose (B1,
+    plans/the-one-application-install.md) and upstream carries neither. These
+    are the only deletions that are load-bearing TODAY, which is why the green
+    case passing at all proves it works.
   - KEDA labels `helm.sh/chart`, `app.kubernetes.io/version`,
     `app.kubernetes.io/managed-by`, and — the two the earlier list MISSED —
     `app.kubernetes.io/name` and `app.kubernetes.io/part-of`, which both render
@@ -171,6 +173,15 @@ EXPECTED_LINE = (
 # NOTHING ELSE IN THIS FILE WOULD NOTICE ITS ABSENCE — hence its own test.
 KEEP_ANNOTATION = "helm.sh/resource-policy"
 KEEP_VALUE = "keep"
+
+# B1's SECOND guard (plans/the-one-application-install.md, ADR-0803). `keep` above
+# is helm's own uninstall guard; it says nothing to Argo CD's OWN prune, which acts
+# on `Prune=false` and not on `keep`. Stripped before the digest for the same
+# reason `KEEP_ANNOTATION` is: `platform` adds it on purpose and upstream does not
+# carry it, so leaving it in the comparison would redden the drift gate on every
+# vendored file without a single upstream byte having moved.
+PRUNE_ANNOTATION = "argocd.argoproj.io/sync-options"
+PRUNE_VALUE = "Prune=false"
 
 # ── RED CASE 3'S UPSTREAM VERSION, MEASURED RATHER THAN CHOSEN ───────────────
 # `plans/the-operators-toggle.md` deliberately names no version here and says the
@@ -381,6 +392,7 @@ def stripped(document: dict, strip_labels: tuple[str, ...]) -> dict:
     annotations = metadata.get("annotations")
     if isinstance(annotations, dict):
         annotations.pop(KEEP_ANNOTATION, None)
+        annotations.pop(PRUNE_ANNOTATION, None)
         if not annotations:
             metadata.pop("annotations", None)
     labels = metadata.get("labels")
@@ -576,6 +588,65 @@ def test_every_vendored_document_carries_the_keep_annotation():
         f"{len(unprotected)} vendored CRDs carry no "
         f"{KEEP_ANNOTATION}: {KEEP_VALUE}: {unprotected}"
     )
+
+
+def unguarded_by_either_annotation(chart: Path) -> list[str]:
+    """Names of the vendored CRDs missing `keep`, `Prune=false`, or both. PURE."""
+    return sorted(
+        document["metadata"]["name"]
+        for document in vendored_documents(chart)
+        if document["metadata"].get("annotations", {}).get(KEEP_ANNOTATION) != KEEP_VALUE
+        or document["metadata"].get("annotations", {}).get(PRUNE_ANNOTATION) != PRUNE_VALUE
+    )
+
+
+def test_every_vendored_document_carries_both_prune_guard_annotations(capsys):
+    """B1's GATE (plans/the-one-application-install.md): both guards, every file.
+
+    D3's `automated.prune: false` on the operators Application is the FIRST guard
+    against Argo CD prune, and it is the only one that covers the 21 upstream CRDs
+    this repository does not vendor. `argocd.argoproj.io/sync-options: Prune=false`
+    is the SECOND, on the 18 this file does own, beside the pre-existing
+    `helm.sh/resource-policy: keep` — Argo's own prune honours `Prune=false`, not
+    `keep`, so `keep` alone protects against `helm uninstall` and nothing against
+    an Argo-driven prune.
+
+    Prints the count examined, per this step's gate: ADR-0792 condition 3's
+    "prints the count it examined" carries over to this second annotation.
+    """
+    rendered = vendored_documents(CHART)
+    assert len(rendered) == EXPECTED_COMPARED
+
+    unprotected = unguarded_by_either_annotation(CHART)
+    assert unprotected == [], (
+        f"{len(unprotected)} vendored CRDs are missing {KEEP_ANNOTATION}: "
+        f"{KEEP_VALUE} or {PRUNE_ANNOTATION}: {PRUNE_VALUE}: {unprotected}"
+    )
+
+    with capsys.disabled():
+        print(
+            f"vendored-crds: examined {len(rendered)} CRDs for "
+            f"{KEEP_ANNOTATION}: {KEEP_VALUE} and {PRUNE_ANNOTATION}: {PRUNE_VALUE}"
+        )
+
+
+def test_stripping_the_prune_annotation_from_one_file_names_it(tmp_path):
+    """B1's RED CASE: one file loses `Prune=false`, and the failure names it.
+
+    The annotation is a plain YAML line inside the guarded body — unlike the
+    schema-mutation red cases above, no template guard has to be unwrapped to
+    remove it.
+    """
+    copy = chart_copy(tmp_path)
+    target = copy / "templates" / "vendored-crds" / "keda-scaledjobs.yaml"
+    text = target.read_text()
+    line = f"    {PRUNE_ANNOTATION}: {PRUNE_VALUE}\n"
+    assert line in text, f"{target} does not carry the line this red case strips"
+    target.write_text(text.replace(line, "", 1))
+
+    unprotected = unguarded_by_either_annotation(copy)
+
+    assert unprotected == ["scaledjobs.keda.sh"], unprotected
 
 
 def test_the_upstream_documents_carry_no_such_annotation():
