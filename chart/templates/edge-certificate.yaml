@@ -1,21 +1,30 @@
 {{/*
 THE EDGE LEAF, WHICH THIS CHART REQUESTS AND DOES NOT ISSUE.
 
-ITS OWN TOGGLE, BECAUSE ITS AUTHORITY IS SOMEBODY ELSE'S. The internal CA this
-chart renders is self-signed, ten years and pods only; it regenerates with the
-cluster. The authority that signs the edge is held outside the installation, so
-`edgeTLS.issuerRef` is `required` with NO DEFAULT and the render refuses without
-it. A guessed issuer name is worse than a refusal: it renders an object that never
-goes Ready, and the operator meets a pending Certificate instead of a message
-naming the key they did not set.
+ITS OWN TOGGLE, BECAUSE ITS AUTHORITY CAN BE SOMEBODY ELSE'S. `edgeTLS.issuerRef`
+DEFAULTS TO THIS CHART'S OWN INTERNAL CA (B3 of
+plans/the-one-application-install.md, ADR-0803), so the whole-estate defaults
+need no issuer of their own. An adopter signing the edge with an authority held
+outside the installation — this organisation's is a hand-minted ClusterIssuer
+whose key lives in 1Password — clears `edgeTLS.issuerRef` with explicit `null`s
+rather than editing it in place: helm deep-merges a values override into a
+non-empty default key by key, so `issuerRef: {}` has no keys to overlay and the
+default comes through untouched (MEASURED), and only `issuerRef: null`, or
+`name`/`kind` nulled individually, delete the key from the merge. `required`
+still refuses a render cleared that way, naming the key. A guessed issuer name
+is worse than a refusal: it renders an object that never goes Ready, and the
+operator meets a pending Certificate instead of a message naming the key they
+did not set.
 
 `kind` IS REQUIRED TOO, not only `name`. It decides whether cert-manager looks the
 issuer up in this namespace (`Issuer`) or cluster-wide (`ClusterIssuer`), so a
-name with no kind is half an address.
+name with no kind is half an address — and, since `kind: Issuer` is now this
+chart's own default, an adopter who overrides `name` alone inherits it rather
+than leaving it unset.
 
-`get` RATHER THAN A FIELD ACCESS, so an adopter who omits the whole `issuerRef`
-block meets the `required` message rather than a nil-pointer error naming a
-template line.
+`get` RATHER THAN A FIELD ACCESS, so an adopter who clears `issuerRef` to `nil`
+meets the `required` message rather than a nil-pointer error naming a template
+line.
 */}}
 {{- if .Values.edgeTLS.create }}
 {{- $edge := .Values.edgeTLS }}

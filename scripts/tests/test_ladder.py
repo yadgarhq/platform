@@ -367,22 +367,67 @@ def test_renaming_the_leaves_key_without_the_edge_leaf_leaves_the_ca_root_alone(
     assert "expected 11 Certificate objects, found 1" in message
 
 
-# ── THE EDGE LEAF'S ISSUER HAS NO DEFAULT ────────────────────────────────────
+# ── THE EDGE LEAF'S ISSUER DEFAULTS TO THE INTERNAL CA ───────────────────────
+#
+# B3 of plans/the-one-application-install.md (ADR-0803): `edgeTLS.issuerRef`
+# defaults to `{name: yadgar-internal-ca, kind: Issuer}` rather than carrying no
+# default at all, so the parent chart's whole-estate defaults render a working
+# edge Certificate with no issuer override. The two `required` guards on
+# `chart/templates/edge-certificate.yaml` stay, for an adopter who wants a
+# different authority.
 
 
-def test_the_edge_leaf_refuses_without_an_issuer(tmp_path):
-    """`edgeTLS.issuerRef` is `required`, and the refusal names the key.
+def test_the_edge_certificate_defaults_to_the_internal_ca_issuer(tmp_path):
+    """B3's GATE: with no issuer override, the default names a REAL Issuer.
 
-    A guessed issuer name would render an object that never goes Ready, so the
-    operator would meet a pending Certificate rather than a message naming the key
-    they did not set. Both halves are refused: `kind` decides whether the name is
-    looked up in this namespace or cluster-wide, so a name with no kind is half an
-    address.
+    `edgeTLS.create` and `internalCA.create` on, and nothing else — the edge
+    Certificate's `issuerRef` must name the SAME Issuer object this render itself
+    emits, not a literal this test carries independently of `values.yaml`. A
+    rename of `internalCA.name` has to move both sides together or this reddens.
+    """
+    values = values_file(
+        tmp_path,
+        "edge-and-internal-ca.yaml",
+        "edgeTLS:\n  create: true\ninternalCA:\n  create: true\n",
+    )
+    documents = render(CHART, "-f", str(values))
+
+    edge_leaves = [
+        document for document in certificates(documents) if not document["spec"].get("isCA")
+    ]
+    assert len(edge_leaves) == 1, (
+        f"expected exactly one non-CA Certificate, found {len(edge_leaves)}: "
+        f"{[document['metadata']['name'] for document in edge_leaves]}"
+    )
+    (edge,) = edge_leaves
+
+    issuer_names = {
+        document["metadata"]["name"] for document in documents if document.get("kind") == "Issuer"
+    }
+    issuer_ref = edge["spec"]["issuerRef"]
+    assert issuer_ref["kind"] == "Issuer", issuer_ref
+    assert issuer_ref["name"] in issuer_names, (
+        f"the edge Certificate's issuerRef names {issuer_ref['name']!r}, which is "
+        f"not among the Issuers this render emits: {sorted(issuer_names)}"
+    )
+
+
+def test_the_edge_leaf_refuses_when_the_issuer_is_cleared(tmp_path):
+    """B3's RED CASE: an adopter who clears the default, and the refusal names the key.
+
+    `edgeTLS.issuerRef: {}` does NOT reach this case — MEASURED: helm deep-merges
+    a values override into a non-empty chart default key by key, so an override
+    with no keys has nothing to overlay and the default underneath renders
+    unchanged. Clearing the key needs an explicit `null`, on the whole map or on
+    each field individually, because helm deletes a destination key when the
+    override names it `null` and leaves every other key of a partly-cleared map
+    alone — which is what lets the second case below clear `kind` without also
+    reintroducing the first case's `name` refusal.
     """
     for body, key in (
-        ("edgeTLS:\n  create: true\n", "edgeTLS.issuerRef.name"),
+        ("edgeTLS:\n  create: true\n  issuerRef: null\n", "edgeTLS.issuerRef.name"),
         (
-            "edgeTLS:\n  create: true\n  issuerRef:\n    name: some-ca\n",
+            "edgeTLS:\n  create: true\n  issuerRef:\n    name: some-ca\n    kind: null\n",
             "edgeTLS.issuerRef.kind",
         ),
     ):
@@ -395,8 +440,31 @@ def test_the_edge_leaf_refuses_without_an_issuer(tmp_path):
             "-f",
             str(overridden),
         )
-        assert result.returncode != 0, f"{key} has no default and the render did not refuse"
+        assert result.returncode != 0, f"{key} was cleared and the render did not refuse"
         assert key in result.stderr, result.stderr
+
+
+def test_emptying_the_issuer_map_inherits_the_default_instead_of_refusing(tmp_path):
+    """THE MEASUREMENT ITSELF, kept as a case rather than only a docstring claim.
+
+    `issuerRef: {}` renders successfully, naming this chart's own default issuer —
+    proving the RED case above cannot use `{}` and must clear each key with `null`
+    instead. If a future helm version changes this merge behaviour, this is the
+    case that goes red first.
+    """
+    values = values_file(
+        tmp_path, "emptied-issuer.yaml", "edgeTLS:\n  create: true\n  issuerRef: {}\n"
+    )
+    documents = render(CHART, "-f", str(values))
+    edge_leaves = [
+        document for document in certificates(documents) if not document["spec"].get("isCA")
+    ]
+    (edge,) = edge_leaves
+    assert edge["spec"]["issuerRef"] == {
+        "name": "yadgar-internal-ca",
+        "kind": "Issuer",
+        "group": "cert-manager.io",
+    }, edge["spec"]["issuerRef"]
 
 
 def test_the_groups_this_file_names_are_the_groups_the_chart_declares():

@@ -164,18 +164,32 @@ edgeTLS:
   create: false
   name: gateway-tls
 
-  # NO DEFAULT, AND `required` REFUSES THE RENDER WITHOUT IT. There is no honest
-  # default for somebody else's certificate authority: a guessed name renders an
-  # object that never goes Ready, and the operator meets a pending Certificate
-  # rather than a message naming the key they did not set. Both halves are
-  # refused, because `kind` decides whether the name is looked up in this
-  # namespace or cluster-wide.
+  # DEFAULTS TO THIS CHART'S OWN INTERNAL CA (B3 of
+  # plans/the-one-application-install.md, ADR-0803), so the whole-estate defaults
+  # this chart's parent turns on need no issuer of their own. `internalCA.name`
+  # above renders the Issuer this names; the two agreeing is what makes the chain
+  # a chain, same as `certificates.issuerRef` beside it.
+  #
+  # AN ADOPTER SIGNING THE EDGE WITH A DIFFERENT AUTHORITY CLEARS THIS MAP WITH
+  # EXPLICIT `null`S, not an empty `{}` — MEASURED: helm deep-merges a values
+  # override into a non-empty chart default key by key, so `issuerRef: {}` has no
+  # keys to overlay and the default underneath comes through untouched, and
+  # `issuerRef:\n  name: some-ca` alone inherits `kind: Issuer` from this default
+  # rather than leaving it unset. Only `issuerRef: null`, or `name: null` and
+  # `kind: null` stated individually, delete the key from the merge, and the two
+  # `required` guards below still refuse a render that clears it that way, naming
+  # the key: a guessed issuer name renders an object that never goes Ready, and
+  # the operator meets a pending Certificate rather than a message naming the key
+  # they did not set. Both halves are refused, because `kind` decides whether the
+  # name is looked up in this namespace or cluster-wide.
   #
   #   edgeTLS:
   #     issuerRef:
   #       name: your-ca
   #       kind: ClusterIssuer
-  issuerRef: {}
+  issuerRef:
+    name: yadgar-internal-ca
+    kind: Issuer
 
   # THE STARTING VALUE, NOT A CONSTANT — change it to the host your edge answers
   # on. It is a shipped default rather than a `required` because the plan this
