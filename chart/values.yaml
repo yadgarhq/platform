@@ -320,14 +320,35 @@ gatewayListener:
     name: edge
 
     # `LoadBalancer`, WHICH IS THE ADOPTER'S CASE AND NOT THIS ORGANISATION'S.
-    # This organisation's cluster is kind under rootless podman, where the host
-    # cannot route to container IPs at all and `type: LoadBalancer` is unavailable
-    # whatever provides it — so `yadgarhq/deploy` keeps its own NodePort 30443
-    # copy with a StrategicMerge patch pinning that number, and this chart does
-    # not try to express it. An adopter on a cluster with a load-balancer
-    # controller wants the default; an adopter without one sets this to
-    # `NodePort` and pins the port in their own values.
+    # An adopter on a cluster with a load-balancer controller wants the default.
+    # A cluster with none — kind, bare metal — never gets an address assigned,
+    # so the edge Gateway never reaches `Programmed`. Such a cluster sets
+    # `NodePort` here and pins `httpsNodePort` below. This organisation's cluster
+    # is kind under rootless podman, where the host cannot route to container IPs
+    # at all, so it takes that variant (ADR-0809); the README shows the values.
     serviceType: LoadBalancer
+
+    # THE NODEPORT THE HTTPS LISTENER'S SERVICE PORT IS PINNED TO, or `null` for
+    # none. Envoy Gateway's EnvoyProxy has no nodePort field, so when this is set
+    # the template renders `envoyService.patch` — a StrategicMerge patch whose
+    # entry matches the Service port on the listener's `443`. An UNPINNED
+    # nodePort is allocated at random, and a host port mapped to it (kind's
+    # `extraPortMappings`) stops pointing at anything: a cluster that looks
+    # correct and answers nothing. Unset, no `patch` renders at all. Valid with
+    # `NodePort` and `LoadBalancer`; the API server refuses it on `ClusterIP`.
+    httpsNodePort: null
+
+    # WHERE THE ENVOY PODS RUN, mirroring Envoy Gateway's
+    # `envoyDeployment.pod.{nodeSelector,tolerations}` and rendered into it
+    # verbatim. Both empty by default, and then `pod` is ABSENT from the render
+    # rather than empty, so an install that sets neither renders the EnvoyProxy
+    # it rendered before these keys existed (ADR-0809). A NodePort edge on kind
+    # needs the pods on the node the host port maps to — the control-plane node,
+    # which kind taints, so the toleration is required beside the selector or
+    # both pods stay Pending.
+    pod:
+      nodeSelector: {}
+      tolerations: []
 
     # TWO, per the estate's invariant. A single proxy replica makes a class of
     # defect unreachable, and there is no reason for the edge to be the exception.

@@ -64,10 +64,10 @@ edgeTLS:
 #
 # `envoyProxy.serviceType` DEFAULTS TO `LoadBalancer` AND IS NOT RESTATED HERE.
 # That is the right answer on a cluster with a load-balancer controller, which is
-# the adopter this file is written for. Without one, set it to `NodePort` and pin
-# the port in your own values — this organisation does exactly that in
-# `yadgarhq/deploy`, because under rootless podman the host cannot route to
-# container IPs at all.
+# the adopter this file is written for. Without one — kind, bare metal — set it to
+# `NodePort`, pin `envoyProxy.httpsNodePort`, and on kind place the pods with
+# `envoyProxy.pod.{nodeSelector,tolerations}`. The README shows the values this
+# organisation's kind cluster runs (ADR-0809).
 gatewayListener:
   create: true
 
