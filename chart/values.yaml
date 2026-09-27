@@ -391,6 +391,23 @@ valkey:
 nats:
   create: false
 
+  # `fullnameOverride: nats` NAMES THE BROKER FOR EVERY RELEASE NAME, not only
+  # this chart's own default. Without it the upstream chart names every object
+  # after `<release>-nats`, and `iam`'s and `gateway`'s `nats.url` default —
+  # `nats://nats:4222`, unprefixed — resolves only when the release happens to
+  # be called `nats`. `plans/retiring-the-deploy-copies.md` step 6a is this
+  # exact fix, read the other way: this organisation's release is `yadgar`, so
+  # its clients dial a Service the parent never rendered before this override.
+  #
+  # THE REGRESSION THIS ACCEPTS, RULED RATHER THAN OVERLOOKED. `fullnameOverride`
+  # strips release-name prefixing for every adopter, including one who already
+  # runs the upstream `nats` chart at release name `nats` in the same namespace
+  # this chart installs into. `helm install` then refuses on an existing-resource
+  # conflict, or Argo adopts and overwrites their broker, loudly either way. Max
+  # ruled 2026-09-27 to accept that collision risk rather than leave every other
+  # adopter's default broken.
+  fullnameOverride: nats
+
   # nats-box is a shell with the NATS CLI in it — a debugging convenience, not
   # part of the system. `kubectl run` covers the same need on the rare occasion it
   # arises, without a pod running permanently to provide it.

@@ -127,6 +127,21 @@ NAMESPACE_LABEL = "kubernetes.io/metadata.name"
 # StatefulSet that reads them belongs to the upstream chart.
 EXPECTED_NATS_SECRETS = {"nats-auth", "nats-auth-gateway"}
 
+# ── THE SERVICE THE CLIENTS DIAL, NAMED FOR EVERY RELEASE ────────────────────
+# `plans/retiring-the-deploy-copies.md` step 6a: `iam`'s and `gateway`'s
+# `nats.url` default is the unprefixed `nats://nats:4222`, and the upstream
+# chart names every object after `<release>-nats` unless `fullnameOverride`
+# says otherwise. Five objects, by (kind, name), and literal for the reason
+# every expected count in this file is one: read off the render, not derived
+# from it.
+EXPECTED_NATS_OBJECTS = {
+    ("Service", "nats"),
+    ("Service", "nats-headless"),
+    ("StatefulSet", "nats"),
+    ("ConfigMap", "nats-config"),
+    ("PodDisruptionBudget", "nats"),
+}
+
 # The name inside a request body the bootstrap script POSTs, which is the only place
 # a Secret is actually created. MEASURED, not assumed: renaming the created Secret to
 # `nats-auth-typo` leaves the string `nats-auth-gateway` in that Job three times over
@@ -363,6 +378,26 @@ def broker_ports(rendered: list[dict]) -> set[int]:
         ]
         for port in container.get("ports") or []
     }
+
+
+def nats_object_names(rendered: list[dict]) -> list[tuple[str, str]]:
+    """Every (kind, name) the broker SUBCHART renders, sorted. PURE.
+
+    Selected by `app.kubernetes.io/name: nats` — the label the upstream chart
+    stamps from its OWN chart name, unaffected by `fullnameOverride` — rather
+    than by a name pattern, because the whole point of this list is to keep
+    naming the same five objects THROUGH the rename `fullnameOverride`
+    performs. `nats-ingress`, this chart's own NetworkPolicy, carries no such
+    label and is excluded on purpose: it is not one of the five.
+    """
+    return sorted(
+        (document["kind"], document["metadata"]["name"])
+        for document in rendered
+        if document.get("metadata", {}).get("labels", {}).get(
+            "app.kubernetes.io/name"
+        )
+        == "nats"
+    )
 
 
 def policy_ports(policy: dict) -> set[int]:
@@ -851,6 +886,59 @@ def test_the_valkey_toggle_switches_its_objects_off(tmp_path):
         for document in rendered
         if document["metadata"]["name"] == name
     ] == [], "valkey.create is false and a valkey object rendered anyway"
+
+
+# ── THE BROKER'S NAME, FOR EVERY RELEASE ─────────────────────────────────────
+
+
+def test_the_broker_renders_the_service_the_clients_already_dial():
+    """`plans/retiring-the-deploy-copies.md` step 6a, this chart's half of it.
+
+    `iam` and `gateway` both default `nats.url` to `nats://nats:4222` —
+    unprefixed. The upstream chart names every object after `<release>-nats`
+    unless `fullnameOverride` says otherwise, so a release not literally
+    called `nats` renders a broker its own clients cannot dial by default.
+    `fullnameOverride: nats` in THIS chart's `nats:` block fixes that for
+    every release name, not only this chart's own.
+
+    THE FIVE, LISTED AND COUNTED, because the retiring plan's B5 step reads
+    this exact list off this exact fix ("the five NATS objects") and a count
+    that silently became four or six there would be a defect this gate never
+    saw.
+    """
+    rendered = adopter_render()
+    names = nats_object_names(rendered)
+    assert len(names) == len(EXPECTED_NATS_OBJECTS) == 5, names
+    assert set(names) == EXPECTED_NATS_OBJECTS, names
+    assert by_name(rendered, "Service", "nats"), (
+        "the clients' unprefixed default, nats://nats:4222, has no Service to "
+        "resolve"
+    )
+
+
+def test_a_removed_override_reddens_the_broker_name_gate(tmp_path):
+    """The red case: strip `fullnameOverride` and the release prefix comes back.
+
+    `adopter_render` sources `example/values.yaml`, which sets `nats.create`
+    alone — it does not touch `fullnameOverride` — so this red case has to
+    reach into THIS chart's own default and remove it there, in a copy, rather
+    than override a key `example/values.yaml` never sets.
+    """
+    stripped = chart_with(
+        tmp_path,
+        "values.yaml",
+        lambda text: text.replace("  fullnameOverride: nats\n", ""),
+    )
+    rendered = adopter_render(stripped)
+    assert set(nats_object_names(rendered)) != EXPECTED_NATS_OBJECTS, (
+        "fullnameOverride was stripped from a copy of this chart's defaults and "
+        "the broker's names were unaffected, so this red case is testing nothing"
+    )
+    assert not [
+        document
+        for document in of_kind(rendered, "Service")
+        if document["metadata"]["name"] == "nats"
+    ], "Service/nats rendered even without the override"
 
 
 # ── THE TWO INGRESS POLICIES ─────────────────────────────────────────────────
