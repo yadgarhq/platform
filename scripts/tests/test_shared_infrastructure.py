@@ -1676,3 +1676,209 @@ def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
         f"refusal, naming the chart rather than this constant. Move this tuple to "
         f"match the chart, or restore the check the chart lost"
     )
+
+
+# ── THE EDGE DATA PLANE'S SCHEDULING AND SERVICE SHAPE (ADR-0809) ────────────
+# THE FOUR EDGE OBJECTS `yadgarhq/deploy` STILL OWNS, COPIED VERBATIM from its
+# `infra/tls/` at c1a0d30a96c8444a96758bd31825c6dd5121f00a (deploy#68). ADR-0809
+# lets that organisation retire its copies only once THIS chart, given its values,
+# renders each of the four FIELD-EQUAL to them — so the fixtures are deploy's own
+# files, not a restatement of what this chart happens to render.
+DEPLOY_EDGE = Path(__file__).resolve().parent / "fixtures" / "deploy-edge"
+
+# THE FIELDS DEPLOY'S COPIES CARRY THAT THIS CHART MUST NOT. `metadata.namespace`
+# is supplied by the release (and must stay absent here — `gateway-listener.yaml`
+# says why), and `argocd.argoproj.io/sync-options: Prune=false` is deploy#68's
+# handover guard on the copies being retired, not a property of the objects.
+DEPLOY_ONLY_METADATA = ("namespace", "annotations")
+
+# THIS ORGANISATION'S VALUES FOR THE FOUR OBJECTS, as its parent chart's
+# `platform:` block will state them at handover. The issuer is EXPLICIT: with
+# `internalCA.create` on, an empty `issuerRef` falls back to the internal CA and
+# would reissue the edge leaf from a root no client trusts (ADR-0809).
+ORGANISATION_EDGE_VALUES = """\
+edgeTLS:
+  create: true
+  issuerRef:
+    name: yadgar-dev-ca
+    kind: ClusterIssuer
+gatewayListener:
+  create: true
+  envoyProxy:
+    serviceType: NodePort
+    httpsNodePort: 30443
+    pod:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+"""
+
+# THE ENVOYPROXY `main` RENDERED FROM `example/values.yaml` BEFORE ADR-0809, parsed.
+# A LITERAL, so the default path is pinned to what shipped rather than to whatever
+# the template renders now. The keys ADR-0809 adds must leave this unchanged when
+# they are unset.
+PRE_ADR_0809_ENVOYPROXY = {
+    "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+    "kind": "EnvoyProxy",
+    "metadata": {"name": "edge"},
+    "spec": {
+        "provider": {
+            "type": "Kubernetes",
+            "kubernetes": {
+                "envoyDeployment": {"replicas": 2},
+                "envoyService": {"type": "LoadBalancer"},
+            },
+        }
+    },
+}
+
+
+def deploy_edge_copy(name: str) -> dict:
+    """One of deploy's edge objects, less the metadata only deploy's copy carries."""
+    document = yaml.safe_load((DEPLOY_EDGE / f"{name}.yaml").read_text())
+    for key in DEPLOY_ONLY_METADATA:
+        document["metadata"].pop(key, None)
+    return document
+
+
+def leaves(node, path: str = "") -> set[tuple[str, str]]:
+    """Every scalar in `node` as (dotted path, repr). PURE.
+
+    LEAVES, NOT A DICT COMPARISON, so a failure NAMES the field. Dropping the pinned
+    nodePort from a dict comparison reports `envoyService` as unequal and never says
+    `nodePort`; the leaf sets differ on exactly the path that moved.
+    """
+    if isinstance(node, dict):
+        if not node:
+            return {(path, "{}")}
+        return {
+            leaf
+            for key, value in node.items()
+            for leaf in leaves(value, f"{path}.{key}" if path else str(key))
+        }
+    if isinstance(node, list):
+        if not node:
+            return {(path, "[]")}
+        return {
+            leaf
+            for index, value in enumerate(node)
+            for leaf in leaves(value, f"{path}[{index}]")
+        }
+    return {(path, repr(node))}
+
+
+def field_differences(rendered: dict, expected: dict) -> list[str]:
+    """What the render lacks and what it adds, by path. Empty means field-equal. PURE."""
+    got, want = leaves(rendered), leaves(expected)
+    return [f"missing {path} = {value}" for path, value in sorted(want - got)] + [
+        f"unexpected {path} = {value}" for path, value in sorted(got - want)
+    ]
+
+
+def organisation_render(tmp_path: Path, extra: str = "") -> list[dict]:
+    overlay = overrides(
+        tmp_path / "organisation-edge.yaml", ORGANISATION_EDGE_VALUES + extra
+    )
+    return adopter_render(CHART, "-f", str(overlay))
+
+
+def test_unset_scheduling_keys_render_the_envoyproxy_main_shipped():
+    """THE DEFAULT PATH IS UNCHANGED, which is ADR-0809's own condition.
+
+    `example/values.yaml` sets none of the new keys, so its EnvoyProxy must be the
+    object `main` rendered before them — and `pod`, `patch` and
+    `externalTrafficPolicy` must be ABSENT, not present and empty: an empty `pod: {}`
+    or a patch with no ports is a field Argo diffs against the live object.
+    """
+    envoy_proxy = one(adopter_render(), "EnvoyProxy")
+    assert envoy_proxy == PRE_ADR_0809_ENVOYPROXY, field_differences(
+        envoy_proxy, PRE_ADR_0809_ENVOYPROXY
+    )
+    kubernetes = envoy_proxy["spec"]["provider"]["kubernetes"]
+    assert "pod" not in kubernetes["envoyDeployment"]
+    assert set(kubernetes["envoyService"]) == {"type"}
+
+
+def test_the_organisations_envoyproxy_is_field_equal_to_deploys_copy(tmp_path):
+    """THE HANDOVER GATE FOR THE OBJECT ADR-0809 EXTENDS."""
+    envoy_proxy = one(organisation_render(tmp_path), "EnvoyProxy")
+    differences = field_differences(envoy_proxy, deploy_edge_copy("envoyproxy"))
+    assert not differences, (
+        "the EnvoyProxy this chart renders with the organisation's values is not "
+        f"field-equal to deploy's infra/tls/envoyproxy.yaml: {differences}"
+    )
+
+
+def test_a_dropped_nodeport_reddens_the_handover_gate_naming_it(tmp_path):
+    """RED CASE: the organisation's values without `httpsNodePort`.
+
+    An unpinned nodePort is allocated at random and kind's host mapping stops
+    pointing at anything — a cluster that looks correct and answers nothing. The
+    gate must fail and must say `nodePort`.
+    """
+    overlay = ORGANISATION_EDGE_VALUES.replace("    httpsNodePort: 30443\n", "")
+    assert overlay != ORGANISATION_EDGE_VALUES, "the red case's edit matched nothing"
+    rendered = adopter_render(
+        CHART, "-f", str(overrides(tmp_path / "no-nodeport.yaml", overlay))
+    )
+    differences = field_differences(
+        one(rendered, "EnvoyProxy"), deploy_edge_copy("envoyproxy")
+    )
+    assert any("nodePort" in line for line in differences), differences
+
+
+def test_missing_tolerations_redden_the_handover_gate_naming_them(tmp_path):
+    """RED CASE: the organisation's values without the control-plane toleration.
+
+    kind taints its control-plane node, so a nodeSelector with no toleration leaves
+    both Envoy pods Pending. The gate must fail and must say `tolerations`.
+    """
+    overlay = ORGANISATION_EDGE_VALUES.split("      tolerations:\n")[0]
+    assert overlay != ORGANISATION_EDGE_VALUES, "the red case's edit matched nothing"
+    rendered = adopter_render(
+        CHART, "-f", str(overrides(tmp_path / "no-tolerations.yaml", overlay))
+    )
+    differences = field_differences(
+        one(rendered, "EnvoyProxy"), deploy_edge_copy("envoyproxy")
+    )
+    assert any("tolerations" in line for line in differences), differences
+
+
+def test_the_pinned_nodeport_patches_the_port_the_listener_serves(tmp_path):
+    """A REFERENCE, NOT A LITERAL. The StrategicMerge merge key for a Service's
+    ports is the port NUMBER, so the patch's `port` must be the Gateway listener's
+    port — a patch on any other number adds a second port and pins nothing."""
+    rendered = organisation_render(tmp_path)
+    listener_ports = {
+        listener["port"] for listener in one(rendered, "Gateway")["spec"]["listeners"]
+    }
+    patch = one(rendered, "EnvoyProxy")["spec"]["provider"]["kubernetes"][
+        "envoyService"
+    ]["patch"]
+    assert patch["type"] == "StrategicMerge"
+    patched_ports = {entry["port"] for entry in patch["value"]["spec"]["ports"]}
+    assert patched_ports == listener_ports == {443}, (patched_ports, listener_ports)
+
+
+def test_the_other_three_edge_objects_are_field_equal_to_deploys_copies(tmp_path):
+    """THE REST OF THE HANDOVER: Gateway, GatewayClass and Certificate.
+
+    ADR-0809 hands the edge over only when all four render field-equal. These three
+    needed no new key; the issuer is the one value the organisation must state.
+    """
+    rendered = organisation_render(tmp_path)
+    for kind, name in (
+        ("Gateway", "gateway"),
+        ("GatewayClass", "gatewayclass"),
+        ("Certificate", "certificate"),
+    ):
+        expected = deploy_edge_copy(name)
+        differences = field_differences(
+            by_name(rendered, kind, expected["metadata"]["name"]), expected
+        )
+        assert not differences, (
+            f"{kind} is not field-equal to deploy's infra/tls/{name}.yaml: {differences}"
+        )

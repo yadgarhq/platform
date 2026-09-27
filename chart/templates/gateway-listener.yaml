@@ -97,12 +97,45 @@ spec:
     kubernetes:
       envoyDeployment:
         replicas: {{ $listener.envoyProxy.replicas }}
+        {{- /*
+        PLACEMENT, RENDERED ONLY WHEN STATED (ADR-0809). Unset, `pod` is ABSENT
+        rather than `{}`, so an install that never sets these keys renders the
+        EnvoyProxy it rendered before them. `dig` rather than a field access, so
+        an adopter's `pod: null` renders nothing instead of a nil-pointer error.
+        */}}
+        {{- $nodeSelector := dig "pod" "nodeSelector" dict $listener.envoyProxy }}
+        {{- $tolerations := dig "pod" "tolerations" list $listener.envoyProxy }}
+        {{- if or $nodeSelector $tolerations }}
+        pod:
+          {{- with $nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       envoyService:
-        # THE ADOPTER'S CASE, WHICH IS NOT THIS ORGANISATION'S. `values.yaml`
-        # records why: under rootless podman the host cannot route to container
-        # IPs at all, so `yadgarhq/deploy` keeps a NodePort copy with a
-        # StrategicMerge patch pinning 30443, and this chart does not try to
-        # express that. An adopter without a load-balancer controller sets this to
-        # `NodePort` and pins the port in their own values.
+        # `LoadBalancer` by default. A cluster without a load-balancer controller
+        # (kind, bare metal) sets `NodePort` and pins `httpsNodePort` below.
         type: {{ $listener.envoyProxy.serviceType }}
+        {{- /*
+        THE PATCH IS THE ONLY ROUTE TO A PINNED NODEPORT. Envoy Gateway's
+        KubernetesServiceSpec exposes `type` and no nodePort field; `patch` is its
+        documented escape hatch. The StrategicMerge merge key for a Service's
+        ports is the PORT NUMBER, so the entry matches on the listener's `443`
+        and needs none of the port names Envoy Gateway derives internally. An
+        unpinned nodePort is allocated at random, and a host port mapped to it
+        stops pointing at anything. Rendered only when stated (ADR-0809).
+        */}}
+        {{- with $listener.envoyProxy.httpsNodePort }}
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - port: 443
+                  nodePort: {{ . }}
+        {{- end }}
 {{- end }}

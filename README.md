@@ -137,7 +137,26 @@ kubectl -n yadgar get secret admin-bootstrap-token -o jsonpath='{.data.token}' |
 
 **Read it again after every cluster rebuild.** The Job mints a new token when the Secret is gone, so a value copied from before the rebuild agrees with nothing. The Secret is never _absent_ — it is present, ready, and wrong — and no existence check can tell the two apart.
 
-**Envoy Gateway is your prerequisite too, if you turn the listener on.** `gatewayListener.envoyProxy.serviceType` defaults to `LoadBalancer`, which is the right answer on a cluster with a load-balancer controller. Without one, set it to `NodePort` and pin the port in your own values — this organisation does exactly that in `yadgarhq/deploy`, because under rootless podman the host cannot route to container IPs at all.
+**Envoy Gateway is your prerequisite too, if you turn the listener on.** `gatewayListener.envoyProxy.serviceType` defaults to `LoadBalancer`, which is the right answer on a cluster with a load-balancer controller. A cluster without one — kind, bare metal — never gets an address assigned, and the edge Gateway never reaches `Programmed`.
+
+**On kind or bare metal, expose the edge as a pinned NodePort.** Set the Service type to `NodePort` and pin the HTTPS listener's nodePort, so a host port mapped to it keeps pointing at it. On kind, also place the Envoy pods on the control-plane node, which is the node `extraPortMappings` forwards to. kind taints that node, so the toleration is required beside the selector. This organisation's kind cluster runs exactly these values (ADR-0809):
+
+```yaml
+gatewayListener:
+  create: true
+  envoyProxy:
+    serviceType: NodePort
+    httpsNodePort: 30443 # kind's extraPortMappings maps a host port to this
+    pod:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+```
+
+`pod.nodeSelector` and `pod.tolerations` render verbatim into Envoy Gateway's `envoyDeployment.pod`. `httpsNodePort` renders as a StrategicMerge `envoyService.patch` on the Service port `443`, because the EnvoyProxy API has no nodePort field. Left unset, none of the three renders, and the EnvoyProxy is the one this chart rendered before these keys existed. Envoy Gateway defaults the Service's `externalTrafficPolicy` to `Local`, so the client source address survives and no key is needed for it.
 
 **cert-manager is your prerequisite and this chart never installs it.** That is the estate's standing rule for every operator — cert-manager, mariadb-operator, KEDA, Envoy Gateway and Argo CD are the adopter's to install, and a chart that needs one checks the API and refuses at render when it is absent.
 
