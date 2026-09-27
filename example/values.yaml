@@ -13,10 +13,13 @@
 #
 # ─── what you must change ────────────────────────────────────────────────────
 #
-# `edgeTLS.issuerRef` — BOTH KEYS. There is no default, and the render refuses
-# without them, naming the key. The edge certificate is signed by an authority
-# this chart does not own: this organisation's is a hand-minted ClusterIssuer
-# whose key is held outside the cluster, and yours is yours.
+# `edgeTLS.issuerRef` — BOTH KEYS. There is no default for an authority this
+# chart does not own, and the render refuses without them, naming the key. (An
+# empty `edgeTLS.issuerRef` falls back to this chart's own internal CA, but only
+# when `internalCA.create` is true and the map is left completely empty — not a
+# fallback this file uses, since the edge here is signed by an authority this
+# chart does not own: this organisation's is a hand-minted ClusterIssuer whose
+# key is held outside the cluster, and yours is yours.)
 #
 # `edgeTLS.commonName` and `edgeTLS.dnsNames` — the host your edge answers on.
 # The chart ships this organisation's as a stated starting value rather than

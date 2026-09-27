@@ -80,7 +80,7 @@ chart/templates/_require_api.tpl           the render check's definition — a p
 chart/templates/render-checks.yaml         where it is CALLED, which is what makes the refusal happen
 chart/templates/internal-ca.yaml           the self-signed Issuer, the CA Certificate and the CA Issuer
 chart/templates/certificates.yaml          the ten internal leaves, from the map in values.yaml
-chart/templates/edge-certificate.yaml      the edge leaf, whose issuerRef is required with no default
+chart/templates/edge-certificate.yaml      the edge leaf; issuerRef falls back to the internal CA if left empty, else required
 chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
 chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook
 chart/templates/admin-bootstrap-token.yaml the one credential an operator reads out, in its own file

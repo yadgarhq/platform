@@ -1,34 +1,50 @@
 {{/*
-THE EDGE LEAF, WHICH THIS CHART REQUESTS AND DOES NOT ISSUE.
+THE EDGE LEAF, WHICH THIS CHART REQUESTS AND DOES NOT ISSUE — EXCEPT WHEN IT
+FALLS BACK TO THE ONE AUTHORITY IT DOES (B3 of
+plans/the-one-application-install.md, ADR-0803).
 
-ITS OWN TOGGLE, BECAUSE ITS AUTHORITY CAN BE SOMEBODY ELSE'S. `edgeTLS.issuerRef`
-DEFAULTS TO THIS CHART'S OWN INTERNAL CA (B3 of
-plans/the-one-application-install.md, ADR-0803), so the whole-estate defaults
-need no issuer of their own. An adopter signing the edge with an authority held
-outside the installation — this organisation's is a hand-minted ClusterIssuer
-whose key lives in 1Password — clears `edgeTLS.issuerRef` with explicit `null`s
-rather than editing it in place: helm deep-merges a values override into a
-non-empty default key by key, so `issuerRef: {}` has no keys to overlay and the
-default comes through untouched (MEASURED), and only `issuerRef: null`, or
-`name`/`kind` nulled individually, delete the key from the merge. `required`
-still refuses a render cleared that way, naming the key. A guessed issuer name
-is worse than a refusal: it renders an object that never goes Ready, and the
-operator meets a pending Certificate instead of a message naming the key they
-did not set.
+`edgeTLS.issuerRef` carries NO DEFAULT OF ITS OWN in `chart/values.yaml` — it
+stays `{}`. THIS TEMPLATE fills it with `{name: internalCA.name, kind: Issuer}`
+ONLY when the map is left COMPLETELY EMPTY and `internalCA.create` is true, so
+the whole-estate defaults render a working edge Certificate with no issuer
+override, while an adopter who states EVEN ONE of `name`/`kind` gets the
+`required` guards below rather than a partial mix of their value and this
+chart's fallback.
 
-`kind` IS REQUIRED TOO, not only `name`. It decides whether cert-manager looks the
-issuer up in this namespace (`Issuer`) or cluster-wide (`ClusterIssuer`), so a
-name with no kind is half an address — and, since `kind: Issuer` is now this
-chart's own default, an adopter who overrides `name` alone inherits it rather
-than leaving it unset.
+THE FALLBACK LIVES HERE AND NOT AS A DEFAULT IN `values.yaml`, and that split is
+load-bearing rather than a style choice. MEASURED: helm deep-merges a values
+override into a NON-EMPTY chart default key by key, so a default of
+`{name: yadgar-internal-ca, kind: Issuer}` in `values.yaml` could not tell an
+adopter who deliberately empties `issuerRef` apart from one who never touched
+it — `issuerRef: {}` has no keys to overlay a non-empty default with, so the
+default renders straight through, and `issuerRef: {name: my-cluster-ca}` alone
+INHERITS `kind: Issuer` from that default rather than leaving it unset, so the
+render silently signs with the wrong issuer's `kind` instead of refusing. A map
+that is `{}` IN THE CHART'S OWN DEFAULT carries no such ambiguity: an override
+of any shape at all is visible as a non-empty map the moment it names one key,
+and `empty` reads true only when nothing was stated.
 
-`get` RATHER THAN A FIELD ACCESS, so an adopter who clears `issuerRef` to `nil`
+AN ADOPTER SIGNING THE EDGE WITH A DIFFERENT AUTHORITY, OR RUNNING WITH
+`internalCA.create` false, STATES BOTH KEYS. A guessed issuer name is worse
+than a refusal: it renders an object that never goes Ready, and the operator
+meets a pending Certificate instead of a message naming the key they did not
+set.
+
+`kind` IS REQUIRED TOO, not only `name`. It decides whether cert-manager looks
+the issuer up in this namespace (`Issuer`) or cluster-wide (`ClusterIssuer`),
+so a name with no kind is half an address.
+
+`get` RATHER THAN A FIELD ACCESS, so an adopter who leaves `issuerRef` at its
+own empty default — with `internalCA.create` false, so no fallback applies —
 meets the `required` message rather than a nil-pointer error naming a template
 line.
 */}}
 {{- if .Values.edgeTLS.create }}
 {{- $edge := .Values.edgeTLS }}
 {{- $issuerRef := $edge.issuerRef | default dict }}
+{{- if and (empty $issuerRef) .Values.internalCA.create }}
+{{- $issuerRef = dict "name" .Values.internalCA.name "kind" "Issuer" }}
+{{- end }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -53,7 +69,7 @@ spec:
     - {{ . }}
     {{- end }}
   issuerRef:
-    name: {{ required "platform: edgeTLS.issuerRef.name has no default and must be set. edgeTLS.create is true, and the edge certificate is signed by an authority this chart does not own — name yours." (get $issuerRef "name") }}
-    kind: {{ required "platform: edgeTLS.issuerRef.kind has no default and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address." (get $issuerRef "kind") }}
+    name: {{ required "platform: edgeTLS.issuerRef.name has no default here and must be set. edgeTLS.create is true; either name the authority that signs your edge certificate, or turn internalCA.create on and leave edgeTLS.issuerRef empty for this chart's own internal CA." (get $issuerRef "name") }}
+    kind: {{ required "platform: edgeTLS.issuerRef.kind has no default here and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address — and naming only one of the two keys does not qualify for the internal-CA fallback, which applies only when the whole map is left empty." (get $issuerRef "kind") }}
     group: cert-manager.io
 {{- end }}
