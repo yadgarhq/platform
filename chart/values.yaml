@@ -191,14 +191,18 @@ edgeTLS:
   #       kind: ClusterIssuer
   issuerRef: {}
 
-  # THE STARTING VALUE, NOT A CONSTANT — change it to the host your edge answers
-  # on. It is a shipped default rather than a `required` because the plan this
-  # chart is built from names `edgeTLS.issuerRef` as the one thing an adopter must
-  # state, and because a stated choice somebody edits is how this estate ships
-  # every other default (`yadgarhq/config`'s README states the same rule).
-  commonName: gateway.yadgar.internal
-  dnsNames:
-    - gateway.yadgar.internal
+  # THE HOST YOUR EDGE ANSWERS ON. EMPTY HERE, AND THAT IS NOT "UNSET" — both
+  # keys fall back to `global.hostname`, the one place an adopter states the
+  # estate's hostname (ADR-0808), and to `gateway.yadgar.internal` when that is
+  # empty too. A value set here still wins over `global.hostname`. An empty
+  # `dnsNames` becomes the one resolved hostname. `templates/_hostname.tpl` holds
+  # the order.
+  #
+  # They default to empty rather than to `gateway.yadgar.internal` because a
+  # non-empty default cannot be told apart from a value somebody set, so the
+  # global would never be read.
+  commonName: ""
+  dnsNames: []
 
   # 720h IS THE EDGE'S RUNG and it is held out of the map above, not missing from
   # it. Envoy Gateway reloads this leaf through xDS instead of restarting, so no
@@ -291,7 +295,12 @@ gatewayListener:
   # certificate's `dnsNames` under `edgeTLS` above, and any name constraint on the
   # authority that signs it — or verification fails AFTER signing succeeds, which
   # is a confusing place to find a typo.
-  hostname: gateway.yadgar.internal
+  #
+  # EMPTY HERE: it falls back to `global.hostname` (ADR-0808), then to
+  # `gateway.yadgar.internal`, exactly as `edgeTLS.commonName` does. Leaving all
+  # three keys empty and setting `global.hostname` is how the three agree by
+  # construction. A value set here still wins.
+  hostname: ""
 
   # THE SECRET THE LISTENER TERMINATES ON, AND IT IS A SEPARATE KEY FROM
   # `edgeTLS.name` ON PURPOSE. An adopter may terminate on a Secret their own

@@ -57,7 +57,9 @@ spec:
     - name: https
       protocol: HTTPS
       port: 443
-      hostname: {{ $listener.hostname }}
+      {{- /* `gatewayListener.hostname`, else `global.hostname` (ADR-0808); see
+      `_hostname.tpl` for the order. */}}
+      hostname: {{ include "platform.hostname" (dict "local" $listener.hostname "context" $) }}
       tls:
         mode: Terminate
         certificateRefs:
