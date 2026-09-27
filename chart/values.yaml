@@ -164,12 +164,26 @@ edgeTLS:
   create: false
   name: gateway-tls
 
-  # NO DEFAULT, AND `required` REFUSES THE RENDER WITHOUT IT. There is no honest
-  # default for somebody else's certificate authority: a guessed name renders an
-  # object that never goes Ready, and the operator meets a pending Certificate
-  # rather than a message naming the key they did not set. Both halves are
-  # refused, because `kind` decides whether the name is looked up in this
-  # namespace or cluster-wide.
+  # EMPTY HERE, AND THE TEMPLATE FALLS BACK TO THIS CHART'S OWN INTERNAL CA (B3 of
+  # plans/the-one-application-install.md, ADR-0803) RATHER THAN THIS KEY CARRYING
+  # THAT DEFAULT ITSELF. `chart/templates/edge-certificate.yaml` fills in
+  # `{name: internalCA.name, kind: Issuer}` ONLY when this map is left completely
+  # empty AND `internalCA.create` is true — never for a PARTIAL map (`name` with
+  # no `kind`, or the reverse), which still hits the `required` guards below. The
+  # fallback lives in the template rather than here because a default stated in
+  # THIS map could not tell "an adopter left it empty on purpose" apart from "an
+  # adopter typed nothing at all" — MEASURED: helm deep-merges a values override
+  # into a non-empty chart default key by key, so `issuerRef: {}` would have no
+  # keys to overlay and a non-empty default here would render through untouched
+  # even for an adopter who wants no issuer at all and expected the refusal.
+  #
+  # AN ADOPTER SIGNING THE EDGE WITH A DIFFERENT AUTHORITY, OR RUNNING WITH
+  # `internalCA.create` false, STATES BOTH KEYS — there is no default for them.
+  # A guessed issuer name is worse than a refusal: it renders an object that
+  # never goes Ready, and the operator meets a pending Certificate rather than a
+  # message naming the key they did not set. Both halves are refused, because
+  # `kind` decides whether the name is looked up in this namespace or
+  # cluster-wide.
   #
   #   edgeTLS:
   #     issuerRef:

@@ -367,22 +367,114 @@ def test_renaming_the_leaves_key_without_the_edge_leaf_leaves_the_ca_root_alone(
     assert "expected 11 Certificate objects, found 1" in message
 
 
-# ── THE EDGE LEAF'S ISSUER HAS NO DEFAULT ────────────────────────────────────
+# ── THE EDGE LEAF'S ISSUER FALLS BACK TO THE INTERNAL CA ─────────────────────
+#
+# B3 of plans/the-one-application-install.md (ADR-0803): `edgeTLS.issuerRef`
+# keeps its `{}` default in `chart/values.yaml` — no populated default was added
+# there — and `chart/templates/edge-certificate.yaml` fills it with
+# `{name: internalCA.name, kind: Issuer}` ONLY when the map is left completely
+# empty AND `internalCA.create` is true, so the parent chart's whole-estate
+# defaults render a working edge Certificate with no issuer override. A map an
+# adopter has stated EVEN PARTIALLY — one key, not both — never receives the
+# fallback and still hits the `required` guards, which is what tells this design
+# apart from putting the default directly on the values key: MEASURED (a first
+# revision of this step got this wrong), a non-empty `values.yaml` default merges
+# with a partial override key-by-key, so `issuerRef: {name: my-cluster-ca}` alone
+# would have silently inherited `kind: Issuer` from that default instead of
+# refusing.
 
 
-def test_the_edge_leaf_refuses_without_an_issuer(tmp_path):
-    """`edgeTLS.issuerRef` is `required`, and the refusal names the key.
+def test_the_edge_certificate_defaults_to_the_internal_ca_issuer(tmp_path):
+    """B3's GREEN CASE: with no issuer override, the fallback names a REAL Issuer.
 
-    A guessed issuer name would render an object that never goes Ready, so the
-    operator would meet a pending Certificate rather than a message naming the key
-    they did not set. Both halves are refused: `kind` decides whether the name is
-    looked up in this namespace or cluster-wide, so a name with no kind is half an
-    address.
+    `edgeTLS.create` and `internalCA.create` on, and nothing else — the edge
+    Certificate's `issuerRef` must name the SAME Issuer object this render itself
+    emits, not a literal this test carries independently of `values.yaml`. A
+    rename of `internalCA.name` has to move both sides together or this reddens.
+    """
+    values = values_file(
+        tmp_path,
+        "edge-and-internal-ca.yaml",
+        "edgeTLS:\n  create: true\ninternalCA:\n  create: true\n",
+    )
+    documents = render(CHART, "-f", str(values))
+
+    edge_leaves = [
+        document for document in certificates(documents) if not document["spec"].get("isCA")
+    ]
+    assert len(edge_leaves) == 1, (
+        f"expected exactly one non-CA Certificate, found {len(edge_leaves)}: "
+        f"{[document['metadata']['name'] for document in edge_leaves]}"
+    )
+    (edge,) = edge_leaves
+
+    issuer_names = {
+        document["metadata"]["name"] for document in documents if document.get("kind") == "Issuer"
+    }
+    issuer_ref = edge["spec"]["issuerRef"]
+    assert issuer_ref["kind"] == "Issuer", issuer_ref
+    assert issuer_ref["name"] in issuer_names, (
+        f"the edge Certificate's issuerRef names {issuer_ref['name']!r}, which is "
+        f"not among the Issuers this render emits: {sorted(issuer_names)}"
+    )
+
+
+def test_the_edge_leaf_refuses_a_partial_issuer_even_when_internal_ca_is_on(tmp_path):
+    """RED CASE (a): a PARTIAL map never gets the fallback, even with it eligible.
+
+    `internalCA.create` true and `edgeTLS.issuerRef.name` alone — an adopter
+    naming their own issuer but forgetting `kind`. A values-key default would
+    have inherited `kind: Issuer` from it here and rendered silently; the
+    fallback living in the template, gated on the map being COMPLETELY empty,
+    refuses instead. This is the exact shape a first revision of this step got
+    wrong, re-measured here as its own case rather than left to the docstring.
+    """
+    values = values_file(
+        tmp_path,
+        "partial-issuer.yaml",
+        "edgeTLS:\n  create: true\n  issuerRef:\n    name: my-cluster-ca\ninternalCA:\n  create: true\n",
+    )
+    result = helm("template", "platform", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "a name-only issuerRef did not refuse"
+    assert "edgeTLS.issuerRef.kind" in result.stderr, result.stderr
+
+
+def test_the_edge_leaf_refuses_an_empty_issuer_when_internal_ca_is_off(tmp_path):
+    """RED CASE (b): the fallback is CONDITIONAL on `internalCA.create`, not automatic.
+
+    `edgeTLS.create` alone, `internalCA.create` at its own default (false) —
+    there is no Issuer this chart renders for the fallback to name, so it must
+    not apply. A first revision of this step got this wrong the other way: a
+    populated `values.yaml` default rendered `issuerRef.name: yadgar-internal-ca`
+    here with NO Issuer object anywhere in the render, which is silently worse
+    than the refusal this case now asserts — a Certificate that can never go
+    Ready, with no message pointing at why.
+    """
+    values = values_file(tmp_path, "edge-only.yaml", "edgeTLS:\n  create: true\n")
+    result = helm("template", "platform", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "an empty issuerRef with internalCA off did not refuse"
+    assert "edgeTLS.issuerRef.name" in result.stderr, result.stderr
+
+
+def test_the_edge_leaf_refuses_when_the_issuer_is_cleared_with_null(tmp_path):
+    """RED CASE (c): explicit `null` behaves like the key was never stated at all.
+
+    Both here have `internalCA.create` at its own default (false), so neither
+    reaches the fallback regardless of how the map was cleared — the whole map
+    with a bare `null`, and one field with the other stated, because helm
+    deletes a destination key only when the override names it `null` and leaves
+    every other key of a partly-cleared map alone (which is what lets the second
+    case clear `kind` without also reintroducing the first case's `name`
+    refusal). NOT asserted with `internalCA.create` true: helm cannot tell an
+    explicit `issuerRef: null` apart from the key never having been stated once
+    both merge to the same empty map, so with the fallback eligible a bare
+    `null` renders the internal CA rather than refusing — the same reason the
+    fallback could not live as a `values.yaml` default in the first place.
     """
     for body, key in (
-        ("edgeTLS:\n  create: true\n", "edgeTLS.issuerRef.name"),
+        ("edgeTLS:\n  create: true\n  issuerRef: null\n", "edgeTLS.issuerRef.name"),
         (
-            "edgeTLS:\n  create: true\n  issuerRef:\n    name: some-ca\n",
+            "edgeTLS:\n  create: true\n  issuerRef:\n    name: some-ca\n    kind: null\n",
             "edgeTLS.issuerRef.kind",
         ),
     ):
@@ -395,7 +487,7 @@ def test_the_edge_leaf_refuses_without_an_issuer(tmp_path):
             "-f",
             str(overridden),
         )
-        assert result.returncode != 0, f"{key} has no default and the render did not refuse"
+        assert result.returncode != 0, f"{key} was cleared and the render did not refuse"
         assert key in result.stderr, result.stderr
 
 
