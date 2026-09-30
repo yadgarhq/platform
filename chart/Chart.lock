@@ -17,5 +17,8 @@ dependencies:
 - name: argo-cd
   repository: https://argoproj.github.io/argo-helm
   version: 8.6.1
-digest: sha256:e26f70bc6400e239c80eeef1fcbc314042249bd41f6eccc3d1a2d79d922f2805
-generated: "2026-09-25T20:08:14.638509801+02:00"
+- name: prometheus
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 29.27.0
+digest: sha256:171bbc62c3fc036afe06813c9fc3ade78de0977e7b0c0da5dd0885dc9b4efe6f
+generated: "2026-09-30T23:12:34.603290889+02:00"

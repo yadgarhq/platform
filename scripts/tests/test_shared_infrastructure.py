@@ -73,7 +73,7 @@ DECLARED_API_VERSIONS = ("cert-manager.io/v1", "gateway.envoyproxy.io/v1alpha1")
 EXPECTED_GATEWAY_LISTENER_OBJECTS = 3  # GatewayClass, Gateway, EnvoyProxy
 EXPECTED_VALKEY_OBJECTS = 2  # Deployment, Service
 EXPECTED_INGRESS_POLICIES = 2  # valkey-ingress, nats-ingress
-EXPECTED_DECLARED_DEPENDENCIES = 6  # nats, cert-manager, keda, mariadb-operator, gateway-helm, argo-cd
+EXPECTED_DECLARED_DEPENDENCIES = 7  # nats, cert-manager, keda, mariadb-operator, gateway-helm, argo-cd, prometheus
 
 # THE `condition:` OF EVERY DEPENDENCY, BY NAME. LITERAL, for the reason every
 # expected number and string in this file is: a value derived from the chart
@@ -91,6 +91,7 @@ EXPECTED_DECLARED_CONDITIONS = {
     "mariadb-operator": "operators.mariadbOperator.create,operators.create",
     "gateway-helm": "operators.envoyGateway.create,operators.create",
     "argo-cd": "operators.argoCd.create,operators.create",
+    "prometheus": "operators.prometheus.create,operators.create",
 }
 
 # The clients each policy admits, by value, because they belong to other charts.
@@ -1512,6 +1513,7 @@ def test_the_chart_declares_the_dependencies_this_suite_expects():
         "keda",
         "mariadb-operator",
         "nats",
+        "prometheus",
     ], declared
 
 

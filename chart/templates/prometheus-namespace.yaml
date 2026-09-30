@@ -1,0 +1,21 @@
+{{/*
+THE NAMESPACE THE BUNDLED PROMETHEUS LANDS IN (ADR-0820).
+
+`prometheus.forceNamespace` puts every namespaced Prometheus object in
+`observability`, where the seven module charts' default
+`autoscaling.prometheusAddress` points. Nothing else creates that namespace: Argo
+CD's `CreateNamespace` creates only the Application's own destination, and
+`helm install --create-namespace` only the release's. So this chart renders it,
+exactly when the prometheus dependency is on — the same resolution helm applies to
+its `condition:`, through the shared helper — and only when it is not the release's
+own namespace.
+*/}}
+{{- if (include "platform.operator-create" (dict "context" $ "operator" "prometheus")) }}
+{{- $namespace := .Values.prometheus.forceNamespace }}
+{{- if and $namespace (ne $namespace .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespace }}
+{{- end }}
+{{- end }}

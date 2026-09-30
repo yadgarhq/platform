@@ -352,7 +352,7 @@ all eighteen vendored-CRD guards of its step 2 — so the resolution is stated o
 these two gates keep the LISTS in step, which the helper says nothing about.
 */}}
 {{- $operatorKeysOn := list }}
-{{- range $operator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator") }}
+{{- range $operator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator" "prometheus") }}
 {{- $key := (include "platform.operator-create" (dict "context" $ "operator" $operator)) }}
 {{- if $key }}
 {{- $operatorKeysOn = append $operatorKeysOn $key }}

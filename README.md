@@ -20,6 +20,8 @@ The certificate half of the layer, and the Jobs that mint the credentials nothin
 | The Valkey Deployment and Service, and the `valkey-ingress` NetworkPolicy                                            | `valkey.create`          | `false` |
 | The upstream `nats` chart as a DEPENDENCY, and the `nats-ingress` NetworkPolicy this chart renders itself            | `nats.create`            | `false` |
 
+**Prometheus installs with the operators (ADR-0820).** The upstream `prometheus` chart is a dependency under `condition: operators.prometheus.create,operators.create`, so every release with `operators.create: true` installs it: server only, no volume, Service `prometheus-server` in namespace `observability` on port 80. That is the address the module charts' KEDA ScaledObjects query by default (`autoscaling.prometheusAddress`). The chart renders the `observability` Namespace itself. Set `operators.prometheus.create: false` to keep your own Prometheus; then point the modules' `autoscaling.prometheusAddress` and `preflight.prometheus.address` at it. `preflight.probes.prometheus: true` adds a preflight check that the address answers `/-/ready`.
+
 The two probe Jobs are here too, on one toggle between them — the pre-install preflight and the post-install Envoy Gateway probe — and the sections on them below say what each does. The three MariaDB instances are the one part of the layer that is not here and will not be: each has exactly one consuming module, so each belongs to that module's own chart behind `database.create`.
 
 ## The broker is a dependency, not a copy

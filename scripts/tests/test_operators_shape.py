@@ -94,10 +94,10 @@ OPERATORS_PARTIAL = CHART / "templates" / "_operators.tpl"
 HELPER = "platform.operator-create"
 HELPER_CALL = re.compile(r'include\s+"platform\.operator-create"\s+\(dict')
 
-# Every site that reads the key, counted. Eighteen vendored CRDs and the one
-# `range` in `render-checks.yaml`. A LITERAL, for the reason every expected count
-# in this estate is a literal.
-EXPECTED_GUARD_SITES = 19
+# Every site that reads the key, counted. Eighteen vendored CRDs, the one `range`
+# in `render-checks.yaml`, and the bundled Prometheus's Namespace (ADR-0820). A
+# LITERAL, for the reason every expected count in this estate is a literal.
+EXPECTED_GUARD_SITES = 20
 EXPECTED_VENDORED_FILES = 18
 
 # The raw read no template may perform any more. `.Values.operators.create` is

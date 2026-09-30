@@ -166,14 +166,16 @@ EXPECTED_OPERATORS_AT_R3_BOTH = ["cert-manager", "keda", "mariadb-operator"]
 # row is qualified "R2 at step 4" and "R2 from step 5b", and this is the second of
 # those two numbers.
 EXPECTED_AGREEMENT_PAIRS_AT_R2 = 2
-EXPECTED_DEFAULT_FALSE_PROBES = ["keda", "mariadb"]
+# `probes.prometheus` joins them (ADR-0820): the module ScaledObjects that need
+# Prometheus are sibling charts' objects, so nothing here can resolve its tie.
+EXPECTED_DEFAULT_FALSE_PROBES = ["keda", "mariadb", "prometheus"]
 
 # The explicit-`true` outcomes from step 5b: `probes.keda` and `probes.mariadb`
 # HONOURED, `probes.certManager` and `probes.envoyGateway` REFUSED beside their own
 # false toggles. The honoured number does NOT move with this step — the fourth probe
 # ties to one of this chart's own toggles, so its explicit `true` is refused rather
 # than honoured.
-EXPECTED_HONOURED_EXPLICIT_TRUES = 2
+EXPECTED_HONOURED_EXPLICIT_TRUES = 3
 EXPECTED_REFUSED_EXPLICIT_TRUES = 2
 
 # The explicit-`false` override, and only where it DISCRIMINATES. `probes.keda` and
@@ -748,7 +750,7 @@ def agreement_failures(tmp_path: Path) -> list[str]:
     pairs += 1
 
     for probe in EXPECTED_DEFAULT_FALSE_PROBES:
-        operator = {"keda": "keda", "mariadb": "mariadb-operator"}[probe]
+        operator = {"keda": "keda", "mariadb": "mariadb-operator", "prometheus": "prometheus"}[probe]
         if operator in on:
             failures.append(
                 f"preflight.probes.{probe} is unset and this chart renders nothing "
@@ -887,7 +889,11 @@ def test_an_explicit_true_is_honoured_for_the_probes_no_sibling_can_resolve(tmp_
     refusal looks like and nothing about what honouring looks like.
     """
     honoured = 0
-    for probe, operator in (("keda", "keda"), ("mariadb", "mariadb-operator")):
+    for probe, operator in (
+        ("keda", "keda"),
+        ("mariadb", "mariadb-operator"),
+        ("prometheus", "prometheus"),
+    ):
         values = overrides(
             tmp_path / f"{probe}-on.yaml", f"preflight:\n  probes:\n    {probe}: true\n"
         )
@@ -4415,9 +4421,9 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
         "probes at R3 (keda+mariadb true)": EXPECTED_PROBES_AT_R3_BOTH,
         "denominator at R3 (keda+mariadb true)": EXPECTED_PROBES_AT_R3_BOTH,
         "probe/toggle pairs at R2": 2,
-        "default-false probes asserted at R2": 2,
+        "default-false probes asserted at R2": 3,
         "discriminating explicit-false overrides": 2,
-        "honoured explicit trues": 2,
+        "honoured explicit trues": 3,
         "refused explicit trues": 2,
         # cert-manager two (its own group, and the named probe Secret), KEDA two
         # (its own group and `apps`), mariadb one.

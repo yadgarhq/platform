@@ -119,6 +119,14 @@ The caller splits it.
       "operator" "mariadb-operator")) "true" -}}
 {{- $probes = append $probes "mariadb-operator" -}}
 {{- end -}}
+{{- if eq (include "platform.preflight.probe" (dict
+      "context" $context
+      "probe" "prometheus"
+      "tied" false
+      "owner" ""
+      "operator" "Prometheus")) "true" -}}
+{{- $probes = append $probes "prometheus" -}}
+{{- end -}}
 {{- join " " $probes -}}
 {{- end -}}
 

@@ -1064,8 +1064,10 @@ def test_the_guard_names_every_operator_THE_CHART_DECLARES():
     reddens here.
     """
     declared = operator_names_from_chart_manifest(CHART_MANIFEST)
-    assert len(declared) == 5, (
-        f"expected five operator dependencies with a two-path condition, found "
+    # Five operators and the bundled Prometheus, which carries their condition
+    # shape and installs in their release (ADR-0820).
+    assert len(declared) == 6, (
+        f"expected six operator-release dependencies with a two-path condition, found "
         f"{declared} — the guard's list below is checked against this one"
     )
     assert sorted(guard_list(GUARD_OPERATORS, CHART)) == sorted(declared), (

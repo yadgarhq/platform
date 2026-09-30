@@ -88,3 +88,16 @@ dependencies:
     version: 8.6.1
     repository: https://argoproj.github.io/argo-helm
     condition: operators.argoCd.create,operators.create
+
+  # PROMETHEUS RIDES WITH THE OPERATORS, UNDER THEIR CONDITION SHAPE (ADR-0820).
+  # It is not an operator: it is the server KEDA's prometheus scaler queries for
+  # the seven module ScaledObjects the parent's defaults turn on. It installs with
+  # the operators — in the release that runs BEFORE the estate — because the
+  # estate's preflight is a pre-install hook and could never probe a Prometheus its
+  # own release has not applied yet. So it is on wherever `operators.create` is,
+  # and `operators.prometheus.create: false` takes it out for an adopter who runs
+  # their own.
+  - name: prometheus
+    version: 29.27.0
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: operators.prometheus.create,operators.create
