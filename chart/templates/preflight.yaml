@@ -315,6 +315,17 @@ spec:
               )
                 create "$issuers/$PROBE_NAME" "$issuers" "$issuer_body"
 
+                # THE SECRET THE CERTIFICATE WRITES IS THIS PROBE'S TOO (ledger
+                # 1193). cert-manager does not own the Secrets it writes, so
+                # deleting the Certificate leaves `$PROBE_NAME` standing in the
+                # release namespace. It is removed BEFORE the Certificate is created,
+                # so one a killed Job left behind goes the way every fixed-name
+                # object here goes; and it is recorded AFTER the Certificate, because
+                # the cleanup walks `CREATED` oldest first and a Secret deleted while
+                # its Certificate still stands is re-issued.
+                secret="/api/v1/namespaces/$ns/secrets/$PROBE_NAME"
+                remove "$secret"
+
                 certificate_body=$(cat <<JSON
               {"apiVersion":"{{ $preflight.certManager.apiVersion }}","kind":"Certificate",
                "metadata":{"name":"$PROBE_NAME"},
@@ -324,6 +335,7 @@ spec:
               JSON
               )
                 create "$certificates/$PROBE_NAME" "$certificates" "$certificate_body"
+                CREATED="$CREATED $secret"
 
                 await "$certificates/$PROBE_NAME" Ready True cert-manager
               }

@@ -59,20 +59,53 @@ exercises — and it is checked AT THE TOP LEVEL, because inside a function reac
 through `$( )` the exit status is discarded and `set -e` never sees it, and a
 pipeline reports only its last element's status.
 
-THE PROBE GATEWAY IS CLEANED UP ON EVERY EXIT PATH, AND `hook-delete-policy` DOES
-NOT DO IT. `before-hook-creation` deletes the JOB before the next hook run; it never
+THE PROBE RUNS ON ITS OWN ENVOYPROXY, NEVER ON `edge` (ledger 1189). It used to
+name `edge` as its infrastructure, and so inherited `edge`'s pinned HTTPS nodePort.
+MEASURED on a from-scratch kind install on 2026-09-30: the edge Service already
+held that port, the API server refused the probe's Service ("provided port is
+already allocated"), and the probe failed at its bound on every sync of a healthy
+cluster. So the probe creates an EnvoyProxy that is `edge`'s spec WITHOUT the
+`envoyService.patch`: the same replicas, the same scheduling, the same Service
+type. The type is what keeps the probe honest. Envoy Gateway v1.9.1 addresses a
+`ClusterIP` Gateway from the Service's own cluster IPs, so a `ClusterIP` probe is
+programmed on every cluster and could never go red; a `NodePort` one with no pin
+gets the node addresses, and a `LoadBalancer` one gets an address only where a
+load-balancer controller runs — the same answer the edge gets.
+
+THE PROBE GATEWAY AND ITS ENVOYPROXY ARE CLEANED UP ON EVERY EXIT PATH, AND
+`hook-delete-policy` DOES NOT DO IT. `before-hook-creation` deletes the JOB before the next hook run; it never
 touches objects that Job created. A Gateway left standing is not inert — it is
 provisioned proxy infrastructure. So there are two guarantees, because one of them
 has to survive the Job dying outright: a `trap` that deletes on EVERY exit, success
 and failure alike, before the failure is reported; and a FIXED name, deleted and
 waited for BEFORE this run creates its own, so a Job killed between create and
 cleanup leaks at most one Gateway and the next run removes it rather than colliding
-with it.
+with it. The cleanup deletes NEWEST FIRST — the Gateway, then its EnvoyProxy —
+because an EnvoyProxy deleted under a live Gateway makes Envoy Gateway re-provision
+that Gateway from the controller's defaults.
 */}}
 {{- $preflight := .Values.preflight }}
 {{- $probe := $preflight.envoyGateway }}
 {{- $listener := .Values.gatewayListener }}
 {{- $probes := without (splitList " " (include "platform.preflight.postInstallProbes" (dict "context" $))) "" }}
+{{- /*
+THE PROBE'S ENVOYPROXY SPEC: `edge`'s, read from the same keys
+`gateway-listener.yaml` reads, with no `envoyService.patch`. Built here rather than
+shared with that template so the edge object renders exactly as it did;
+`test_preflight.py`'s `probe_infrastructure_failures` asserts the two agree field
+by field, minus the pin.
+*/}}
+{{- $envoyProxy := $listener.envoyProxy }}
+{{- $probePod := dict }}
+{{- with (dig "pod" "nodeSelector" dict $envoyProxy) }}{{ $_ := set $probePod "nodeSelector" . }}{{ end }}
+{{- with (dig "pod" "tolerations" list $envoyProxy) }}{{ $_ := set $probePod "tolerations" . }}{{ end }}
+{{- $probeDeployment := dict "replicas" $envoyProxy.replicas }}
+{{- if $probePod }}{{ $_ := set $probeDeployment "pod" $probePod }}{{ end }}
+{{- $probeProxySpec := dict "provider" (dict
+      "type" "Kubernetes"
+      "kubernetes" (dict
+        "envoyDeployment" $probeDeployment
+        "envoyService" (dict "type" $envoyProxy.serviceType))) }}
 {{- if and $preflight.enabled $probes }}
 apiVersion: batch/v1
 kind: Job
@@ -153,9 +186,10 @@ spec:
               # value carries spaces and is a message read off the operator.
               PROGRAMMED_MESSAGE={{ $probe.programmedMessage | squote }}
 
-              # THE PATHS THE CLEANUP WALKS. Appended as each object is created, so
+              # THE PATHS THE CLEANUP WALKS. PREPENDED as each object is created, so
               # a probe that dies half-way still leaves its cleanup a complete list
-              # of what it made.
+              # of what it made, and the cleanup deletes NEWEST FIRST: the Gateway
+              # before the EnvoyProxy it names.
               CREATED=""
 
               # ── THE RESPONSE HAS TO BE COMPACT JSON, AND THIS REQUEST DECIDES IT ─
@@ -283,7 +317,7 @@ spec:
                   cat "$body" >&2
                   return 1
                 fi
-                CREATED="$CREATED $1"
+                CREATED="$1 $CREATED"
               }
 
               # WHETHER A CONDITION OF TYPE $1 CARRIES A STATUS MATCHING $2 AND A
@@ -358,17 +392,37 @@ spec:
               # therefore on no ReferenceGrant and no cert-manager: a red here is
               # Envoy Gateway and never a certificate that has not been issued yet.
               #
-              # AND IT INHERITS THE REAL LISTENER'S INFRASTRUCTURE. The
-              # `parametersRef` names the EnvoyProxy `gatewayListener.create` has
-              # already rendered — this hook runs after the release's objects exist,
-              # which is the reason it is post-install at all. So the probe's data
-              # plane is placed and exposed exactly as the estate's own edge is, and
-              # whether a Gateway can be programmed on this cluster is one question
-              # rather than two. A probe provisioned from the controller's defaults
-              # could fail where the real Gateway succeeds, which would be a probe
-              # reporting on a Gateway nobody installed.
+              # AND IT RUNS ON ITS OWN ENVOYPROXY, WHICH IS `edge`'s WITHOUT THE PIN.
+              # The data plane is placed and exposed as the estate's own edge is —
+              # same replicas, same scheduling, same Service type — so whether a
+              # Gateway can be programmed on this cluster is still one question
+              # rather than two. What it does NOT inherit is the pinned nodePort:
+              # the edge Service holds that port, and a second Service asking for
+              # it is refused (ledger 1189). A probe provisioned from the
+              # controller's defaults instead could fail where the real Gateway
+              # succeeds, which would be a probe reporting on a Gateway nobody
+              # installed.
+              #
+              # THE GROUP IS A LITERAL, as it is on `edge` in
+              # `gateway-listener.yaml`: an EnvoyProxy is Envoy Gateway's own kind.
               probe_envoy_gateway() {
                 gateways="/apis/{{ $probe.apiVersion }}/namespaces/$ns/gateways"
+                envoyproxies="/apis/gateway.envoyproxy.io/v1alpha1/namespaces/$ns/envoyproxies"
+
+                # THE ENVOYPROXY FIRST, so the Gateway names an object that already
+                # exists. A Gateway a killed Job left behind is removed by the
+                # Gateway's own `create` below, one step after its EnvoyProxy was
+                # replaced; for that step Envoy Gateway may re-provision it, and the
+                # next line deletes it. Each `create` is one bounded `remove` loop,
+                # which is why the documented install budget counts them.
+
+                envoyproxy_body=$(cat <<JSON
+              {"apiVersion":"gateway.envoyproxy.io/v1alpha1","kind":"EnvoyProxy",
+               "metadata":{"name":"$PROBE_NAME"},
+               "spec":{{ toJson $probeProxySpec }}}
+              JSON
+              )
+                create "$envoyproxies/$PROBE_NAME" "$envoyproxies" "$envoyproxy_body"
 
                 gateway_body=$(cat <<JSON
               {"apiVersion":"{{ $probe.apiVersion }}","kind":"Gateway",
@@ -376,7 +430,7 @@ spec:
                "spec":{"gatewayClassName":"{{ $listener.className }}",
                        "infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io",
                                                           "kind":"EnvoyProxy",
-                                                          "name":"{{ $listener.envoyProxy.name }}"}},
+                                                          "name":"$PROBE_NAME"}},
                        "listeners":[{"name":"probe","protocol":"HTTP","port":80,
                                      "allowedRoutes":{"namespaces":{"from":"Same"}}}]}}
               JSON

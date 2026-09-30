@@ -19,9 +19,12 @@ identity.
 THE GROUP IS THE UPSTREAM GATEWAY API'S, NOT ENVOY GATEWAY'S, and `values.yaml`
 records why at length: a Gateway is `gateway.networking.k8s.io`, a specification
 every implementation registers. What makes this probe Envoy Gateway's is the CLASS
-the Gateway binds to, whose controller is Envoy Gateway's own. This Role grants
-nothing on `gateway.envoyproxy.io`: the probe REFERENCES the EnvoyProxy this chart
-already rendered and creates none.
+the Gateway binds to, whose controller is Envoy Gateway's own.
+
+AND `create`, `get`, `delete` ON ENVOYPROXIES, in Envoy Gateway's own group. The
+probe runs its Gateway on an EnvoyProxy it creates, never on `edge`, because
+`edge` may pin a nodePort the edge Service already holds (ledger 1189). It is
+the same one-name, create-read-delete shape as the Gateway rule.
 
 THE RULES FOLLOW THE PROBES THIS RENDER ENABLES, resolved from the SAME partial the
 Job reads. A fixed rule set would be a second statement of which probes exist,
@@ -71,6 +74,11 @@ rules:
   # Envoy Gateway programs it, and deleted on every exit path.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways"]
+    verbs: ["create", "get", "delete"]
+  # The probe's own EnvoyProxy: `edge`'s spec without the pinned nodePort, created
+  # before the Gateway that names it and deleted after it.
+  - apiGroups: ["gateway.envoyproxy.io"]
+    resources: ["envoyproxies"]
     verbs: ["create", "get", "delete"]
 {{- end }}
 ---
