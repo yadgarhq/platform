@@ -229,6 +229,11 @@ spec:
                 done
               }
               trap cleanup EXIT
+              # `sh` AS PID 1 IGNORES SIGTERM UNLESS IT HAS A HANDLER, and a shell
+              # killed by a signal skips its EXIT trap. So a pod deleted mid-probe
+              # would die on SIGKILL with every probe object standing. This turns
+              # the signal into an ordinary exit, and the EXIT trap then cleans up.
+              trap 'exit 143' TERM INT
 
               # DELETE ANY OBJECT OF THIS NAME AND WAIT FOR IT TO BE GONE BEFORE
               # CREATING OURS. The names are FIXED, so a Job killed between create

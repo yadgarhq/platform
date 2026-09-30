@@ -66,11 +66,15 @@ held that port, the API server refused the probe's Service ("provided port is
 already allocated"), and the probe failed at its bound on every sync of a healthy
 cluster. So the probe creates an EnvoyProxy that is `edge`'s spec WITHOUT the
 `envoyService.patch`: the same replicas, the same scheduling, the same Service
-type. The type is what keeps the probe honest. Envoy Gateway v1.9.1 addresses a
-`ClusterIP` Gateway from the Service's own cluster IPs, so a `ClusterIP` probe is
-programmed on every cluster and could never go red; a `NodePort` one with no pin
-gets the node addresses, and a `LoadBalancer` one gets an address only where a
-load-balancer controller runs — the same answer the edge gets.
+type. The type matters for the LoadBalancer case. In Envoy Gateway v1.9.1 an
+object-level `Programmed=True` needs an address AND at least one available Envoy
+replica. A `ClusterIP` Service always has an address (its cluster IPs), and so
+does a `NodePort` one (the node addresses) — on those types the probe goes red
+only on replicas. A `LoadBalancer` Service has an address only where a
+load-balancer controller assigns one. So a probe that swapped the edge's
+`LoadBalancer` for `ClusterIP` would read green on a cluster with no
+load-balancer controller while the real edge Gateway stalls; copying the type
+keeps the probe asking the edge's own question.
 
 THE PROBE GATEWAY AND ITS ENVOYPROXY ARE CLEANED UP ON EVERY EXIT PATH, AND
 `hook-delete-policy` DOES NOT DO IT. `before-hook-creation` deletes the JOB before the next hook run; it never
@@ -287,6 +291,11 @@ spec:
                 done
               }
               trap cleanup EXIT
+              # `sh` AS PID 1 IGNORES SIGTERM UNLESS IT HAS A HANDLER, and a shell
+              # killed by a signal skips its EXIT trap. So a pod deleted mid-probe
+              # would die on SIGKILL with every probe object standing. This turns
+              # the signal into an ordinary exit, and the EXIT trap then cleans up.
+              trap 'exit 143' TERM INT
 
               # DELETE ANY OBJECT OF THIS NAME AND WAIT FOR IT TO BE GONE BEFORE
               # CREATING OURS. This is what keeps the probe FRESH as well as what
@@ -409,12 +418,14 @@ spec:
                 gateways="/apis/{{ $probe.apiVersion }}/namespaces/$ns/gateways"
                 envoyproxies="/apis/gateway.envoyproxy.io/v1alpha1/namespaces/$ns/envoyproxies"
 
-                # THE ENVOYPROXY FIRST, so the Gateway names an object that already
-                # exists. A Gateway a killed Job left behind is removed by the
-                # Gateway's own `create` below, one step after its EnvoyProxy was
-                # replaced; for that step Envoy Gateway may re-provision it, and the
-                # next line deletes it. Each `create` is one bounded `remove` loop,
-                # which is why the documented install budget counts them.
+                # A GATEWAY A KILLED JOB LEFT BEHIND GOES FIRST, before the
+                # EnvoyProxy it names is replaced under it — otherwise Envoy Gateway
+                # re-provisions that Gateway from the controller's defaults in
+                # between. Then the EnvoyProxy, so the new Gateway names an object
+                # that already exists. The Gateway's own `create` removes the same
+                # path again and finds it gone on its first read, so the documented
+                # install budget counts removals by distinct path.
+                remove "$gateways/$PROBE_NAME"
 
                 envoyproxy_body=$(cat <<JSON
               {"apiVersion":"gateway.envoyproxy.io/v1alpha1","kind":"EnvoyProxy",
