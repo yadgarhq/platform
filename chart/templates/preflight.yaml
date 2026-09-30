@@ -517,7 +517,10 @@ spec:
               # service-account token, which is a credential for the API server
               # and for nothing else; sending it to another service hands it over.
               # `--max-time` bounds each attempt, and a refused or unresolvable
-              # address is answered `000` and polled like a not-ready one.
+              # address is answered `000` and polled like a not-ready one. EACH
+              # ATTEMPT IS CHARGED ITS `--max-time` AS WELL AS THE POLL, so an
+              # address that hangs cannot stretch the loop past its stated bound.
+              PROMETHEUS_MAX_TIME=5
               PROMETHEUS_ADDRESS={{ $preflight.prometheus.address | squote }}
               PROMETHEUS_READY={{ $preflight.prometheus.readyMessage | squote }}
               probe_prometheus() {
@@ -525,13 +528,13 @@ spec:
                 code=""
                 while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
                   code="$(curl --silent --output "$body" --write-out '%{http_code}' \
-                    --max-time 5 --user-agent "$USER_AGENT" \
+                    --max-time "$PROMETHEUS_MAX_TIME" --user-agent "$USER_AGENT" \
                     "$PROMETHEUS_ADDRESS/-/ready" || true)"
                   if [ "$code" = "200" ] && grep -qF "$PROMETHEUS_READY" "$body"; then
                     return 0
                   fi
                   sleep "$POLL_SECONDS"
-                  waited=$((waited + POLL_SECONDS))
+                  waited=$((waited + POLL_SECONDS + PROMETHEUS_MAX_TIME))
                 done
                 echo "preflight: Prometheus at $PROMETHEUS_ADDRESS did not answer ready within ${waited}s (last HTTP status: ${code:-none})." >&2
                 echo "preflight: expected HTTP 200 carrying: $PROMETHEUS_READY" >&2

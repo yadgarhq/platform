@@ -358,8 +358,8 @@ def test_dropping_the_message_check_reddens_the_arm(tmp_path):
 def test_sending_the_token_to_prometheus_reddens_the_arm(tmp_path):
     chart = mutated_chart(
         tmp_path, "templates/preflight.yaml",
-        '--max-time 5 --user-agent "$USER_AGENT"',
-        '--max-time 5 --user-agent "$USER_AGENT" --header "Authorization: Bearer $token"',
+        '--max-time "$PROMETHEUS_MAX_TIME" --user-agent "$USER_AGENT"',
+        '--max-time "$PROMETHEUS_MAX_TIME" --user-agent "$USER_AGENT" --header "Authorization: Bearer $token"',
     )
     script = preflight_script("--set", "preflight.probes.prometheus=true", chart=chart)
     message = "\n".join(prometheus_probe_failures(script, tmp_path / "run"))
@@ -378,3 +378,172 @@ def test_dropping_the_forced_namespace_reddens_placement(tmp_path):
     chart = mutated_chart(tmp_path, "values.yaml", "  forceNamespace: observability\n", "")
     message = "\n".join(placement_failures(operators_render(chart=chart)))
     assert "do not land in 'observability'" in message or "resolves as" in message, message
+
+
+# ── THE REVIEW'S FOUR: TIMING, THE NAMESPACE'S LIFE, THE SCRAPE INTERVAL ─────
+
+
+def test_the_arm_counts_each_attempts_own_time_against_its_bound(tmp_path):
+    """`waited` must grow by the poll AND by `--max-time`, or the bound is a fiction.
+
+    Against an address that hangs, every attempt spends its whole `--max-time`
+    before the `sleep`. A loop that counts only the `sleep` runs TIMEOUT/POLL
+    attempts and outlives its stated bound by attempts x max-time. The fake `curl`
+    answers at once, so the attempt count is what is measured: it must fit the
+    bound when each attempt is charged its poll plus its max-time.
+    """
+    script = preflight_script("--set", "preflight.probes.prometheus=true")
+    timeout = int(re.search(r"^TIMEOUT_SECONDS=(\d+)$", script, re.MULTILINE).group(1))
+    poll = int(re.search(r"^POLL_SECONDS=(\d+)$", script, re.MULTILINE).group(1))
+    max_time = int(re.search(r"^PROMETHEUS_MAX_TIME=(\d+)$", script, re.MULTILINE).group(1))
+    result, calls = run_probe(script, tmp_path, "000", "")
+    assert result.returncode != 0
+    assert (len(calls) - 1) * (poll + max_time) < timeout, (
+        f"{len(calls)} attempts at up to {poll + max_time}s each outlive the {timeout}s bound"
+    )
+
+
+def test_counting_only_the_sleep_reddens_the_timing_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path, "templates/preflight.yaml",
+        "waited=$((waited + POLL_SECONDS + PROMETHEUS_MAX_TIME))",
+        "waited=$((waited + POLL_SECONDS))",
+    )
+    script = preflight_script("--set", "preflight.probes.prometheus=true", chart=chart)
+    timeout = int(re.search(r"^TIMEOUT_SECONDS=(\d+)$", script, re.MULTILINE).group(1))
+    _, calls = run_probe(script, tmp_path / "run", "000", "")
+    assert (len(calls) - 1) * 8 >= timeout, f"only {len(calls)} attempts; the mutation did not widen the loop"
+
+
+KEEP = "helm.sh/resource-policy"
+ARGO_SYNC_OPTIONS = "argocd.argoproj.io/sync-options"
+
+
+def namespace_life_failures(documents: list[dict]) -> list[str]:
+    """The `observability` Namespace outlives the release that rendered it. PURE.
+
+    Deleting a Namespace deletes everything in it, and this one may already hold
+    an adopter's own objects: helm and Argo CD both ADOPT an existing Namespace
+    the release renders. So neither may ever delete it — `helm uninstall` honours
+    `resource-policy: keep`, and Argo CD honours `Delete=false` on app deletion and
+    `Prune=false` on a sync that no longer renders it.
+    """
+    namespaces = named(documents, "Namespace", PROMETHEUS_NAMESPACE)
+    if len(namespaces) != 1:
+        return [f"expected one Namespace {PROMETHEUS_NAMESPACE!r}, found {len(namespaces)}"]
+    annotations = namespaces[0]["metadata"].get("annotations") or {}
+    failures = []
+    if annotations.get(KEEP) != "keep":
+        failures.append(f"the Namespace carries no `{KEEP}: keep`, so `helm uninstall` deletes it and all it holds")
+    options = {o.strip() for o in (annotations.get(ARGO_SYNC_OPTIONS) or "").split(",") if o.strip()}
+    for wanted in ("Delete=false", "Prune=false"):
+        if wanted not in options:
+            failures.append(f"the Namespace's `{ARGO_SYNC_OPTIONS}` lacks {wanted}, found {sorted(options)}")
+    return failures
+
+
+def test_the_observability_namespace_is_never_deleted_by_helm_or_argo():
+    failures = namespace_life_failures(operators_render())
+    assert failures == [], "\n".join(failures)
+
+
+def test_dropping_the_keep_policy_reddens_the_namespace_gate(tmp_path):
+    chart = mutated_chart(tmp_path, "templates/prometheus-namespace.yaml", "    helm.sh/resource-policy: keep\n", "")
+    message = "\n".join(namespace_life_failures(operators_render(chart=chart)))
+    assert "no `helm.sh/resource-policy: keep`" in message, message
+
+
+def test_dropping_argos_prune_guard_reddens_the_namespace_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path, "templates/prometheus-namespace.yaml",
+        "argocd.argoproj.io/sync-options: Delete=false,Prune=false", "argocd.argoproj.io/sync-options: Delete=false",
+    )
+    message = "\n".join(namespace_life_failures(operators_render(chart=chart)))
+    assert "lacks Prune=false" in message, message
+
+
+# The module ScaledObjects query `rate(...[2m])`. At the chart's default 1m scrape
+# interval a 2m window holds one or two samples, `rate` needs two, and KEDA's
+# `ignoreNullValues` reads the empty result as 0 — a scaler that never scales up.
+# 15s gives eight samples per window.
+SCRAPE_INTERVAL = "15s"
+
+
+def scrape_interval_of(documents: list[dict]) -> str | None:
+    maps = named(prometheus_objects(documents), "ConfigMap", PROMETHEUS_SERVICE)
+    assert len(maps) == 1, "no single server ConfigMap rendered"
+    config = yaml.safe_load(maps[0]["data"]["prometheus.yml"])
+    return (config.get("global") or {}).get("scrape_interval")
+
+
+def test_the_server_scrapes_often_enough_for_the_modules_rate_windows():
+    assert scrape_interval_of(operators_render()) == SCRAPE_INTERVAL
+
+
+def test_the_charts_default_interval_reddens_the_scrape_gate(tmp_path):
+    chart = mutated_chart(tmp_path, "values.yaml", "      scrape_interval: 15s\n", "")
+    assert scrape_interval_of(operators_render(chart=chart)) != SCRAPE_INTERVAL
+
+
+# ── THE WHOLE PREFLIGHT'S WORST CASE AGAINST THE DOCUMENTED INSTALL BUDGET ───
+# Helm's `--timeout` bounds each hook Job, and the preflight is one Job running
+# every enabled probe in sequence. Its worst case is the sum of its bounded loops,
+# each capped at `TIMEOUT_SECONDS`: one per DISTINCT path a `create`/`remove`
+# deletes-and-waits-for (a path removed twice waits once), one per `await`, and
+# one per loop a probe runs itself — Prometheus's, now that it charges each
+# attempt its `--max-time`. Counted at the render with EVERY probe on, which is
+# the parent chart's whole-estate case, plus the same 300s margin the post-install
+# gate leaves for scheduling, image pull and request time.
+REMOVAL_CALL = re.compile(r'^[ ]*(?:create|remove) "(?P<path>[^"]+)"', re.MULTILINE)
+AWAIT_CALL = re.compile(r'^[ ]*await "', re.MULTILINE)
+BOUNDED_WHILE = re.compile(r'^[ ]*while \[ "\$waited" -lt "\$TIMEOUT_SECONDS" \]', re.MULTILINE)
+# `remove()` and `await()` each own one `while`, counted through their calls.
+HELPER_LOOPS = 2
+BUDGET_MARGIN_SECONDS = 300
+TIMEOUT_FLAG = re.compile(r"--timeout\s+(?P<budget>\d+)m\b")
+BUDGET_FILES = (REPO / "README.md", ADOPTER_VALUES)
+
+
+def preflight_worst_case(script: str) -> tuple[int, int]:
+    timeout = int(re.search(r"^TIMEOUT_SECONDS=(\d+)$", script, re.MULTILINE).group(1))
+    paths = {m.group("path") for m in REMOVAL_CALL.finditer(script) if m.group("path") != "$1"}
+    loops = len(paths) + len(AWAIT_CALL.findall(script)) + len(BOUNDED_WHILE.findall(script)) - HELPER_LOOPS
+    return loops, loops * timeout + BUDGET_MARGIN_SECONDS
+
+
+def preflight_budget_failures(script: str, texts: dict[str, str]) -> list[str]:
+    loops, required = preflight_worst_case(script)
+    failures = []
+    for name, text in texts.items():
+        budgets = [int(m.group("budget")) * 60 for m in TIMEOUT_FLAG.finditer(text)]
+        if not budgets:
+            failures.append(f"{name} states no `--timeout <n>m`")
+        for budget in budgets:
+            if budget < required:
+                failures.append(
+                    f"{name} documents a {budget}s budget and the preflight with every probe on "
+                    f"needs {required}s ({loops} bounded loops plus {BUDGET_MARGIN_SECONDS}s)"
+                )
+    return failures
+
+
+def all_probes_script(chart: Path = CHART) -> str:
+    return preflight_script(
+        "--set", "preflight.probes.keda=true", "--set", "preflight.probes.mariadb=true",
+        "--set", "preflight.probes.prometheus=true", chart=chart,
+    )
+
+
+def test_the_documented_budget_covers_the_whole_preflight():
+    script = all_probes_script()
+    loops, _ = preflight_worst_case(script)
+    # Seven before #22; its Secret `remove` in the cert-manager arm is the eighth.
+    assert loops == 8, f"expected 8 bounded loops with every probe on, counted {loops}"
+    failures = preflight_budget_failures(script, {f.name: f.read_text() for f in BUDGET_FILES})
+    assert failures == [], "\n".join(failures)
+
+
+def test_the_old_twenty_minutes_reddens_the_preflight_budget_gate():
+    texts = {f.name: f.read_text().replace("--timeout 25m", "--timeout 20m") for f in BUDGET_FILES}
+    message = "\n".join(preflight_budget_failures(all_probes_script(), texts))
+    assert "documents a 1200s budget" in message, message

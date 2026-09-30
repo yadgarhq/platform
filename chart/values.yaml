@@ -632,6 +632,11 @@ prometheus:
   server:
     fullnameOverride: prometheus-server
     retention: 24h
+    # 15s, NOT THE CHART'S 1m. The module ScaledObjects query `rate(...[2m])`; at
+    # 1m a 2m window holds one or two samples, `rate` needs two, and KEDA's
+    # `ignoreNullValues` reads the empty answer as 0 — a scaler that never scales.
+    global:
+      scrape_interval: 15s
     persistentVolume:
       enabled: false
     # deploy's sizing for the same server at the same chart version.
@@ -1026,8 +1031,10 @@ preflight:
     #
     # SO THE INSTALL MUST BE GIVEN A BUDGET, and `README.md` and
     # `example/values.yaml` both state it. At 300 here the composed bound is 900s,
-    # and the documented `--timeout 20m` leaves 300s over it for scheduling, image
-    # pull and request time — a stated CEILING, not a measurement, because this
+    # and the documented `--timeout 25m` leaves 600s over it for scheduling, image
+    # pull and request time. The 25m itself is set by the pre-install preflight,
+    # whose worst case with every probe on is eight 120s loops plus the same 300s
+    # margin. Both margins are a stated CEILING, not a measurement, because this
     # estate has measured none of the three. The number is NOT lowered instead:
     # `Programmed` includes replica availability, so a cold cluster may genuinely
     # need this long, and a bound cut to fit helm's default would reintroduce
