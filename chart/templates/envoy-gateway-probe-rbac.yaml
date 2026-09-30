@@ -9,19 +9,23 @@ holds none. One triple for both would be the UNION of the two, held by both Jobs
 so the pre-install preflight would gain the ability to create a Gateway it never
 touches.
 
-`create`, `get`, `delete`, AND NEVER `list`. The probe creates ONE Gateway under a
-name it already knows, reads THAT object back until it is programmed, and deletes
-it. `list` would let it enumerate every Gateway in the namespace and it needs none
-of them. `resourceNames` cannot narrow the `create` — the authorizer runs before
-the request body is decoded — so the Role being NAMESPACED is what bounds this
-identity.
+`create` ALONE, AND `get` AND `delete` BY NAME, AND NEVER `list`. The probe
+creates ONE Gateway and ONE EnvoyProxy under a name it already knows, reads them
+back, and deletes them. `resourceNames` cannot narrow `create` — the authorizer
+runs before the request body is decoded — so `create` is its own unnamed rule,
+and it cannot touch an object that already exists. `get` and `delete` CAN be
+narrowed, so they are NAMED to the probe's own objects. This matters because the
+probe shares the release namespace with Gateway `edge` and EnvoyProxy `edge`: an
+unnamed `delete` would let this identity take the front door down.
 
 THE GROUP IS THE UPSTREAM GATEWAY API'S, NOT ENVOY GATEWAY'S, and `values.yaml`
 records why at length: a Gateway is `gateway.networking.k8s.io`, a specification
 every implementation registers. What makes this probe Envoy Gateway's is the CLASS
-the Gateway binds to, whose controller is Envoy Gateway's own. This Role grants
-nothing on `gateway.envoyproxy.io`: the probe REFERENCES the EnvoyProxy this chart
-already rendered and creates none.
+the Gateway binds to, whose controller is Envoy Gateway's own.
+
+THE SAME TWO RULES ON ENVOYPROXIES, in Envoy Gateway's own group. The probe runs
+its Gateway on an EnvoyProxy it creates, never on `edge`, because `edge` may pin
+a nodePort the edge Service already holds (ledger 1189).
 
 THE RULES FOLLOW THE PROBES THIS RENDER ENABLES, resolved from the SAME partial the
 Job reads. A fixed rule set would be a second statement of which probes exist,
@@ -71,7 +75,20 @@ rules:
   # Envoy Gateway programs it, and deleted on every exit path.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    resourceNames: [{{ $probe.probeName | quote }}]
+    verbs: ["get", "delete"]
+  # The probe's own EnvoyProxy: `edge`'s spec without the pinned nodePort, created
+  # before the Gateway that names it and deleted after it.
+  - apiGroups: ["gateway.envoyproxy.io"]
+    resources: ["envoyproxies"]
+    verbs: ["create"]
+  - apiGroups: ["gateway.envoyproxy.io"]
+    resources: ["envoyproxies"]
+    resourceNames: [{{ $probe.probeName | quote }}]
+    verbs: ["get", "delete"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -63,7 +63,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import time
 import textwrap
 from pathlib import Path
 
@@ -132,10 +134,23 @@ EXPECTED_POST_INSTALL_PROBES_AT_R2 = 1
 EXPECTED_POST_INSTALL_OPERATORS_AT_R2 = ["envoy-gateway"]
 EXPECTED_POST_INSTALL_OBJECTS_AT_R1 = 0
 
-# The probe Gateway's own triple: `create`, `get` and `delete` on GATEWAYS and
-# nothing else. A DIFFERENT KIND from the preflight Role's, which is why this Job
-# has a triple rather than sharing one.
-POST_INSTALL_PROBE_RULES = {"envoy-gateway": {"gateway.networking.k8s.io": ["gateways"]}}
+# The probe's own triple: `create`, `get` and `delete` on GATEWAYS and on the
+# probe's own ENVOYPROXY, and nothing else. DIFFERENT KINDS from the preflight
+# Role's, which is why this Job has a triple rather than sharing one. The
+# EnvoyProxy is the probe's own because `edge`'s pins a nodePort the edge Service
+# already holds (ledger 1189).
+POST_INSTALL_PROBE_RULES = {
+    "envoy-gateway": {
+        "gateway.networking.k8s.io": ["gateways"],
+        "gateway.envoyproxy.io": ["envoyproxies"],
+    }
+}
+# SPLIT BY VERB. `create` cannot be narrowed by name — the authorizer runs before
+# the body is decoded — so it stands alone and unnamed; `get` and `delete` CAN, so
+# they are NAMED to the probe's own objects. Unnamed, they would let the probe's
+# identity delete the edge's own Gateway and EnvoyProxy in the same namespace.
+POST_INSTALL_UNNAMED_VERBS = ["create"]
+POST_INSTALL_PROBE_NAME = "envoy-gateway-probe"
 EXPECTED_POST_INSTALL_PROBE_OBJECTS_AT_R2 = 4  # the Job, and its SA, Role and RoleBinding
 
 # R3 with `probes.keda` and `probes.mariadb` true — the variant step 4's KEDA and
@@ -173,6 +188,17 @@ EXPECTED_DISCRIMINATING_OVERRIDES = 2
 # bootstrap triple's, which is why the preflight gets its own triple rather than
 # sharing that one.
 THE_PROBE_VERBS = ["create", "delete", "get"]
+
+# THE ONE OBJECT A PROBE DELETES THAT IT NEVER CREATED: the Secret cert-manager
+# writes for the probe Certificate (ledger 1193). The probe needs `get` and
+# `delete` on it and never `create`, and it knows the name — so the rule is NAMED
+# with `resourceNames`, which `get` and `delete` honour, and carries two verbs
+# rather than the three above.
+THE_NAMED_PROBE_VERBS = ["delete", "get"]
+NAMED_PROBE_RULES = {"cert-manager": {"": ["secrets"]}}
+# `preflight.probeName` at the chart's own values: the name the probe gives every
+# object it makes, and the one name the Secret rule above may carry.
+PROBE_NAME = "preflight-probe"
 
 # Which API groups each probe's action needs, read as the mapping the Role must
 # carry. KEDA needs two: its own group for the ScaledObject and `apps` for the
@@ -1004,6 +1030,9 @@ def rbac_failures(
     job_of=preflight_job,
     rules_for: dict | None = None,
     job_name: str = PREFLIGHT_JOB,
+    named_rules_for: dict | None = None,
+    unnamed_verbs: list[str] = THE_PROBE_VERBS,
+    named_resource: str = PROBE_NAME,
 ) -> list[str]:
     """Every way a probe Job's RBAC widens, or stops being wired to its own Job. PURE.
 
@@ -1132,14 +1161,40 @@ def rbac_failures(
         for group, resources in (rules_for or PROBE_RULES)[operator].items():
             wanted_rules.setdefault(group, set()).update(resources)
 
+    # NAMED RULES ARE THE SECOND SHAPE, and they are held to a tighter one: exactly
+    # `get` and `delete`, and `resourceNames` exactly the probe's own name. A named
+    # rule that gained `create`, or lost its names, is a Role that can read or
+    # delete every object of that kind in the namespace.
+    named = NAMED_PROBE_RULES if named_rules_for is None else named_rules_for
+    wanted_named = {}
+    for operator in expected:
+        for group, resources in named.get(operator, {}).items():
+            wanted_named.setdefault(group, set()).update(resources)
+    found_named = {}
+
     rules = roles[0].get("rules") or []
     found_rules = {}
     for rule in rules:
         verbs = sorted(rule.get("verbs") or [])
-        if verbs != THE_PROBE_VERBS:
+        if "resourceNames" in rule:
+            if verbs != THE_NAMED_PROBE_VERBS:
+                failures.append(
+                    f"expected exactly {THE_NAMED_PROBE_VERBS} on the {job_name} rule "
+                    f"naming {rule.get('resourceNames')}, found {verbs}. The probe "
+                    f"deletes an object it never creates, and reads it until it is gone"
+                )
+            if rule.get("resourceNames") != [named_resource]:
+                failures.append(
+                    f"expected the {job_name} named rule to name exactly "
+                    f"[{named_resource!r}], found {rule.get('resourceNames')}"
+                )
+            for group in rule.get("apiGroups") or []:
+                found_named.setdefault(group, set()).update(rule.get("resources") or [])
+            continue
+        if verbs != unnamed_verbs:
             failures.append(
-                f"expected {len(THE_PROBE_VERBS)} verbs on every {job_name} rule, "
-                f"exactly {THE_PROBE_VERBS}, found {len(verbs)}: {verbs}. The probe "
+                f"expected {len(unnamed_verbs)} verbs on every unnamed {job_name} rule, "
+                f"exactly {unnamed_verbs}, found {len(verbs)}: {verbs}. The probe "
                 f"creates an object, reads it and deletes it; `list` would let it "
                 f"enumerate every object of that kind in the namespace and it needs none"
             )
@@ -1151,6 +1206,11 @@ def rbac_failures(
             f"expected the {job_name} Role scoped to {ded(wanted_rules)}, found "
             f"{ded(found_rules)}. The rules follow the probes this render enables, so "
             f"a rule left behind grants a permission no probe uses"
+        )
+    if found_named != wanted_named:
+        failures.append(
+            f"expected the {job_name} Role's named rules scoped to {ded(wanted_named)}, "
+            f"found {ded(found_named)}"
         )
     return failures
 
@@ -1782,25 +1842,44 @@ CLEANUP_TRAP = re.compile(r"^\s*trap cleanup EXIT\s*$", re.MULTILINE)
 # The `create()` wrapper's body, to read whether it removes before it creates.
 CREATE_FUNCTION = re.compile(r"^\s*create\(\) \{\n(?P<body>(?:.*\n)*?)\s*\}\s*$", re.MULTILINE)
 
-# One request body: the probe Gateway. Asserted so the body gates below cannot pass
-# by examining none.
-EXPECTED_PROBE_REQUEST_BODIES = 1
+# Two request bodies: the probe's own EnvoyProxy and the probe Gateway. Asserted so
+# the body gates below cannot pass by examining none.
+EXPECTED_PROBE_REQUEST_BODIES = 2
 
 
-def probe_gateway_body(script: str) -> dict:
-    """The Gateway the probe POSTs, parsed. PURE.
+def probe_request_bodies(script: str) -> list[dict]:
+    """Every body the probe POSTs, parsed. PURE.
 
     PARSED RATHER THAN GREPED, because the claims here are structural — which class,
     which EnvoyProxy, which listener protocol — and a regex over the rendered text
     would pass on a body that is no longer valid JSON at all.
     """
-    bodies = [match.group("body") for match in HEREDOC.finditer(script)]
+    return [json.loads(match.group("body")) for match in HEREDOC.finditer(script)]
+
+
+def probe_body_of_kind(script: str, kind: str) -> dict | None:
+    """The one body of `kind` the probe POSTs, or None when it POSTs none. PURE.
+
+    SELECTED BY KIND, NEVER BY POSITION. The first body used to be the Gateway
+    because it was the only one; a gate reading `bodies[0]` would silently read the
+    EnvoyProxy the day the order moved.
+    """
+    found = [body for body in probe_request_bodies(script) if body.get("kind") == kind]
+    assert len(found) <= 1, f"the probe POSTs {len(found)} {kind} bodies; expected at most 1"
+    return found[0] if found else None
+
+
+def probe_gateway_body(script: str) -> dict:
+    """The Gateway the probe POSTs, parsed. PURE."""
+    bodies = probe_request_bodies(script)
     assert len(bodies) == EXPECTED_PROBE_REQUEST_BODIES, (
-        f"expected {EXPECTED_PROBE_REQUEST_BODIES} request body in the probe script, "
+        f"expected {EXPECTED_PROBE_REQUEST_BODIES} request bodies in the probe script, "
         f"found {len(bodies)}. A gate examining none of them passes whatever the "
         f"script does"
     )
-    return json.loads(bodies[0])
+    body = probe_body_of_kind(script, "Gateway")
+    assert body is not None, "the probe POSTs no Gateway, so there is nothing to probe with"
+    return body
 
 
 def test_the_two_probe_jobs_own_disjoint_object_sets():
@@ -2075,10 +2154,12 @@ def cleanup_failures(script: str) -> list[str]:
         failures.append(
             "the probe's cleanup issues no DELETE, so the trap fires and removes nothing"
         )
-    if 'CREATED="$CREATED $1"' not in script:
+    if 'CREATED="$1 $CREATED"' not in script:
         failures.append(
-            "the probe never records what it created, so the cleanup walks an empty "
-            "list and passes having deleted nothing"
+            "the probe does not record what it created NEWEST FIRST, so the cleanup "
+            "either walks an empty list and deletes nothing, or deletes the probe's "
+            "EnvoyProxy while the Gateway that references it still stands — and Envoy "
+            "Gateway re-provisions that Gateway from the controller's defaults"
         )
     return failures
 
@@ -2120,11 +2201,12 @@ def probe_gateway_failures(documents: list[dict]) -> list[str]:
     Envoy Gateway, and a probe bound to a class this chart does not render proves
     nothing at all.
 
-    AND IT INHERITS THE REAL LISTENER'S INFRASTRUCTURE. The `parametersRef` names the
-    EnvoyProxy `gatewayListener.create` renders, so the probe's data plane is placed
-    and exposed exactly as the estate's own edge is. A probe provisioned from the
-    controller's defaults could fail where the real Gateway succeeds, which would be
-    a probe reporting on a Gateway nobody installed.
+    AND IT NAMES THE PROBE'S OWN ENVOYPROXY, NEVER `edge` (ledger 1189). `edge` may
+    pin the HTTPS nodePort, and the edge Service already holds that port, so a probe
+    reusing it gets its Service refused and fails on every sync of a healthy cluster.
+    The probe's EnvoyProxy is `edge`'s spec without the pin, and
+    `probe_infrastructure_failures` asserts that agreement; this gate asserts only
+    that the reference resolves to it.
 
     A HELPER RATHER THAN A TEST BODY, for the reason `condition_choice_failures`
     states: the two red cases below call this and assert the message each produces.
@@ -2142,18 +2224,18 @@ def probe_gateway_failures(documents: list[dict]) -> list[str]:
             f"looking at it"
         )
 
-    proxies = of_kind(documents, "EnvoyProxy")
-    assert len(proxies) == 1, f"expected 1 rendered EnvoyProxy, found {proxies}"
+    own = probe_body_of_kind(post_install_probe_script(documents), "EnvoyProxy")
+    own_name = (own or {}).get("metadata", {}).get("name")
     reference = body["spec"]["infrastructure"]["parametersRef"]
     if reference != {
         "group": "gateway.envoyproxy.io",
         "kind": "EnvoyProxy",
-        "name": name_of(proxies[0]),
+        "name": own_name,
     }:
         failures.append(
             f"the probe Gateway's parametersRef is {reference}; it must name the "
-            f"EnvoyProxy this chart renders, {name_of(proxies[0])!r}, so that whether "
-            f"a Gateway can be programmed on this cluster is one question rather than two"
+            f"EnvoyProxy the probe itself creates, {own_name!r}, so the probe's data "
+            f"plane carries none of `edge`'s pinned ports"
         )
 
     listeners = body["spec"]["listeners"]
@@ -2199,7 +2281,7 @@ def chart_whose_probe_names_no_infrastructure(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     job = copy / "templates" / "envoy-gateway-probe.yaml"
     text = job.read_text()
-    line = '"name":"{{ $listener.envoyProxy.name }}"}},'
+    line = '"name":"$PROBE_NAME"}},'
     assert line in text, "the parametersRef moved; this red case is now testing nothing"
     job.write_text(text.replace(line, '"name":"no-such-envoyproxy"}},', 1))
     return copy
@@ -2213,6 +2295,559 @@ def test_a_probe_whose_infrastructure_names_nothing_reddens_the_gate(tmp_path):
     message = "\n".join(failures)
     assert failures, "the parametersRef was pointed at nothing and the gate passed"
     assert "'name': 'no-such-envoyproxy'" in message, message
+
+
+# ── THE PROBE'S OWN ENVOYPROXY: EDGE'S SPEC, WITHOUT THE PINNED PORT ─────────
+# MEASURED 2026-09-30 on a from-scratch kind install (parent 0.3.8, platform
+# 0.1.19), ledger 1189. The probe Gateway named `edge` as its infrastructure, so
+# it inherited `edge`'s StrategicMerge patch pinning the HTTPS nodePort to 30443.
+# The edge Service already held that port, the API server refused the probe's
+# Service ("nodePort 30443: provided port is already allocated"), the probe Gateway
+# stayed `Programmed=False` with `AddressNotAssigned`, and the probe failed at its
+# bound on EVERY sync of a healthy cluster.
+#
+# THE FIX KEEPS EVERYTHING ELSE THE PROBE INHERITED, and that half is asserted as
+# hard as the pin's absence. The probe exists to ask "can a Gateway be programmed
+# the way the edge is", so its data plane keeps `edge`'s replicas, its scheduling
+# and its Service TYPE. In Envoy Gateway v1.9.1
+# (`internal/gatewayapi/status/gateway.go`, `UpdateGatewayStatusProgrammedCondition`)
+# the object's `Programmed=True` needs an address AND an available Envoy replica.
+# A `ClusterIP` Service is always addressed (its cluster IPs) and so is a
+# `NodePort` one (the node addresses), so on those types the probe goes red only on
+# replicas. A `LoadBalancer` Service is addressed only by a load-balancer
+# controller. The type is copied for THAT case: a ClusterIP probe beside a
+# LoadBalancer edge would read green on a cluster with no load-balancer controller
+# while the edge stalls.
+
+# This organisation's kind edge, as `test_shared_infrastructure.py` carries it
+# (ADR-0809): the values the 2026-09-30 install ran with.
+NODEPORT_EDGE_VALUES = """\
+gatewayListener:
+  envoyProxy:
+    serviceType: NodePort
+    httpsNodePort: 30443
+    pod:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+"""
+
+
+def nodeport_render(chart: Path, destination: Path) -> list[dict]:
+    """R3 — the adopter values with this organisation's pinned-NodePort edge."""
+    return adopter_render(
+        chart, "-f", str(overrides(destination / "nodeport-edge.yaml", NODEPORT_EDGE_VALUES))
+    )
+
+
+def leaves(node, path: str = "") -> dict[str, object]:
+    """Flatten a parsed object to `{dotted.path: leaf}`, so a difference names its field."""
+    if isinstance(node, dict):
+        flat: dict[str, object] = {}
+        for key, value in node.items():
+            flat.update(leaves(value, f"{path}.{key}" if path else str(key)))
+        return flat or {path: {}}
+    if isinstance(node, list):
+        flat = {}
+        for index, value in enumerate(node):
+            flat.update(leaves(value, f"{path}[{index}]"))
+        return flat or {path: []}
+    return {path: node}
+
+
+def probe_infrastructure_failures(documents: list[dict]) -> list[str]:
+    """The EnvoyProxy the probe Gateway names is `edge`'s spec minus the pin. PURE.
+
+    RESOLVED THROUGH THE REFERENCE, not assumed to be the probe's own body. The
+    Gateway's `parametersRef` is followed to whichever EnvoyProxy it names — one the
+    probe POSTs, or one the chart renders — and THAT object is examined. So a probe
+    pointed back at `edge` is examined as `edge`, which is how this gate reads red
+    on the template that shipped the defect.
+    """
+    failures = []
+    script = post_install_probe_script(documents)
+    gateway = probe_gateway_body(script) if len(probe_request_bodies(script)) == EXPECTED_PROBE_REQUEST_BODIES else probe_body_of_kind(script, "Gateway")
+    assert gateway is not None, "the probe POSTs no Gateway"
+    reference = gateway["spec"]["infrastructure"]["parametersRef"]["name"]
+
+    rendered = of_kind(documents, "EnvoyProxy")
+    assert len(rendered) == 1, f"expected 1 rendered EnvoyProxy (edge), found {rendered}"
+    edge = rendered[0]
+
+    posted = probe_body_of_kind(script, "EnvoyProxy")
+    candidates = [
+        proxy for proxy in [posted, edge] if proxy and proxy["metadata"]["name"] == reference
+    ]
+    if not candidates:
+        return [f"the probe Gateway names EnvoyProxy {reference!r}, and neither the probe nor the chart makes one"]
+    named = candidates[0]
+
+    if named is edge:
+        failures.append(
+            f"the probe Gateway names {reference!r}, the edge's own EnvoyProxy. Every "
+            f"Service port the edge pins, the probe's Service asks for again, and the "
+            f"API server refuses it"
+        )
+
+    spec = named.get("spec") or {}
+    pinned = sorted(path for path, value in leaves(spec).items() if path.endswith("nodePort"))
+    if pinned:
+        failures.append(
+            f"the EnvoyProxy the probe runs on pins {pinned} "
+            f"({[leaves(spec)[path] for path in pinned]}); the edge Service already "
+            f"holds that port, so the probe's Service is refused and the probe Gateway "
+            f"is never programmed"
+        )
+    service = (((spec.get("provider") or {}).get("kubernetes") or {}).get("envoyService")) or {}
+    if "patch" in service:
+        failures.append(
+            "the EnvoyProxy the probe runs on carries an `envoyService.patch`; the only "
+            "patch this chart writes is the nodePort pin"
+        )
+
+    wanted = json.loads(json.dumps(edge.get("spec") or {}))
+    wanted.get("provider", {}).get("kubernetes", {}).get("envoyService", {}).pop("patch", None)
+    theirs, ours = leaves(wanted), leaves(spec)
+    differing = sorted(
+        path for path in set(theirs) | set(ours) if theirs.get(path) != ours.get(path)
+    )
+    if differing:
+        failures.append(
+            f"the probe's EnvoyProxy differs from edge's (minus the pin) at "
+            + ", ".join(f"{path} (edge {theirs.get(path)!r}, probe {ours.get(path)!r})" for path in differing)
+            + ". The probe answers for the edge only while its data plane is placed and "
+            f"exposed the same way"
+        )
+    return failures
+
+
+def test_the_probe_runs_on_edges_envoyproxy_without_the_pinned_nodeport(tmp_path):
+    """RED ON THE TEMPLATE THAT SHIPPED THE DEFECT: there the reference is `edge`."""
+    failures = probe_infrastructure_failures(nodeport_render(CHART, tmp_path))
+    assert failures == [], "\n".join(failures)
+
+
+def test_the_probe_envoyproxy_agrees_with_edge_at_the_adopter_values():
+    """`LoadBalancer`, no scheduling, no pin: the agreement holds where nothing is pinned."""
+    failures = probe_infrastructure_failures(adopter_render())
+    assert failures == [], "\n".join(failures)
+
+
+# ── EVERY PROBE OBJECT IS DELETED, IN AN ORDER THAT CANNOT RE-PROVISION ──────
+# THESE GATES RUN THE RENDERED SCRIPT rather than reading it, for the reason the
+# matcher gates below give: a restatement of the shell in Python proves nothing
+# about the shell that ships. Everything up to the denominator is lifted verbatim
+# — the helpers and the probe functions — over a fake API server that records each
+# request, answers 201 to a POST, 200 to a DELETE and 404 to a GET, so `remove`
+# returns at once. `await` is replaced, because what is under test is what the probe
+# creates and deletes, not how it waits; its exit status picks the path.
+
+THE_PROBES_OWN_PREFIX_END = "# ── THE DENOMINATOR, CHECKED BEFORE ANYTHING IS PROBED"
+THE_JOBS_SERVICE_ACCOUNT_LINE = 'sa="/var/run/secrets/kubernetes.io/serviceaccount"'
+THE_JOBS_BODY_LINE = "body=/tmp/answer"
+
+RECORDING_API = r"""
+curl() {
+  method=GET; out=''; url=''; data=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --request|-X) method="$2"; shift 2 ;;
+      --output|-o) out="$2"; shift 2 ;;
+      --data-binary|-d) data="$2"; shift 2 ;;
+      --user-agent|-A|--cacert|--header|-H|--write-out|-w) shift 2 ;;
+      -*) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+  path="${url#https://kubernetes.default.svc}"
+  path="${path%%\?*}"
+  count=$(( $(cat "$SCRATCH/count") + 1 ))
+  echo "$count" >"$SCRATCH/count"
+  if [ "$data" = "@-" ]; then cat >"$SCRATCH/payload.$count"; fi
+  printf '%s %s %s\n' "$count" "$method" "$path" >>"$RECORD"
+  : >"$out"
+  case "$method" in
+    POST) printf '201' ;;
+    DELETE) printf '200' ;;
+    *) printf '404' ;;
+  esac
+}
+sleep() { :; }
+"""
+
+
+def run_probe_function(script: str, function: str, scratch: Path, await_status: int):
+    """Run `function` from the rendered `script` over the recording API. Returns (result, calls, payloads)."""
+    assert THE_PROBES_OWN_PREFIX_END in script, "the denominator marker moved"
+    assert THE_JOBS_SERVICE_ACCOUNT_LINE in script, "the service-account line moved"
+    assert THE_JOBS_BODY_LINE in script, "the response-body line moved"
+    prefix = script.split(THE_PROBES_OWN_PREFIX_END)[0]
+    prefix = prefix.replace(THE_JOBS_SERVICE_ACCOUNT_LINE, 'sa="$SCRATCH/sa"').replace(
+        THE_JOBS_BODY_LINE, 'body="$SCRATCH/answer"'
+    )
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "sa").mkdir(exist_ok=True)
+    (scratch / "sa" / "namespace").write_text(RELEASE_NAMESPACE)
+    (scratch / "sa" / "token").write_text("a-token-the-fake-never-reads")
+    (scratch / "count").write_text("0")
+    record = scratch / "record"
+    record.write_text("")
+    harness = scratch / "harness.sh"
+    harness.write_text(
+        RECORDING_API + prefix + f"\nawait() {{ return {await_status}; }}\n{function}\n"
+    )
+    binary = shutil.which("sh")
+    assert binary, "no POSIX shell is on PATH, and the probe's container runs this under `sh`"
+    result = subprocess.run(
+        [binary, str(harness)],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", ""), "SCRATCH": str(scratch), "RECORD": str(record)},
+    )
+    calls = []
+    for line in record.read_text().splitlines():
+        number, method, path = line.split(" ", 2)
+        calls.append((int(number), method, path))
+    payloads = {
+        int(path.name.split(".")[1]): json.loads(path.read_text())
+        for path in scratch.glob("payload.*")
+    }
+    return result, calls, payloads
+
+
+def after_the_last_post(calls: list[tuple[int, str, str]]) -> list[tuple[str, str]]:
+    """The requests the probe made once it had created everything: the cleanup."""
+    posts = [index for index, (_, method, _) in enumerate(calls) if method == "POST"]
+    assert posts, f"the probe created nothing, so there is no cleanup to read: {calls}"
+    return [(method, path) for _, method, path in calls[posts[-1] + 1 :]]
+
+
+PROBE_GATEWAY_PATH = f"/apis/gateway.networking.k8s.io/v1/namespaces/{RELEASE_NAMESPACE}/gateways/envoy-gateway-probe"
+PROBE_ENVOYPROXY_PATH = (
+    f"/apis/gateway.envoyproxy.io/v1alpha1/namespaces/{RELEASE_NAMESPACE}/envoyproxies/envoy-gateway-probe"
+)
+
+
+def envoy_probe_cleanup_failures(script: str, scratch: Path) -> list[str]:
+    """Both exit paths: the Gateway is deleted, then its EnvoyProxy, and both are made first."""
+    failures = []
+    for label, status in (("success", 0), ("failure", 1)):
+        result, calls, payloads = run_probe_function(
+            script, "probe_envoy_gateway", scratch / label, status
+        )
+        if (result.returncode == 0) != (status == 0):
+            failures.append(f"{label}: the harness exited {result.returncode}; {result.stderr}")
+        # WHAT THE SHELL ACTUALLY SENT, after the heredoc expanded: the Gateway must
+        # name the EnvoyProxy this run POSTed, by the name the POST carried.
+        sent = {body.get("kind"): body for body in payloads.values()}
+        if "Gateway" in sent and "EnvoyProxy" in sent:
+            named = sent["Gateway"]["spec"]["infrastructure"]["parametersRef"]["name"]
+            if named != sent["EnvoyProxy"]["metadata"]["name"]:
+                failures.append(
+                    f"{label}: the Gateway sent names EnvoyProxy {named!r} and the "
+                    f"EnvoyProxy sent is {sent['EnvoyProxy']['metadata']['name']!r}"
+                )
+        posted = [path for _, method, path in calls if method == "POST"]
+        if not any(path.endswith("/envoyproxies") for path in posted):
+            failures.append(
+                f"{label}: the probe creates no EnvoyProxy of its own (POSTs {posted}), "
+                f"so its Gateway runs on one it does not own"
+            )
+            continue
+        # THE PRE-CLEAN, IN THE SAME ORDER AS THE CLEANUP: a Gateway a killed Job
+        # left behind goes before the EnvoyProxy it names is replaced, or Envoy
+        # Gateway re-provisions it from the controller's defaults in between.
+        first_post = next(i for i, (_, m, _) in enumerate(calls) if m == "POST")
+        before = [path for _, method, path in calls[:first_post] if method == "DELETE"]
+        if before[:2] != [PROBE_GATEWAY_PATH, PROBE_ENVOYPROXY_PATH]:
+            failures.append(
+                f"{label}: before creating anything the probe deleted {before}; expected "
+                f"a leftover Gateway removed first and THEN the EnvoyProxy"
+            )
+        cleanup = after_the_last_post(calls)
+        deletes = [path for method, path in cleanup if method == "DELETE"]
+        if deletes != [PROBE_GATEWAY_PATH, PROBE_ENVOYPROXY_PATH]:
+            failures.append(
+                f"{label}: the cleanup deleted {deletes}; expected the Gateway and THEN "
+                f"its EnvoyProxy. Deleting the EnvoyProxy first leaves a live Gateway "
+                f"whose parametersRef names nothing, and Envoy Gateway re-provisions it "
+                f"from the controller's defaults"
+            )
+    return failures
+
+
+def test_the_probe_deletes_its_gateway_then_its_envoyproxy_on_both_exit_paths(tmp_path):
+    failures = envoy_probe_cleanup_failures(
+        post_install_probe_script(nodeport_render(CHART, tmp_path)), tmp_path / "run"
+    )
+    assert failures == [], "\n".join(failures)
+
+
+# ── A DELETED POD STILL CLEANS UP ────────────────────────────────────────────
+# `sh` RUNNING AS PID 1 IGNORES SIGTERM UNLESS IT INSTALLS A HANDLER — the kernel
+# drops a signal to PID 1 that has no handler — and a plain `sh` that dies of a
+# signal does not run its EXIT trap either. So a hook pod deleted mid-probe (Argo
+# terminating an operation, a node drain) dies on SIGKILL at the grace period with
+# every probe object still standing. `trap 'exit 143' TERM INT` turns the signal
+# into an ordinary exit, and the EXIT trap then runs the cleanup.
+TERM_TRAP = "trap 'exit 143' TERM INT"
+TERM_TRAP_LINE = re.compile(r"^[ ]*trap 'exit 143' TERM INT[ ]*$", re.MULTILINE)
+
+
+def scripts_with_a_cleanup_trap(documents: list[dict]) -> dict[str, str]:
+    """Every hook Job script in the render that carries `trap cleanup EXIT`, by Job name."""
+    found = {}
+    for job in of_kind(documents, "Job"):
+        for container in job["spec"]["template"]["spec"]["containers"]:
+            for argument in container.get("args") or []:
+                if CLEANUP_TRAP.search(str(argument)):
+                    found[name_of(job)] = str(argument)
+    return found
+
+
+def term_trap_failures(documents: list[dict], scratch: Path) -> list[str]:
+    failures = []
+    scripts = scripts_with_a_cleanup_trap(documents)
+    if sorted(scripts) != sorted([PREFLIGHT_JOB, POST_INSTALL_PROBE_JOB]):
+        failures.append(f"expected the two probe Jobs to carry a cleanup trap, found {sorted(scripts)}")
+    for name, script in scripts.items():
+        if not TERM_TRAP_LINE.search(script):
+            failures.append(
+                f"{name}: carries `trap cleanup EXIT` and no top-level `{TERM_TRAP}`, so a "
+                f"deleted pod dies without running its cleanup"
+            )
+            continue
+        # RUN, not read: the two trap lines as rendered, a cleanup that leaves a
+        # mark, and a SIGTERM while the shell waits.
+        run = scratch / name
+        run.mkdir(parents=True, exist_ok=True)
+        harness = run / "harness.sh"
+        harness.write_text(
+            'cleanup() { echo ran >"$SCRATCH/cleaned"; }\n'
+            + CLEANUP_TRAP.search(script).group(0).strip() + "\n"
+            + TERM_TRAP_LINE.search(script).group(0).strip() + "\n"
+            + 'echo ready >"$SCRATCH/ready"\nsleep 30 &\nwait $!\n'
+        )
+        process = subprocess.Popen(
+            [shutil.which("sh"), str(harness)],
+            env={"PATH": os.environ.get("PATH", ""), "SCRATCH": str(run)},
+        )
+        for _ in range(200):
+            if (run / "ready").exists():
+                break
+            time.sleep(0.02)
+        process.send_signal(signal.SIGTERM)
+        code = process.wait(timeout=10)
+        if not (run / "cleaned").exists():
+            failures.append(f"{name}: SIGTERM ended the script (exit {code}) and the cleanup never ran")
+    return failures
+
+
+def test_every_probe_job_cleans_up_when_its_pod_is_deleted(tmp_path):
+    failures = term_trap_failures(adopter_render(), tmp_path)
+    assert failures == [], "\n".join(failures)
+
+
+def test_dropping_the_term_trap_reddens_the_gate_for_each_job(tmp_path):
+    for index, template in enumerate(("envoy-gateway-probe.yaml", "preflight.yaml")):
+        copy = tmp_path / str(index) / "chart"
+        shutil.copytree(CHART, copy)
+        path = copy / "templates" / template
+        text = path.read_text()
+        line = "              " + TERM_TRAP + "\n"
+        assert text.count(line) == 1, f"the TERM trap moved in {template}"
+        path.write_text(text.replace(line, ""))
+        message = "\n".join(term_trap_failures(adopter_render(copy), tmp_path / str(index) / "run"))
+        assert "no top-level" in message, message
+
+
+def test_dropping_the_leftover_gateway_removal_reddens_the_cleanup_gate(tmp_path):
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    path = copy / "templates" / "envoy-gateway-probe.yaml"
+    text = path.read_text()
+    line = '                remove "$gateways/$PROBE_NAME"\n'
+    assert text.count(line) == 1, "the pre-clean moved; this red case is testing nothing"
+    path.write_text(text.replace(line, ""))
+    script = post_install_probe_script(nodeport_render(copy, tmp_path))
+    message = "\n".join(envoy_probe_cleanup_failures(script, tmp_path / "run"))
+    assert "a leftover Gateway removed first" in message, message
+
+
+PREFLIGHT_CERTIFICATE_PATH = f"/apis/cert-manager.io/v1/namespaces/{RELEASE_NAMESPACE}/certificates/{PROBE_NAME}"
+PREFLIGHT_SECRET_PATH = f"/api/v1/namespaces/{RELEASE_NAMESPACE}/secrets/{PROBE_NAME}"
+
+
+def preflight_secret_failures(script: str, scratch: Path) -> list[str]:
+    """The Secret cert-manager writes for the probe Certificate is deleted (ledger 1193).
+
+    MEASURED 2026-09-30: the cert-manager arm deleted its Issuer and its Certificate
+    and left Secret `preflight-probe` in the release namespace — cert-manager does not
+    own the Secrets it writes unless a controller flag nobody here sets says so. The
+    Secret is deleted AFTER the Certificate, because a Secret deleted while its
+    Certificate stands is re-issued; and a Secret left by a killed Job is removed
+    before the next Certificate is created, as every fixed-name object is.
+    """
+    failures = []
+    for label, status in (("success", 0), ("failure", 1)):
+        result, calls, _ = run_probe_function(script, "probe_cert_manager", scratch / label, status)
+        if (result.returncode == 0) != (status == 0):
+            failures.append(f"{label}: the harness exited {result.returncode}; {result.stderr}")
+        sequence = [(method, path) for _, method, path in calls]
+        certificate_post = [
+            index for index, (method, path) in enumerate(sequence)
+            if method == "POST" and path.endswith("/certificates")
+        ]
+        assert certificate_post, f"{label}: the cert-manager arm never created its Certificate: {sequence}"
+        if ("DELETE", PREFLIGHT_SECRET_PATH) not in sequence[: certificate_post[0]]:
+            failures.append(
+                f"{label}: no DELETE of {PREFLIGHT_SECRET_PATH} before the Certificate is "
+                f"created, so a Secret a killed Job left behind is never removed"
+            )
+        deletes = [path for method, path in after_the_last_post(calls) if method == "DELETE"]
+        if PREFLIGHT_SECRET_PATH not in deletes:
+            failures.append(
+                f"{label}: the cleanup deleted {deletes} and never the probe Secret "
+                f"{PREFLIGHT_SECRET_PATH}, which cert-manager wrote and nothing else deletes"
+            )
+        elif PREFLIGHT_CERTIFICATE_PATH not in deletes or deletes.index(
+            PREFLIGHT_SECRET_PATH
+        ) < deletes.index(PREFLIGHT_CERTIFICATE_PATH):
+            failures.append(
+                f"{label}: the cleanup deleted {deletes}; the Certificate must go before "
+                f"its Secret, or cert-manager re-issues the Secret"
+            )
+    return failures
+
+
+def test_the_preflight_deletes_the_secret_its_certificate_wrote_on_both_exit_paths(tmp_path):
+    failures = preflight_secret_failures(preflight_script(adopter_render()), tmp_path)
+    assert failures == [], "\n".join(failures)
+
+
+# ── THE RED CASES FOR THE PROBE'S ENVOYPROXY, THE CLEANUP ORDER AND THE SECRET ─
+# Each mutates ONE line of the shipped template and CALLS THE GATE, so a gate that
+# cannot see its own defect reddens here rather than passing forever.
+
+
+def mutated_chart(destination: Path, template: str, old: str, new: str) -> Path:
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    path = copy / "templates" / template
+    text = path.read_text()
+    assert text.count(old) == 1, f"{old!r} moved in {template}; this red case is now testing nothing"
+    path.write_text(text.replace(old, new))
+    return copy
+
+
+PROBE_TEMPLATE = "envoy-gateway-probe.yaml"
+
+
+def test_a_clusterip_probe_reddens_the_infrastructure_gate(tmp_path):
+    """ClusterIP is always addressed, so it hides the no-load-balancer-controller case."""
+    chart = mutated_chart(
+        tmp_path,
+        PROBE_TEMPLATE,
+        '"envoyService" (dict "type" $envoyProxy.serviceType)',
+        '"envoyService" (dict "type" "ClusterIP")',
+    )
+    message = "\n".join(probe_infrastructure_failures(nodeport_render(chart, tmp_path)))
+    assert "provider.kubernetes.envoyService.type (edge 'NodePort', probe 'ClusterIP')" in message, message
+
+
+def test_dropping_the_tolerations_from_the_probe_reddens_the_infrastructure_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path,
+        PROBE_TEMPLATE,
+        '{{- with (dig "pod" "tolerations" list $envoyProxy) }}{{ $_ := set $probePod "tolerations" . }}{{ end }}\n',
+        "",
+    )
+    message = "\n".join(probe_infrastructure_failures(nodeport_render(chart, tmp_path)))
+    assert "envoyDeployment.pod.tolerations[0]" in message, message
+
+
+def test_re_adding_the_pin_to_the_probe_reddens_the_infrastructure_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path,
+        PROBE_TEMPLATE,
+        '"envoyService" (dict "type" $envoyProxy.serviceType)',
+        '"envoyService" (dict "type" $envoyProxy.serviceType "patch" (dict "type" "StrategicMerge" "value" (dict "spec" (dict "ports" (list (dict "port" 443 "nodePort" 30443))))))',
+    )
+    message = "\n".join(probe_infrastructure_failures(nodeport_render(chart, tmp_path)))
+    assert "the edge Service already holds that port" in message, message
+    assert "carries an `envoyService.patch`" in message, message
+
+
+def test_pointing_the_probe_back_at_edge_reddens_the_infrastructure_gate(tmp_path):
+    """The shipped defect itself, restored."""
+    chart = mutated_chart(
+        tmp_path,
+        PROBE_TEMPLATE,
+        '"name":"$PROBE_NAME"}},',
+        '"name":"{{ $listener.envoyProxy.name }}"}},',
+    )
+    message = "\n".join(probe_infrastructure_failures(nodeport_render(chart, tmp_path)))
+    assert "the edge's own EnvoyProxy" in message, message
+    assert "provided port" not in message and "already holds that port" in message, message
+
+
+def test_a_cleanup_walked_oldest_first_reddens_both_cleanup_gates(tmp_path):
+    chart = mutated_chart(tmp_path, PROBE_TEMPLATE, 'CREATED="$1 $CREATED"', 'CREATED="$CREATED $1"')
+    script = post_install_probe_script(nodeport_render(chart, tmp_path))
+    assert any("NEWEST FIRST" in failure for failure in cleanup_failures(script))
+    message = "\n".join(envoy_probe_cleanup_failures(script, tmp_path / "run"))
+    assert "expected the Gateway and THEN its EnvoyProxy" in message, message
+
+
+PREFLIGHT_TEMPLATE = "preflight.yaml"
+
+
+def test_dropping_the_secret_from_the_cleanup_reddens_the_secret_gate(tmp_path):
+    chart = mutated_chart(tmp_path, PREFLIGHT_TEMPLATE, '                CREATED="$CREATED $secret"\n', "")
+    message = "\n".join(preflight_secret_failures(preflight_script(adopter_render(chart)), tmp_path / "run"))
+    assert "never the probe Secret" in message, message
+
+
+def test_dropping_the_secret_removal_reddens_the_secret_gate(tmp_path):
+    chart = mutated_chart(tmp_path, PREFLIGHT_TEMPLATE, '                remove "$secret"\n', "")
+    message = "\n".join(preflight_secret_failures(preflight_script(adopter_render(chart)), tmp_path / "run"))
+    assert "before the Certificate is created" in message, message
+
+
+def test_deleting_the_secret_before_its_certificate_reddens_the_secret_gate(tmp_path):
+    """Recorded before the Certificate, the Secret is deleted first and re-issued."""
+    chart = mutated_chart(
+        tmp_path,
+        PREFLIGHT_TEMPLATE,
+        '                remove "$secret"\n',
+        '                remove "$secret"\n                CREATED="$CREATED $secret"\n',
+    )
+    chart_text = (chart / "templates" / PREFLIGHT_TEMPLATE).read_text()
+    (chart / "templates" / PREFLIGHT_TEMPLATE).write_text(
+        chart_text.replace(
+            '"$certificate_body"\n                CREATED="$CREATED $secret"\n',
+            '"$certificate_body"\n',
+        )
+    )
+    message = "\n".join(preflight_secret_failures(preflight_script(adopter_render(chart)), tmp_path / "run"))
+    assert "the Certificate must go before its Secret" in message, message
+
+
+def test_an_unnamed_secret_rule_reddens_the_preflight_rbac_gate(tmp_path):
+    """Without `resourceNames` the preflight could read every Secret in the namespace."""
+    chart = mutated_chart(
+        tmp_path,
+        "preflight-rbac.yaml",
+        '    resourceNames: [{{ .Values.preflight.probeName | quote }}]\n',
+        "",
+    )
+    failures = rbac_failures(adopter_render(chart), EXPECTED_OPERATORS_AT_R2)
+    message = "\n".join(failures)
+    assert "exactly ['create', 'delete', 'get']" in message, message
+    assert "named rules scoped to {'': ['secrets']}, found {}" in message, message
 
 
 # ── THE CONDITION READING, RUN RATHER THAN READ ──────────────────────────────
@@ -2500,10 +3135,13 @@ def test_an_empty_programmed_message_reddens_the_reading_gate(tmp_path):
 # to `5m0s`. Helm's clock starts when the hook Job is CREATED, so scheduling and
 # image pull come out of the same budget before the script's own clock starts.
 #
-# AND THE SCRIPT'S WORST CASE IS TWICE ITS BOUND. `create()` calls `remove()` first,
-# and `remove()` loops to the SAME `TIMEOUT_SECONDS` that `await()` then loops to. So
-# two bounded loops compose, plus the request time of the calls themselves, which no
-# value bounds.
+# AND THE SCRIPT'S WORST CASE IS ITS BOUND TIMES ITS LOOPS. Every `create()` calls
+# `remove()` first, and `remove()` loops to the SAME `TIMEOUT_SECONDS` that `await()`
+# then loops to. So one bounded loop per `create` and one per `await` compose, plus
+# the request time of the calls themselves, which no value bounds. The loops are
+# COUNTED OFF THE RENDERED SCRIPT rather than written here as a constant: the probe
+# gained a second `create` when it gained its own EnvoyProxy (ledger 1189), and a
+# constant would have gone on describing the script it used to be.
 #
 # WHAT IS LOST WHEN HELM GIVES UP FIRST IS THE MESSAGE, NOT THE GATEWAY. The Job
 # carries `backoffLimit: 0` and no `activeDeadlineSeconds`, so the pod runs on and
@@ -2515,8 +3153,23 @@ def test_an_empty_programmed_message_reddens_the_reading_gate(tmp_path):
 # cold cluster may genuinely need 300s, and a bound cut to fit helm's default would
 # reintroduce red-on-healthy. The budget is documented instead, and this gate is what
 # stops the two diverging in silence.
-BOUNDED_LOOPS_PER_RUN = 2
 INSTALL_BUDGET_MARGIN_SECONDS = 300
+
+# The calls that run a bounded loop: a `create` (its `remove`), an explicit
+# `remove`, and an `await`. A PATH REMOVED TWICE WAITS ONCE: after the first
+# `remove` returns, the object is gone and nothing re-creates it, so the second
+# answers 404 on its first GET. So removals count by DISTINCT PATH, awaits by call.
+REMOVAL_CALL = re.compile(r'^[ ]*(?:create|remove) "(?P<path>[^"]+)"', re.MULTILINE)
+AWAIT_LOOP_CALL = re.compile(r'^[ ]*await "', re.MULTILINE)
+
+# Two creates (the EnvoyProxy and the Gateway) and one await, at R2. Asserted, so the
+# count the budget is computed from cannot fall to zero unseen.
+EXPECTED_BOUNDED_LOOPS_PER_RUN = 3
+
+
+def bounded_loops_per_run(script: str) -> int:
+    removed = {m.group("path") for m in REMOVAL_CALL.finditer(script) if m.group("path") != "$1"}
+    return len(removed) + len(AWAIT_LOOP_CALL.findall(script))
 
 # The bound, read off the RENDERED script, never off the values literal beside it.
 PROBE_BOUND = re.compile(r"^\s*TIMEOUT_SECONDS=(?P<seconds>\d+)\s*$", re.MULTILINE)
@@ -2545,7 +3198,12 @@ def install_budget_failures(script: str, stated: dict[str, str]) -> list[str]:
         "and this gate would pass having compared nothing"
     )
     seconds = int(bound.group("seconds"))
-    required = BOUNDED_LOOPS_PER_RUN * seconds + INSTALL_BUDGET_MARGIN_SECONDS
+    loops = bounded_loops_per_run(script)
+    assert loops == EXPECTED_BOUNDED_LOOPS_PER_RUN, (
+        f"the rendered probe script runs {loops} bounded loops and this suite expects "
+        f"{EXPECTED_BOUNDED_LOOPS_PER_RUN}; the documented budget is computed from them"
+    )
+    required = loops * seconds + INSTALL_BUDGET_MARGIN_SECONDS
 
     for name, minimum in BUDGET_IS_STATED_IN.items():
         found = list(TIMEOUT_FLAG.finditer(stated[name]))
@@ -2564,7 +3222,7 @@ def install_budget_failures(script: str, stated: dict[str, str]) -> list[str]:
             failures.append(
                 f"{name} documents `--timeout {match.group('budget')}"
                 f"{match.group('unit')}` = {budget}s, and the probe needs "
-                f"{required}s: {BOUNDED_LOOPS_PER_RUN} composed loops of {seconds}s "
+                f"{required}s: {loops} composed loops of {seconds}s "
                 f"plus {INSTALL_BUDGET_MARGIN_SECONDS}s for scheduling, image pull "
                 f"and request time. Helm aborts first, and the operator reads `timed "
                 f"out waiting for the condition` instead of the probe's diagnostic"
@@ -2592,9 +3250,9 @@ def test_documenting_helms_own_default_reddens_the_budget_gate():
     """The red case: the budget cut to the default the measurement says is too small."""
     stated = documented_budgets()
     original = stated["README.md"]
-    stated["README.md"] = original.replace("--timeout 15m", "--timeout 5m")
+    stated["README.md"] = original.replace("--timeout 20m", "--timeout 5m")
     assert stated["README.md"] != original, (
-        "README.md no longer spells the budget `--timeout 15m`, so this red case "
+        "README.md no longer spells the budget `--timeout 20m`, so this red case "
         "replaced nothing and is now testing whatever the unmutated file says"
     )
     failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
@@ -2607,9 +3265,9 @@ def test_a_budget_stated_nowhere_reddens_the_budget_gate():
     """The gate cannot pass having found no statement."""
     stated = documented_budgets()
     original = stated["example/values.yaml"]
-    stated["example/values.yaml"] = original.replace("--timeout 15m", "")
+    stated["example/values.yaml"] = original.replace("--timeout 20m", "")
     assert stated["example/values.yaml"] != original, (
-        "example/values.yaml no longer spells the budget `--timeout 15m`, so this red "
+        "example/values.yaml no longer spells the budget `--timeout 20m`, so this red "
         "case deleted nothing and is now testing whatever the unmutated file says"
     )
     failures = install_budget_failures(post_install_probe_script(adopter_render()), stated)
@@ -2641,7 +3299,7 @@ def test_raising_the_bound_past_the_documented_budget_reddens_the_gate(tmp_path)
     failures = install_budget_failures(script, documented_budgets())
     message = "\n".join(failures)
     assert failures, "the probe's bound was doubled and the documented budget still passed"
-    assert "the probe needs 1500s" in message, message
+    assert "the probe needs 2100s" in message, message
 
 
 def post_install_rbac_failures(documents: list[dict], expected: list[str]) -> list[str]:
@@ -2653,6 +3311,9 @@ def post_install_rbac_failures(documents: list[dict], expected: list[str]) -> li
         job_of=post_install_probe_job,
         rules_for=POST_INSTALL_PROBE_RULES,
         job_name=POST_INSTALL_PROBE_JOB,
+        named_rules_for=POST_INSTALL_PROBE_RULES,
+        unnamed_verbs=POST_INSTALL_UNNAMED_VERBS,
+        named_resource=POST_INSTALL_PROBE_NAME,
     )
 
 
@@ -2668,9 +3329,9 @@ def chart_with_list_on_the_probe_role(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     rbac = copy / "templates" / "envoy-gateway-probe-rbac.yaml"
     text = rbac.read_text()
-    line = '    verbs: ["create", "get", "delete"]'
+    line = '    verbs: ["create"]\n'
     assert line in text, "the verb list moved; this red case is now testing nothing"
-    rbac.write_text(text.replace(line, '    verbs: ["create", "get", "delete", "list"]'))
+    rbac.write_text(text.replace(line, '    verbs: ["create", "list"]\n', 1))
     return copy
 
 
@@ -2681,7 +3342,57 @@ def test_a_fourth_verb_reddens_the_post_install_rbac_gate(tmp_path):
     )
     message = "\n".join(failures)
     assert failures, "`list` was added to the probe Role and the verb gate passed"
-    assert "exactly ['create', 'delete', 'get']" in message, message
+    assert "exactly ['create']" in message, message
+
+
+# ── NO PROBE RULE CAN REACH THE EDGE'S OWN OBJECTS ───────────────────────────
+# The probe runs in the release namespace beside Gateway `edge` and EnvoyProxy
+# `edge`. Any verb but `create` that is not NAMED to the probe's own objects lets
+# a compromised or buggy probe read or delete them — and deleting `edge` takes the
+# whole front door down.
+
+
+def edge_reach_failures(documents: list[dict]) -> list[str]:
+    """Every probe Role rule that could act on an existing object is named, never to edge. PURE."""
+    failures = []
+    listener = of_kind(documents, "Gateway")
+    proxies = of_kind(documents, "EnvoyProxy")
+    edge_names = {name_of(d) for d in listener + proxies}
+    assert edge_names, "the render carries no edge Gateway or EnvoyProxy to protect"
+    for role in of_kind(preflight_objects(documents) + post_install_probe_objects(documents), "Role"):
+        for rule in role.get("rules") or []:
+            verbs = set(rule.get("verbs") or [])
+            if verbs <= {"create"}:
+                continue
+            names = rule.get("resourceNames")
+            if not names:
+                if set(rule.get("apiGroups") or []) & {"gateway.networking.k8s.io", "gateway.envoyproxy.io"}:
+                    failures.append(
+                        f"{name_of(role)}: {sorted(verbs)} on {rule.get('resources')} is not "
+                        f"named, so it reaches the edge's own {sorted(edge_names)}"
+                    )
+            elif set(names) & edge_names:
+                failures.append(f"{name_of(role)}: a rule names the edge's own {sorted(set(names) & edge_names)}")
+    return failures
+
+
+def test_no_probe_rule_can_touch_the_edge():
+    failures = edge_reach_failures(adopter_render())
+    assert failures == [], "\n".join(failures)
+
+
+def test_an_unnamed_get_delete_rule_reddens_the_edge_gate(tmp_path):
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    rbac = copy / "templates" / "envoy-gateway-probe-rbac.yaml"
+    text = rbac.read_text()
+    line = "    resourceNames: [{{ $probe.probeName | quote }}]\n"
+    assert text.count(line) == 2, "the named rules moved; this red case is testing nothing"
+    rbac.write_text(text.replace(line, "", 1))
+    documents = adopter_render(copy)
+    message = "\n".join(edge_reach_failures(documents))
+    assert "is not named, so it reaches the edge's own" in message, message
+    assert post_install_rbac_failures(documents, EXPECTED_POST_INSTALL_OPERATORS_AT_R2)
 
 
 def chart_with_the_probe_bound_to_cluster_admin(destination: Path) -> Path:
@@ -2759,12 +3470,14 @@ def test_the_probe_body_generates_nothing_inside_itself():
     A generator called as `$(...)` INSIDE A HEREDOC cannot fail the run: command
     substitution DISCARDS the exit status, so `set -e` never sees it.
     """
-    body = probe_gateway_body(post_install_probe_script(adopter_render()))
-    assert "$(" not in json.dumps(body), (
-        f"the probe's request body generates inside itself: {body}. Command "
-        f"substitution discards the exit status, so a generator that fails there "
-        f"posts an empty value and the Job reports success"
-    )
+    bodies = probe_request_bodies(post_install_probe_script(adopter_render()))
+    assert len(bodies) == EXPECTED_PROBE_REQUEST_BODIES, bodies
+    for body in bodies:
+        assert "$(" not in json.dumps(body), (
+            f"the probe's request body generates inside itself: {body}. Command "
+            f"substitution discards the exit status, so a generator that fails there "
+            f"posts an empty value and the Job reports success"
+        )
 
 
 def test_the_probe_image_is_pinned_by_digest_and_is_the_preflights_own():
@@ -3706,10 +4419,12 @@ def test_the_census_of_what_this_suite_examined(tmp_path, capsys):
         "discriminating explicit-false overrides": 2,
         "honoured explicit trues": 2,
         "refused explicit trues": 2,
-        # cert-manager one, KEDA two (its own group and `apps`), mariadb one.
-        "preflight Role rules at R3": 4,
-        # Gateways in the upstream Gateway API group, and nothing else.
-        "post-install probe Role rules at R2": 1,
+        # cert-manager two (its own group, and the named probe Secret), KEDA two
+        # (its own group and `apps`), mariadb one.
+        "preflight Role rules at R3": 5,
+        # `create` on Gateways and on EnvoyProxies, and `get`/`delete` on each,
+        # named to the probe's own objects.
+        "post-install probe Role rules at R2": 4,
         "request bodies at R3": EXPECTED_REQUEST_BODIES,
         "post-install request bodies at R2": EXPECTED_PROBE_REQUEST_BODIES,
         # Duplicated rather than shared, so a fix in one leaves the class alive in

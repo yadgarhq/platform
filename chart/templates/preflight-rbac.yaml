@@ -18,6 +18,11 @@ bootstrap Role. `resourceNames` cannot narrow the `create` (the authorizer runs
 before the request body is decoded), so the Role being NAMESPACED is what bounds
 this identity.
 
+ONE NAMED RULE, AND IT IS THE ONLY RULE WITHOUT `create`. The cert-manager arm
+deletes the Secret cert-manager writes for the probe Certificate, an object the
+probe never creates. That rule carries `get` and `delete` and `resourceNames`
+naming the probe's own Secret, because both verbs honour the name.
+
 THE RULES FOLLOW THE PROBES THIS RENDER ENABLES, resolved from the SAME partial the
 Job reads. A fixed rule set would grant permission on kinds no enabled probe
 touches, and — worse — it would be a second statement of which probes exist, which
@@ -68,6 +73,15 @@ rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["issuers", "certificates"]
     verbs: ["create", "get", "delete"]
+  # THE SECRET cert-manager WRITES FOR THAT CERTIFICATE, which the probe never
+  # creates and must still delete: cert-manager does not own the Secrets it writes,
+  # so deleting the Certificate leaves it behind (ledger 1193). `get` and `delete`
+  # only, and NAMED — both verbs honour `resourceNames`, so this identity can touch
+  # the probe's Secret and no other Secret in the namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.preflight.probeName | quote }}]
+    verbs: ["get", "delete"]
 {{- end }}
 {{- if has "keda" $probes }}
   # The ScaledObject KEDA must reconcile, and the zero-replica Deployment it

@@ -125,12 +125,12 @@ bootstrap:
 # Envoy Gateway controller has never seen and waits for it to be programmed, which
 # is only possible once the install has made the GatewayClass it binds to.
 #
-# AND THE INSTALL THAT APPLIES THIS FILE MUST BE GIVEN `--timeout 15m`. Helm's
+# AND THE INSTALL THAT APPLIES THIS FILE MUST BE GIVEN `--timeout 20m`. Helm's
 # `--timeout` defaults to `5m0s` and covers each hook Job, measured on both pins.
 # The post-install probe bounds itself at `preflight.envoyGateway.timeoutSeconds`,
-# 300 seconds, and composes two of those loops — it waits for any Gateway of its
-# fixed name to be GONE before it creates its own — so its worst case is 600
-# seconds. Helm's clock starts at hook CREATION, so scheduling and image pull come
+# 300 seconds, and composes three of those loops — it waits for any EnvoyProxy and
+# any Gateway of its fixed name to be GONE before it creates its own, then for the
+# Gateway to be programmed — so its worst case is 900 seconds. Helm's clock starts at hook CREATION, so scheduling and image pull come
 # out of the same budget. At the default helm aborts first every time and the
 # operator reads `timed out waiting for the condition` instead of the probe naming
 # Envoy Gateway. The cleanup survives either way; the diagnostic does not.

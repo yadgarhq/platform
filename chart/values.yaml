@@ -802,7 +802,8 @@ preflight:
   # killed between create and cleanup — a node eviction, an `OOMKilled` — leaks at
   # most ONE object of each name, and the next run deletes it rather than
   # colliding with it. The script deletes any object of these names and waits for
-  # it to be gone BEFORE creating its own.
+  # it to be gone BEFORE creating its own — and so does the cert-manager arm for
+  # the Secret cert-manager writes under this name, which it deletes too.
   probeName: preflight-probe
 
   # ── WHICH OPERATORS ARE PROBED, AND WHY NO KEY IS SET HERE ─────────────────
@@ -916,8 +917,9 @@ preflight:
     # above defaults to `LoadBalancer`, and neither `example/values.yaml` nor the
     # parent chart's adopter values restate it. On a cluster with no
     # load-balancer controller no address is ever assigned, so the OBJECT's
-    # `Programmed` goes False with reason `AddressNotAssigned` — and the probe
-    # inherits that same EnvoyProxy, so it inherits that same failure. A probe
+    # `Programmed` goes False with reason `AddressNotAssigned` — and the probe's
+    # own EnvoyProxy carries the edge's Service type, so it meets that same
+    # failure. A probe
     # keyed on `Programmed=True` alone would then report SUCCESS off the
     # listener's condition while the real `edge` Gateway stalls, which is the
     # diagnostic failing to fire on exactly the cluster it was installed for.
@@ -962,14 +964,15 @@ preflight:
     # Jobs for hooks)". Helm's clock starts when the hook Job is CREATED, so it
     # covers pod scheduling and image pull before this script's own clock starts.
     #
-    # AND THE SCRIPT'S WORST CASE IS TWICE THIS NUMBER, not once. `create()` calls
-    # `remove()` first, and `remove()` loops to this same bound before `await()`
-    # begins its own — so two bounded loops compose, plus the request time of the
+    # AND THE SCRIPT'S WORST CASE IS THREE TIMES THIS NUMBER, not once. Each
+    # `create()` calls `remove()` first, and `remove()` loops to this same bound —
+    # once for the probe's EnvoyProxy, once for its Gateway — before `await()`
+    # begins its own. So three bounded loops compose, plus the request time of the
     # calls themselves, which no value here bounds.
     #
     # SO THE INSTALL MUST BE GIVEN A BUDGET, and `README.md` and
-    # `example/values.yaml` both state it. At 300 here the composed bound is 600s,
-    # and the documented `--timeout 15m` leaves 300s over it for scheduling, image
+    # `example/values.yaml` both state it. At 300 here the composed bound is 900s,
+    # and the documented `--timeout 20m` leaves 300s over it for scheduling, image
     # pull and request time — a stated CEILING, not a measurement, because this
     # estate has measured none of the three. The number is NOT lowered instead:
     # `Programmed` includes replica availability, so a cold cluster may genuinely
