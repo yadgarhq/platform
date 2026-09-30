@@ -1,0 +1,30 @@
+{{/*
+THE NAMESPACE THE BUNDLED PROMETHEUS LANDS IN (ADR-0820).
+
+`prometheus.forceNamespace` puts every namespaced Prometheus object in
+`observability`, where the seven module charts' default
+`autoscaling.prometheusAddress` points. Nothing else creates that namespace: Argo
+CD's `CreateNamespace` creates only the Application's own destination, and
+`helm install --create-namespace` only the release's. So this chart renders it,
+exactly when the prometheus dependency is on — the same resolution helm applies to
+its `condition:`, through the shared helper — and only when it is not the release's
+own namespace.
+
+AND NEITHER TOOL MAY EVER DELETE IT. helm and Argo CD both ADOPT a Namespace that
+already exists, and deleting a Namespace deletes everything in it — including an
+adopter's own objects that were there first. `resource-policy: keep` stops
+`helm uninstall`; `Delete=false` stops Argo CD deleting it with the Application,
+and `Prune=false` stops a later sync pruning it once the render drops it.
+*/}}
+{{- if (include "platform.operator-create" (dict "context" $ "operator" "prometheus")) }}
+{{- $namespace := .Values.prometheus.forceNamespace }}
+{{- if and $namespace (ne $namespace .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+{{- end }}
+{{- end }}

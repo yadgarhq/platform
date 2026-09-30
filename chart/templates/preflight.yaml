@@ -503,6 +503,45 @@ spec:
                 fi
               }
 {{- end }}
+{{- if has "prometheus" $probes }}
+
+              # ── Prometheus ────────────────────────────────────────────────
+              # NOT AN OPERATOR, AND NOT ASKED THROUGH THE API SERVER. KEDA's
+              # prometheus scaler queries this address directly for every module
+              # ScaledObject, so the probe asks the same address the same way:
+              # `/-/ready`, which answers 200 with Prometheus's own wording only
+              # once the server can serve queries. A 200 without that wording is
+              # something else listening there.
+              #
+              # ITS OWN `curl`, NEVER `request()`. `request()` attaches this Job's
+              # service-account token, which is a credential for the API server
+              # and for nothing else; sending it to another service hands it over.
+              # `--max-time` bounds each attempt, and a refused or unresolvable
+              # address is answered `000` and polled like a not-ready one. EACH
+              # ATTEMPT IS CHARGED ITS `--max-time` AS WELL AS THE POLL, so an
+              # address that hangs cannot stretch the loop past its stated bound.
+              PROMETHEUS_MAX_TIME=5
+              PROMETHEUS_ADDRESS={{ $preflight.prometheus.address | squote }}
+              PROMETHEUS_READY={{ $preflight.prometheus.readyMessage | squote }}
+              probe_prometheus() {
+                waited=0
+                code=""
+                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
+                  code="$(curl --silent --output "$body" --write-out '%{http_code}' \
+                    --max-time "$PROMETHEUS_MAX_TIME" --user-agent "$USER_AGENT" \
+                    "$PROMETHEUS_ADDRESS/-/ready" || true)"
+                  if [ "$code" = "200" ] && grep -qF "$PROMETHEUS_READY" "$body"; then
+                    return 0
+                  fi
+                  sleep "$POLL_SECONDS"
+                  waited=$((waited + POLL_SECONDS + PROMETHEUS_MAX_TIME))
+                done
+                echo "preflight: Prometheus at $PROMETHEUS_ADDRESS did not answer ready within ${waited}s (last HTTP status: ${code:-none})." >&2
+                echo "preflight: expected HTTP 200 carrying: $PROMETHEUS_READY" >&2
+                echo "preflight: the module ScaledObjects query this address; install Prometheus there (operators.prometheus.create) or point preflight.prometheus.address and the modules' autoscaling.prometheusAddress at yours." >&2
+                return 1
+              }
+{{- end }}
 
               # ── THE DENOMINATOR, CHECKED BEFORE ANYTHING IS PROBED ────────
               # AT THE TOP LEVEL, and that is not a style choice. Inside a function
@@ -531,6 +570,9 @@ spec:
 {{- end }}
 {{- if has "mariadb-operator" $probes }}
                   mariadb-operator) probe_mariadb ;;
+{{- end }}
+{{- if has "prometheus" $probes }}
+                  prometheus) probe_prometheus ;;
 {{- end }}
                   *)
                     echo "preflight: $probe is in the probe list and this Job carries no probe for it." >&2

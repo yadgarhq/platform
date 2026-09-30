@@ -203,10 +203,13 @@ PRUNE_VALUE = "Prune=false"
 RED_KEDA_VERSION = "2.15.2"
 RED_KEDA_MISSING = "clustercloudeventsources.eventing.keda.sh"
 
-# The render-count proofs of this step, from the plan's step 2. LITERALS.
-EXPECTED_OPERATORS_OBJECTS = 183
+# The render-count proofs of this step, from the plan's step 2. LITERALS. The two
+# renders that keep `operators.create` true carry seven objects more since the
+# bundled Prometheus (ADR-0820): its Namespace, ServiceAccount, ConfigMap,
+# ClusterRole, ClusterRoleBinding, Service and Deployment.
+EXPECTED_OPERATORS_OBJECTS = 190
 EXPECTED_OPERATORS_CRDS = 27
-EXPECTED_MARIADB_ONLY_OBJECTS = 154
+EXPECTED_MARIADB_ONLY_OBJECTS = 161
 EXPECTED_MARIADB_ONLY_CRDS = 21
 EXPECTED_KEDA_ONLY_OBJECTS = 29
 EXPECTED_KEDA_ONLY_CRDS = 6
@@ -900,7 +903,7 @@ def test_the_chart_defaults_render_nothing():
 
 
 def test_the_operators_render_carries_the_eighteen_vendored_crds():
-    """183 objects and 27 CRDs, and BOTH numbers are the point.
+    """190 objects and 27 CRDs, and BOTH numbers are the point.
 
     27 rather than 18 because cert-manager contributes 6 and Argo CD 3 as ordinary
     subchart templates — which is why this gate's filter is the `# Source:` path
