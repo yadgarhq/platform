@@ -154,9 +154,9 @@ spec:
   # 1235): every loop ends by its own `TIMEOUT_SECONDS` or by the script's
   # `SCRIPT_BUDGET_SECONDS` of {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s, whichever comes first, so
   # on a slow API server the script names Envoy Gateway and deletes its Gateway
-  # before this fires. The margin covers scheduling, the image pull, the requests
-  # in flight past the budget and the cleanup (`test_hook_deadlines.py` checks
-  # it). It still ends inside the documented helm budget, so helm reports a
+  # before this fires. The margin covers scheduling, the image pull, the worst
+  # overrun past the budget — max(poll + 2 requests, 3 requests), 105s at the 35s
+  # request bound — and the cleanup (`test_hook_deadlines.py` checks it). It still ends inside the documented helm budget, so helm reports a
   # failure rather than its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
   activeDeadlineSeconds: {{ $deadline }}
   template:
@@ -384,14 +384,22 @@ spec:
                 fi
                 request DELETE "$1" "" || true
                 while :; do
-                  request GET "$1" ""
+                  # A POLL THAT TIMES OUT IS A SLOW ANSWER, NOT THE END (ledger
+                  # 1235). Under `set -e` a request past `--max-time` would end
+                  # the script with only curl's own `(28)`; here it leaves
+                  # `STATUS` at `000` and the loop polls again inside its bound.
+                  request GET "$1" "" || true
                   if [ "$STATUS" = "404" ]; then
                     return 0
                   fi
                   in_time || break
                   sleep "$POLL_SECONDS"
                 done
-                echo "envoy-gateway-probe: $1 was still present $((now - started))s after a delete" >&2
+                if [ "$STATUS" = "000" ]; then
+                  echo "envoy-gateway-probe: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                else
+                  echo "envoy-gateway-probe: $1 was still present $((now - started))s after a delete" >&2
+                fi
                 if clamped; then
                   echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound." >&2
                 fi
@@ -400,7 +408,8 @@ spec:
 
               create() {
                 remove "$1"
-                request POST "$2" "$3"
+                # A timed-out POST answers `000` and is named by the check below.
+                request POST "$2" "$3" || true
                 if [ "$STATUS" != "201" ]; then
                   echo "envoy-gateway-probe: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -458,7 +467,8 @@ spec:
                   return 1
                 fi
                 while :; do
-                  request GET "$path" ""
+                  # A timed-out poll leaves `STATUS` at `000` and is polled again.
+                  request GET "$path" "" || true
                   if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted" "$message"; then
                     return 0
                   fi
@@ -470,6 +480,8 @@ spec:
                 cat "$body" >&2
                 if clamped; then
                   echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the removals before it were slow, so $operator is not shown to be down." >&2
+                elif [ "$STATUS" = "000" ]; then
+                  echo "envoy-gateway-probe: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
                 else
                   echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running, or it is running and could not program this Gateway." >&2
                 fi
