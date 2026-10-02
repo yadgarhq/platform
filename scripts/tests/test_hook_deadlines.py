@@ -94,13 +94,14 @@ EXEMPT_UPSTREAM_HOOK_JOBS = {
 PROBE_DEADLINE_MARGIN_SECONDS = 300
 
 # Kubernetes caps ONE admission webhook's `timeoutSeconds` at 30. Measured on
-# kind-yadgar (2026-10-02): of the objects these probes create, only
-# cert-manager's Issuer and Certificate cross a webhook at all, and only its
-# VALIDATING one (30s) — its MUTATING webhook matches `certificaterequests`
-# only, which no probe creates directly. KEDA's and mariadb-operator's webhooks
-# are validating-only, at 10s. So today this is the largest SINGLE webhook any
-# probed request can cross, not a sum over a mutating-then-validating chain; an
-# adopter whose own admission webhooks also match these kinds could need more.
+# kind-yadgar (2026-10-02): of what these probes create, cert-manager's Issuer
+# and Certificate cross its VALIDATING webhook (30s); KEDA's ScaledObject and
+# the mariadb dry-run cross validating-only webhooks at 10s. NO PROBED CREATE
+# CROSSES A MUTATING WEBHOOK: cert-manager's matches `certificaterequests`
+# only, which no probe creates directly. So today this is the largest SINGLE
+# webhook any probed request can cross, not a sum over a mutating-then-
+# validating chain; an adopter whose own admission webhooks also match these
+# kinds could need more.
 LARGEST_WEBHOOK_TIMEOUT_SECONDS = 30
 
 # The Job controller's pod-failure backoff: 10s, doubled per failure, capped at six
@@ -662,12 +663,18 @@ def test_a_budget_cut_below_a_deadline_reddens_the_budget_gate():
 # Sync-phase health wait ADR-0830 measured (gitops-engine's PostSync wait,
 # ≥90s per workload × 3).
 #
-# THE WINDOW DIFFERS BY VARIANT, not by this chart's own choice: Argo's own
-# retry backoff is 1050s for `iamKeys.create: false` (this org's values) and
-# 1200s for `iamKeys.create: true` (the chart's kind example) — both fixed
-# facts about the two `Application` manifests this chart's consumers carry,
-# recorded here rather than derived, because this suite renders neither of
-# them.
+# THE WINDOW DIFFERS BY CONSUMER, not by `iamKeys.create` itself — that flag
+# only happens to key which of the two consumers each variant stands in for,
+# since this suite renders neither `Application` manifest directly:
+#   kind consumer (iamKeys on): 1200, `yadgarhq/chart`'s `RETRY_WINDOW_SECONDS`
+#   gate ceiling (`scripts/tests/test_parent_chart.py`) — the UPPER bound that
+#   gate allows any `retry.limit`/`backoff` in the kind example to reach, used
+#   here rather than today's configured 1050s so a future edit still inside
+#   that gate cannot silently outrun this floor.
+#   org consumer (iamKeys off): 1050, `yadgarhq/argocd`'s REAL backoff —
+#   30 + 60 + 120 + 240 + 300 + 300 (duration 15s, factor 2, maxDuration 5m,
+#   limit 6) — because that repository carries no such range gate, so the one
+#   configured value is the only one to count.
 SYNC_TIMEOUT_WINDOW_SECONDS = {True: 1200, False: 1050}
 POST_SYNC_HEALTH_WAIT_SECONDS = 270
 BOOTSTRAP_DEFAULT_POD_GRACE_SECONDS = 30

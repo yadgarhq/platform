@@ -172,13 +172,14 @@ connection and never answered held the Job — and the sync behind it — open f
 long as the caller would wait.
 
 `maxTime` IS 35 FOR THE PROBES, AND IT HAS TO EXCEED 30. Measured on kind-yadgar
-(2026-10-02): of what these probes create, only cert-manager's Issuer and
-Certificate cross an admission webhook — its VALIDATING one, at
-`timeoutSeconds: 30`. Its MUTATING webhook matches `certificaterequests` only,
-which no probe creates directly, so this probe never pays for both in the same
-request. KEDA's and mariadb-operator's webhooks are validating-only, at 10s.
-Kubernetes caps any ONE webhook's timeout at 30, which is what `35` has to
-exceed HERE — NOT a chain of several. A request that crossed a mutating webhook
+(2026-10-02): of what these probes create, cert-manager's Issuer and
+Certificate cross its VALIDATING webhook (30s); KEDA's ScaledObject and the
+mariadb-operator dry-run cross validating-only webhooks at 10s. NO PROBED
+CREATE CROSSES A MUTATING WEBHOOK: cert-manager's matches
+`certificaterequests` only, which no probe creates directly, so this probe
+never pays for both in the same request. Kubernetes caps any ONE webhook's
+timeout at 30, which is what `35` has to exceed HERE — NOT a chain of several.
+A request that crossed a mutating webhook
 and then a validating one would pay for both, one after the other (mutating
 webhooks run serially, validating ones in parallel), so an adopter whose own
 admission webhooks also match these kinds, or a future operator version that
