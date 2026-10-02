@@ -49,7 +49,7 @@ Four properties make that safe rather than clever. `scripts/tests/test_bootstrap
 
 **`iam-keys` is a fifth, and you have to ask for it.** It is data-bearing: every stored name is AES-256-GCM ciphertext, and every username is found through an HMAC blind index. This chart used to refuse to mint it at all. That refusal was an ORDERING rather than a ban. ADR-0753 put its generation behind a key-identity marker in the `iam` binary that refuses a wrong key, and ordered that marker first, in a change of its own. `iam` v0.8.43 shipped the marker: the binary records which key set encrypted the rows and refuses to keep running under a different one. A regenerated key now fails loudly, where before it gave you an `iam` that **starts healthy and cannot decrypt the rows it already has**.
 
-Set `bootstrap.iamKeys.create: true` and the Job mints `iam-keys` as a fourth `create`. It carries the two key files `iam` reads at boot — `encryption.key` and `blind-index.key`, 32 raw bytes each, the same pair `yadgarhq/deploy`'s `make secrets` mints by hand. **The toggle defaults to false**, because an estate that already holds those keys must not be handed a second pair. Turn it on for an install against an empty database. Leave it off if you mint the keys yourself.
+Set `bootstrap.iamKeys.create: true` and the Job mints `iam-keys` as a fourth `create`. It carries the two key files `iam` reads at boot — `encryption.key` and `blind-index.key`, 32 raw bytes each, the same pair `yadgarhq/argocd`'s `make secrets` loads from 1Password by hand. **The toggle defaults to false**, because an estate that already holds those keys must not be handed a second pair. Turn it on for an install against an empty database. Leave it off if you mint the keys yourself.
 
 **One gap this chart does not close.** Nothing ties that toggle to an `iam` that carries the marker. Turn the toggle on while pinning `iam` backwards to a release older than v0.8.43 and you get a Job-minted key beside a binary that cannot refuse it — the exact failure the marker exists to prevent. The parent chart pins every module together, so you reach this only by deliberately overriding one module's tag backwards.
 
@@ -166,7 +166,7 @@ gatewayListener:
 
 ## What this is NOT
 
-**It is not a reference deployment.** `yadgarhq/deploy` is, and it stays opinionated on purpose. This chart is what an adopter with their own cluster renders; `deploy` is what this organisation runs.
+**It is not a reference deployment.** `yadgarhq/argocd`'s `applications/yadgar.yaml` is, and it stays opinionated on purpose. This chart is what an adopter with their own cluster renders; that Application is what this organisation runs.
 
 **It does not install an operator, and it never will.** See above.
 
