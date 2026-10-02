@@ -2,7 +2,7 @@
 # RATHER THAN A STARTING POSITION (ADR-0752). The chart installs on a bare cluster
 # rendering nothing and requiring no CRD. An adopter turns the layer on in their
 # own values file; this organisation states every toggle explicitly false, so the
-# file documents what `yadgarhq/deploy` still owns (ADR-0569's "a value someone
+# file documents what `yadgarhq/argocd` still owns (ADR-0569's "a value someone
 # can see").
 #
 # THE NAME IS `create` AND NOT `enabled`, deliberately. `enabled` reads as "this
