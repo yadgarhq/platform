@@ -5,7 +5,7 @@ LEDGER 1224. Before this suite, no hook Job this chart renders carried
 in `ImagePullBackOff`, or a request to an API server that accepts the connection
 and never answers, therefore held its sync open for as long as the caller would
 wait — and under Argo CD the caller's only bound is `controller.sync.timeout.seconds`
-(ADR-0830), set at 24000s because nothing tighter existed.
+(ADR-0830), set at 25200 s (chart#25 dc1556f merged; argocd#58).
 
 WHAT IS CHECKED, AND WHERE EACH NUMBER COMES FROM.
 
@@ -641,6 +641,98 @@ def test_a_budget_cut_below_a_deadline_reddens_the_budget_gate():
     assert "--timeout 25m" in readme, "README.md no longer says `--timeout 25m`"
     message = "\n".join(budget_failures(estate_render(), readme.replace("--timeout 25m", "--timeout 20m")))
     assert "preflight: deadline + grace = 1320s, at or past the documented `--timeout` of 1200s" in message, message
+
+
+# ── THE SYNC-TIMEOUT FLOOR (ADR-0830) ─────────────────────────────────────────
+# `controller.sync.timeout.seconds` is the ONE Argo-side backstop behind every
+# hook deadline above, and ADR-0830 sizes it from the whole worst-case retry
+# chain: a floor (Argo's own retry backoff, plus one more attempt) plus 7 ×
+# the per-attempt allowance. This suite's own deadlines ARE that allowance's
+# three largest pieces, so a change here that grows any of them can silently
+# grow the floor past what both consumers of this one shared value carry —
+# `yadgarhq/chart bootstrap/argocd-values.yaml` (kind installs) and
+# `yadgarhq/argocd install/values.yaml` (this organisation) — without either
+# of those repositories' own suites ever seeing this chart change at all.
+#
+# THE PER-ATTEMPT ALLOWANCE, counted the way ADR-0830 counts it: the
+# preflight's deadline plus its pod's grace, the Envoy Gateway probe's
+# deadline plus its grace, the LARGER of the two bootstrap Jobs' deadlines
+# (they run in parallel, so the attempt waits on whichever is slower) plus
+# the default 30s pod grace neither bootstrap Job overrides, plus the 270s
+# Sync-phase health wait ADR-0830 measured (gitops-engine's PostSync wait,
+# ≥90s per workload × 3).
+#
+# THE WINDOW DIFFERS BY VARIANT, not by this chart's own choice: Argo's own
+# retry backoff is 1050s for `iamKeys.create: false` (this org's values) and
+# 1200s for `iamKeys.create: true` (the chart's kind example) — both fixed
+# facts about the two `Application` manifests this chart's consumers carry,
+# recorded here rather than derived, because this suite renders neither of
+# them.
+SYNC_TIMEOUT_WINDOW_SECONDS = {True: 1200, False: 1050}
+POST_SYNC_HEALTH_WAIT_SECONDS = 270
+BOOTSTRAP_DEFAULT_POD_GRACE_SECONDS = 30
+CURRENT_SYNC_TIMEOUT_SECONDS = 25200
+SYNC_TIMEOUT_CONSUMERS = (
+    "yadgarhq/chart bootstrap/argocd-values.yaml",
+    "yadgarhq/argocd install/values.yaml",
+)
+
+
+def job_total(job: dict) -> int:
+    """A Job's activeDeadlineSeconds plus its pod's grace (default 30s, the
+    bootstrap Jobs' own, since neither overrides terminationGracePeriodSeconds)."""
+    grace = job["spec"]["template"]["spec"].get("terminationGracePeriodSeconds", 30)
+    return job["spec"]["activeDeadlineSeconds"] + grace
+
+
+def sync_timeout_floor_failures(iam_keys_create: bool, preflight_timeout_seconds: int | None = None) -> list[str]:
+    """The ADR-0830 floor for one `iamKeys.create` variant, against the one
+    `controller.sync.timeout.seconds` both consumers currently carry. PURE."""
+    overrides = (
+        "preflight.probes.keda=true,preflight.probes.mariadb=true,"
+        f"preflight.probes.prometheus=true,bootstrap.iamKeys.create={str(iam_keys_create).lower()}"
+    )
+    if preflight_timeout_seconds is not None:
+        overrides += f",preflight.timeoutSeconds={preflight_timeout_seconds}"
+    documents = render(CHART, RELEASE_NAMESPACE, *API_VERSIONS, "-f", str(ADOPTER_VALUES), "--set", overrides)
+    preflight_total = job_total(job_named(documents, "preflight"))
+    probe_total = job_total(job_named(documents, "envoy-gateway-probe"))
+    bootstrap_deadline = max(
+        job_named(documents, "bootstrap-secrets")["spec"]["activeDeadlineSeconds"],
+        job_named(documents, "admin-bootstrap-token")["spec"]["activeDeadlineSeconds"],
+    )
+    attempt = (
+        preflight_total + probe_total + bootstrap_deadline
+        + BOOTSTRAP_DEFAULT_POD_GRACE_SECONDS + POST_SYNC_HEALTH_WAIT_SECONDS
+    )
+    window = SYNC_TIMEOUT_WINDOW_SECONDS[iam_keys_create]
+    floor = window + 7 * attempt
+    if floor > CURRENT_SYNC_TIMEOUT_SECONDS:
+        return [
+            f"iamKeys.create={iam_keys_create}: the per-attempt allowance is {attempt}s "
+            f"(preflight {preflight_total}s + probe {probe_total}s + bootstrap "
+            f"{bootstrap_deadline}s + {BOOTSTRAP_DEFAULT_POD_GRACE_SECONDS}s pod grace + "
+            f"{POST_SYNC_HEALTH_WAIT_SECONDS}s Sync-phase health), so the floor is "
+            f"{window} + 7x{attempt} = {floor}s, past the {CURRENT_SYNC_TIMEOUT_SECONDS}s "
+            f"controller.sync.timeout.seconds ADR-0830 sizes for BOTH "
+            f"{SYNC_TIMEOUT_CONSUMERS[0]} and {SYNC_TIMEOUT_CONSUMERS[1]}, which share one value"
+        ]
+    return []
+
+
+def test_the_sync_timeout_floor_holds_for_both_iamkeys_variants():
+    failures = []
+    for iam_keys_create in (True, False):
+        failures += sync_timeout_floor_failures(iam_keys_create)
+    assert failures == [], "\n".join(failures)
+
+
+def test_a_raised_preflight_bound_reddens_the_sync_timeout_floor_gate():
+    message = "\n".join(sync_timeout_floor_failures(True, preflight_timeout_seconds=600))
+    assert "iamKeys.create=True" in message, message
+    assert "past the 25200s controller.sync.timeout.seconds" in message, message
+    assert SYNC_TIMEOUT_CONSUMERS[0] in message and SYNC_TIMEOUT_CONSUMERS[1] in message, message
+    assert "ADR-0830" in message, message
 
 
 # ── 3. THE CURLS ──────────────────────────────────────────────────────────────
