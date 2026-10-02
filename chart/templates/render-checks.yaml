@@ -371,10 +371,12 @@ correct there and its fallback semantics are available there.
 THE TYPE ARM, AND IT IS THE OPERATOR SIDE'S (ledger 1121, F5). A toggle read by
 truthiness alone counts `create: "false"` as ON — measured, it was refused here
 as having "asked for the objects" — and counts `0` or `{}` as off with no word.
-So a `create` that is present and not a bool is refused BY NAME, and only a bool
-is counted. ROOT ONLY, for the register arms' reason: `yadgarhq/chart` refuses
-every non-bool `platform.<name>.create` itself, and helm runs the subchart's
-templates first, so a refusal here would shadow the parent's. `kindIs "map"` on
+So a `create` that is present and not a bool is refused BY NAME at the root.
+ROOT ONLY, for the register arms' reason: `yadgarhq/chart` refuses every
+non-bool `platform.<name>.create` itself, and helm runs the subchart's templates
+first, so a refusal here would shadow the parent's. Under a parent a truthy
+non-bool is still COUNTED as on, as the object templates read it, so a parent
+with no refusal of its own still gets the mixed-release refusal. `kindIs "map"` on
 the block first, so a non-map block reaches the template that reads it rather
 than an index error here.
 
@@ -392,8 +394,24 @@ against the render rather than trusting this paragraph.
 {{- range $toggle := (list "bootstrap" "certificates" "edgeTLS" "gatewayListener" "internalCA" "nats" "valkey") }}
 {{- $block := index $.Values $toggle }}
 {{- if kindIs "map" $block }}
-{{- if kindIs "bool" (index $block "create") }}
-{{- if (index $block "create") }}
+{{- $create := index $block "create" }}
+{{- $on := false }}
+{{- if kindIs "bool" $create }}
+{{- $on = $create }}
+{{- else if and (hasKey $block "create") (not (contains "/charts/" $.Template.BasePath)) }}
+{{- fail (printf (join "" (list
+      "platform: %s.create is a %s rather than true or false, so this chart cannot read it as a toggle. "
+      "A quoted \"false\" reads as ON to a template and a 0 or {} as off, so the objects it guards would render or not "
+      "by accident of the type. Write %s.create: true or false, unquoted."))
+      $toggle (kindOf $create) $toggle) }}
+{{- else if $create }}
+{{- /* UNDER A PARENT, a truthy non-bool is COUNTED AS ON, the way the object
+templates read it, so the mixed release stays refused under a parent that does
+not name the key itself (ledger 1121 review). Skipping it here let
+`certificates.create: "false"` beside the operators render at exit 0. */}}
+{{- $on = true }}
+{{- end }}
+{{- if $on }}
 {{- $otherKeysOn = append $otherKeysOn (printf "%s.create" $toggle) }}
 {{- if has $toggle $crdBacked }}
 {{- $crdKeysOn = append $crdKeysOn (printf "%s.create" $toggle) }}
@@ -401,29 +419,22 @@ against the render rather than trusting this paragraph.
 {{- $shapeKeysOn = append $shapeKeysOn (printf "%s.create" $toggle) }}
 {{- end }}
 {{- end }}
-{{- else if and (hasKey $block "create") (not (contains "/charts/" $.Template.BasePath)) }}
-{{- fail (printf (join "" (list
-      "platform: %s.create is a %s rather than true or false, so this chart cannot read it as a toggle. "
-      "A quoted \"false\" reads as ON to a template and a 0 or {} as off, so the objects it guards would render or not "
-      "by accident of the type. Write %s.create: true or false, unquoted."))
-      $toggle (kindOf (index $block "create")) $toggle) }}
-{{- end }}
 {{- end }}
 {{- end }}
 {{- if and $operatorKeysOn $otherKeysOn }}
 {{- $reasons := list }}
 {{- if $crdKeysOn }}
 {{- $reasons = append $reasons (printf (join "" (list
-      "%s render objects whose kind needs a CustomResourceDefinition, which has to be registered on the target before the release that needs it renders, "
+      "%s %s objects whose kind needs a CustomResourceDefinition, which has to be registered on the target before the release that needs it renders, "
       "and a CustomResourceDefinition this very release is installing is not registered — so this would fail part-way through the apply, "
       "with the operators in and the objects not."))
-      (join ", " $crdKeysOn)) }}
+      (join ", " $crdKeysOn) (ternary "renders" "render" (eq (len $crdKeysOn) 1))) }}
 {{- end }}
 {{- if $shapeKeysOn }}
 {{- $reasons = append $reasons (printf (join "" (list
-      "%s render no CRD-backed kind, and they are refused for the release shape alone (ADR-0787): "
+      "%s %s no CRD-backed kind, and %s refused for the release shape alone (ADR-0787): "
       "the operators go in a release of their own, so one values file behaves the same on every cluster."))
-      (join ", " $shapeKeysOn)) }}
+      (join ", " $shapeKeysOn) (ternary "renders" "render" (eq (len $shapeKeysOn) 1)) (ternary "it is" "they are" (eq (len $shapeKeysOn) 1))) }}
 {{- end }}
 {{- fail (printf (join "" (list
       "platform: this release installs operators AND renders the estate's own objects, and one release cannot do both. "

@@ -1133,7 +1133,7 @@ TOGGLE_ALONE_EXTRA = {
 }
 GUARD_CRD_BACKED = re.compile(r"\$crdBacked := \(list (?P<names>[^)]*)\)")
 THE_CRD_REASON = "a CustomResourceDefinition this very release is installing is not registered"
-THE_SHAPE_REASON = "render no CRD-backed kind"
+THE_SHAPE_REASON = "no CRD-backed kind"
 
 
 def crd_backed_toggles_measured(chart: Path) -> list[str]:
@@ -1164,7 +1164,7 @@ def test_a_mixed_release_of_built_in_toggles_blames_the_shape_not_a_crd():
     result = render(CHART, "--set", "operators.create=true,valkey.create=true")
     assert_it_is_the_mixed_release_refusal(result, "operators.create", "valkey.create")
     assert THE_CRD_REASON not in result.stderr, result.stderr
-    assert f"valkey.create {THE_SHAPE_REASON}" in result.stderr, result.stderr
+    assert "valkey.create renders no CRD-backed kind, and it is refused" in result.stderr, result.stderr
 
 
 def test_a_mixed_release_names_each_toggle_under_its_own_reason():
@@ -1174,9 +1174,9 @@ def test_a_mixed_release_names_each_toggle_under_its_own_reason():
     assert_it_is_the_mixed_release_refusal(
         result, "operators.create", "certificates.create", "valkey.create"
     )
-    assert f"certificates.create render objects whose kind needs a CustomResourceDefinition" in result.stderr, result.stderr
+    assert "certificates.create renders objects whose kind needs a CustomResourceDefinition" in result.stderr, result.stderr
     assert THE_CRD_REASON in result.stderr, result.stderr
-    assert f"valkey.create {THE_SHAPE_REASON}" in result.stderr, result.stderr
+    assert "valkey.create renders no CRD-backed kind, and it is refused" in result.stderr, result.stderr
 
 
 NON_BOOL_TOGGLES = (
@@ -1205,15 +1205,18 @@ def test_dropping_the_toggle_type_arm_reddens_the_type_gate(tmp_path):
     shutil.copytree(CHART, copy)
     template = copy / "templates" / "render-checks.yaml"
     original = template.read_text()
-    arm = re.compile(r"\{\{- else if and \(hasKey \$block \"create\"\).*?\n\{\{- end \}\}\n", re.DOTALL)
+    arm = re.compile(
+        r"\{\{- else if and \(hasKey \$block \"create\"\).*?(?=\{\{- else if \$create \}\})", re.DOTALL
+    )
     assert len(arm.findall(original)) == 1, "the toggle type arm moved; this red case tests nothing"
-    template.write_text(arm.sub("{{- end }}\n", original))
+    template.write_text(arm.sub("", original))
     values = tmp_path / "string-false.yaml"
     values.write_text('operators:\n  create: true\nvalkey:\n  create: "false"\n')
     result = render(copy, "-f", str(values))
-    # Without the arm the shape is neither named nor refused: the string is not a
-    # bool, so it is not counted, and the release renders at exit 0.
-    assert result.returncode == 0, result.stderr
+    # Without the arm the string is counted by truthiness, as on origin/main: the
+    # adopter who wrote "false" is told valkey.create asked for the objects.
+    assert result.returncode != 0, result.stdout[:400]
+    assert "valkey.create asked for the objects" in result.stderr, result.stderr
     assert "valkey.create is a string rather than true or false" not in result.stderr, result.stderr
 
 
@@ -1228,7 +1231,7 @@ def test_a_shape_reason_for_every_toggle_reddens_the_crd_list_gate(tmp_path):
     template.write_text(original.replace(match.group(0), '$crdBacked := (list "valkey")'))
     result = render(copy, "--set", "operators.create=true,certificates.create=true")
     assert result.returncode != 0
-    assert f"certificates.create {THE_SHAPE_REASON}" in result.stderr, result.stderr
+    assert "certificates.create renders no CRD-backed kind" in result.stderr, result.stderr
     measured = crd_backed_toggles_measured(CHART)
     listed = sorted(QUOTED.findall(GUARD_CRD_BACKED.search(template.read_text()).group("names")))
     assert listed != measured
@@ -1285,3 +1288,13 @@ def test_refusing_a_non_bool_toggle_from_the_subchart_would_shadow_the_parent(tm
     assert result.returncode != 0
     assert "valkey.create is a string rather than true or false" in result.stderr, result.stderr
     assert THE_TOGGLE_PARENT_REFUSAL not in result.stderr, result.stderr
+
+
+def test_one_and_several_keys_read_in_the_right_number():
+    """The reason's verb agrees with how many keys it names."""
+    one = render(CHART, "--set", "operators.create=true,valkey.create=true").stderr
+    assert "valkey.create renders no CRD-backed kind, and it is refused" in one, one
+    several = render(CHART, "--set", "operators.create=true,nats.create=true,valkey.create=true").stderr
+    assert "nats.create, valkey.create render no CRD-backed kind, and they are refused" in several, several
+    one = render(CHART, "--set", "operators.create=true,certificates.create=true").stderr
+    assert "certificates.create renders objects whose kind" in one, one
