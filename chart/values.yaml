@@ -853,8 +853,9 @@ preflight:
   # CEILING RATHER THAN A MEASUREMENT: no measurement of a cold controller's first
   # reconcile on this estate exists, so this is chosen loose enough that a healthy
   # cluster never meets it and short enough that a dead one does not hang an
-  # install. The Job's `activeDeadlineSeconds` is computed from it — the probes'
-  # bounded loops x this + 300 — so raising it raises the deadline with it.
+  # install. Each loop reads the wall clock against it (ledger 1235). The Job's
+  # `activeDeadlineSeconds` is computed from it — the probes' bounded loops x this
+  # + 300 — so raising it raises the deadline with it.
   timeoutSeconds: 120
   pollSeconds: 3
 
@@ -1027,10 +1028,11 @@ preflight:
     # AND THE SCRIPT'S WORST CASE IS THREE TIMES THIS NUMBER, not once. Each
     # `create()` calls `remove()` first, and `remove()` loops to this same bound —
     # once for the probe's EnvoyProxy, once for its Gateway — before `await()`
-    # begins its own. So three bounded loops compose, plus the request time of the
-    # calls themselves. Each request is bounded by `--max-time` and the Job by an
-    # `activeDeadlineSeconds` of 3 x this number + 300, computed in the template
-    # (ledger 1224), so raising this raises the deadline with it.
+    # begins its own. So three bounded loops compose. The script reads the wall
+    # clock (ledger 1235), so the requests' own time counts inside those loops
+    # and a budget of 3 x this number, not on top of them. Each request is bounded
+    # by `--max-time` and the Job by an `activeDeadlineSeconds` of 3 x this number
+    # + 300, computed in the template (ledger 1224), so raising this raises both.
     #
     # SO THE INSTALL MUST BE GIVEN A BUDGET, and `README.md` and
     # `example/values.yaml` both state it. At 300 here the composed bound is 900s,
