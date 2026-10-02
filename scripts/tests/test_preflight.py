@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -683,6 +684,136 @@ def test_a_label_wired_to_another_probe_reddens_the_body_gate(tmp_path):
     )
     message = "\n".join(all_probe_body_failures(chart))
     assert "the label 'keda' runs probe_mariadb, which POSTs [('k8s.mariadb.com/v1alpha1', 'MariaDB')]" in message, message
+
+
+# ── WHAT EACH LABEL'S PROBE WAITS ON ─────────────────────────────────────────
+#
+# THE BODY GATE ABOVE READS WHAT A PROBE CREATES, NEVER WHAT IT WAITS ON. A probe
+# proves a controller is running only if its `await` reads a condition that
+# controller alone writes, on the object THIS run created. Measured on main
+# (a3037af): pointing the KEDA probe's await at its own Deployment's `Available`
+# — `await "$deployments/$PROBE_NAME" Available True KEDA` — left all 307 tests
+# green. A 0-replica Deployment goes Available with no KEDA controller anywhere,
+# so that probe would pass on a cluster with no KEDA. FAIL-OPEN.
+#
+# So this gate follows each label to its function, reads each `await` call, and
+# resolves the awaited path to the `create` that made it and the HEREDOC body that
+# `create` POSTed. It then compares (apiVersion, kind, condition, status,
+# operator) with an independent restatement. The kind comes from the BODY at the
+# awaited path, not from the path's spelling, so a path retargeted to another
+# object this run created changes the kind the gate reads.
+PROBE_AWAITS = {
+    "cert-manager": [("cert-manager.io/v1", "Certificate", "Ready", "True", "cert-manager")],
+    "keda": [("keda.sh/v1alpha1", "ScaledObject", "Ready", "True|False", "KEDA")],
+    "mariadb-operator": [],
+    "prometheus": [],
+    "envoy-gateway": [
+        ("gateway.networking.k8s.io/v1", "Gateway", "Programmed", "True", "Envoy Gateway"),
+    ],
+}
+
+# `name_body=$(cat <<JSON ... JSON`, and `create "<path>" "<collection>" "$name_body"`.
+NAMED_HEREDOC = re.compile(
+    r"^[ ]*(?P<var>\w+)=\$\(cat <<JSON\s*\n(?P<body>.*?)\n\s*JSON\s*$", re.MULTILINE | re.DOTALL
+)
+CREATE_WITH_BODY = re.compile(r'^[ ]*create "(?P<path>[^"]+)" "[^"]+" "\$(?P<var>\w+)"\s*$', re.MULTILINE)
+AWAIT_LINE = re.compile(r"^[ ]*await\s+(?P<args>.+?)\s*$", re.MULTILINE)
+
+
+def probe_await_failures(job: str, script: str) -> tuple[list[str], int]:
+    """Whether each label's function awaits the condition that label probes. PURE.
+
+    Returns the failures and how many labels were followed.
+    """
+    failures = []
+    arms = {m.group("label"): m.group("function") for m in PROBE_CASE_ARM.finditer(script)}
+    followed = 0
+    for label in probe_list(script):
+        function = arms.get(label)
+        text = lifted_function(script, function) if function else None
+        if text is None or label not in PROBE_AWAITS:
+            failures.append(f"{job}: cannot follow the label {label!r} to a probe function with recorded awaits")
+            continue
+        bodies = {
+            m.group("var"): json.loads(m.group("body")) for m in NAMED_HEREDOC.finditer(text)
+        }
+        created = {m.group("path"): m.group("var") for m in CREATE_WITH_BODY.finditer(text)}
+        found = []
+        for match in AWAIT_LINE.finditer(text):
+            # shlex expands nothing, so the path keeps its `$var/$PROBE_NAME`
+            # spelling, which is how `create` names it too.
+            words = shlex.split(match.group("args"), posix=True)
+            raw_path, condition, status, operator = words[0], words[1], words[2], words[-1]
+            var = created.get(raw_path)
+            if var is None or var not in bodies:
+                failures.append(
+                    f"{job}: the label {label!r} awaits {raw_path}, which {function} did not "
+                    f"create with a body, so the condition it reads was not written for this run"
+                )
+                continue
+            body = bodies[var]
+            found.append((body.get("apiVersion"), body.get("kind"), condition, status, operator))
+        if found != PROBE_AWAITS[label]:
+            failures.append(
+                f"{job}: the label {label!r} runs {function}, which awaits {found}; a "
+                f"{label} probe awaits {PROBE_AWAITS[label]}"
+            )
+        followed += 1
+    return failures, followed
+
+
+def all_probe_await_failures(chart: Path = CHART) -> list[str]:
+    failures = []
+    followed = 0
+    for job, script in every_probe_on_scripts(chart).items():
+        found, count = probe_await_failures(job, script)
+        failures += found
+        followed += count
+    if followed != EXPECTED_LABELS_FOLLOWED:
+        failures.append(
+            f"followed {followed} probe labels to their awaits; with every probe on the "
+            f"two Jobs carry {EXPECTED_LABELS_FOLLOWED}"
+        )
+    return failures
+
+
+def test_each_probe_label_awaits_the_condition_its_operator_writes():
+    failures = all_probe_await_failures()
+    assert failures == [], "\n".join(failures)
+
+
+def test_a_keda_await_on_the_deployment_reddens_the_await_gate(tmp_path):
+    """The measured fail-open: the KEDA probe waiting on its own Deployment."""
+    chart = mutated_chart(
+        tmp_path, "preflight.yaml",
+        'await "$scaledobjects/$PROBE_NAME" Ready "True|False" KEDA',
+        'await "$deployments/$PROBE_NAME" Available True KEDA',
+    )
+    message = "\n".join(all_probe_await_failures(chart))
+    assert (
+        "the label 'keda' runs probe_keda, which awaits "
+        "[('apps/v1', 'Deployment', 'Available', 'True', 'KEDA')]"
+    ) in message, message
+
+
+def test_a_certificate_await_on_another_condition_reddens_the_await_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path, "preflight.yaml",
+        "await \"$certificates/$PROBE_NAME\" Ready True cert-manager",
+        "await \"$certificates/$PROBE_NAME\" Issuing True cert-manager",
+    )
+    message = "\n".join(all_probe_await_failures(chart))
+    assert "'Certificate', 'Issuing', 'True', 'cert-manager'" in message, message
+
+
+def test_an_await_on_an_object_this_run_did_not_create_reddens_the_await_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path, "envoy-gateway-probe.yaml",
+        'await "$gateways/$PROBE_NAME" Programmed',
+        'await "$gateways/edge" Programmed',
+    )
+    message = "\n".join(all_probe_await_failures(chart))
+    assert "the label 'envoy-gateway' awaits $gateways/edge, which probe_envoy_gateway did not create" in message, message
 
 
 # ── R1 — EVERY PROBE RESOLVES FALSE, SO NO JOB RENDERS AT ALL ────────────────
