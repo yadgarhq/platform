@@ -31,9 +31,11 @@ mutation landed would prove nothing about the gate (`test_preflight.py` records 
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 import yaml
@@ -85,10 +87,9 @@ EXEMPT_UPSTREAM_HOOK_JOBS = {
 
 # ── THE LITERALS THE ARITHMETIC IS CHECKED AGAINST ────────────────────────────
 # The margin over a probe Job's composed loops: pod scheduling and the image pull.
-# NOT the request time of every poll: `remove()` and `await()` charge `waited`
-# only the sleep between polls, so this margin does not reliably cover a cluster
-# that answers every poll slowly — `activeDeadlineSeconds` is still the real
-# bound there, it just ends the Job without the script naming the slow operator.
+# Since ledger 1235 the script keeps its own wall-clock budget of exactly the
+# composed loops, so this margin also covers what runs past that budget — the
+# requests in flight and the cleanup — which section 4 below checks it does.
 # The same 300s README.md documents for the helm budget — a stated CEILING, not a
 # measurement.
 PROBE_DEADLINE_MARGIN_SECONDS = 300
@@ -289,7 +290,9 @@ REMOVAL_CALL = re.compile(r'^[ ]*(?:create|remove) "(?P<path>[^"]+)"', re.MULTIL
 AWAIT_CALL = re.compile(r'^[ ]*await "', re.MULTILINE)
 CREATE_CALL = re.compile(r'^[ ]*create "', re.MULTILINE)
 # A bounded loop written out where it is used rather than reached through
-# `remove()` or `await()` — the Prometheus probe's.
+# `remove()` or `await()` — the Prometheus probe's. The two helpers no longer
+# carry this header: since ledger 1235 they loop on the wall clock (`while :;`
+# ended by `in_time`), so every match of it is a loop of its own.
 BOUNDED_WHILE = re.compile(r'^[ ]*while \[ "\$waited" -lt "\$TIMEOUT_SECONDS" \]; do$', re.MULTILINE)
 HELPER_DEFINITIONS = ("remove() {", "await() {")
 # An object recorded for cleanup outside `create()` — the Secret a Certificate writes.
@@ -365,7 +368,7 @@ def bounded_loops(script: str) -> int:
     for helper in HELPER_DEFINITIONS:
         assert helper in script, f"the rendered script no longer defines {helper}"
     removed = {m.group("path") for m in REMOVAL_CALL.finditer(script) if m.group("path") != "$1"}
-    inline = len(BOUNDED_WHILE.findall(script)) - len(HELPER_DEFINITIONS)
+    inline = len(BOUNDED_WHILE.findall(script))
     return len(removed) + len(AWAIT_CALL.findall(script)) + inline
 
 
@@ -876,3 +879,471 @@ def test_a_zero_bootstrap_max_time_reddens_the_curl_value_gate(tmp_path):
         "admin-bootstrap-token: --max-time resolves to REQUEST_MAX_TIME=0, not a "
         "positive timeout" in message
     ), message
+
+
+# ── 4. THE WALL CLOCK: A SLOW API SERVER IS STILL NAMED BEFORE THE DEADLINE ──
+#
+# LEDGER 1235. `remove()` and `await()` used to bound their loops with a counter
+# charged only the sleep between polls (`waited += POLL_SECONDS`), never the poll's
+# own request. Against an API server that answers every poll in 34s, a 120s loop
+# ran 40 polls — about 1480s of real time — so `activeDeadlineSeconds`, not the
+# script, ended the Job, and the pod died with no operator named.
+#
+# The gates below RUN the rendered loops against a fake `curl` that advances a fake
+# clock by SLOW_REQUEST_SECONDS per request, and fake `date` and `sleep` that read
+# and advance the same clock. The clock lives in a FILE because `request()` runs
+# `curl` inside `$( )`, a subshell, where a shell variable would not survive.
+#
+#   (a) THE LOOP'S OWN BOUND. One `remove` and one `await` against requests that
+#       never succeed end within TIMEOUT_SECONDS + POLL_SECONDS + REQUEST_MAX_TIME
+#       of their start, and the failure names what was slow.
+#   (b) THE SCRIPT'S BUDGET. Started with less of SCRIPT_BUDGET_SECONDS left than
+#       one loop's own bound, the loop ends by SCRIPT_DEADLINE + the worst overrun,
+#       max(POLL_SECONDS + 2 x REQUEST_MAX_TIME, 3 x REQUEST_MAX_TIME) — the second
+#       is a `create` entered just before the deadline — and says the BUDGET ended
+#       it rather than claiming the operator is dead. A loop entered with no budget
+#       left does not poll at all.
+#   (c) THE ARITHMETIC. SCRIPT_BUDGET_SECONDS is the recounted loops x
+#       TIMEOUT_SECONDS, and the Job's deadline covers that budget, the worst
+#       overrun past it, and the cleanup.
+
+# Slow, and still under `--max-time`: the case a counter of sleeps cannot see.
+SLOW_REQUEST_SECONDS = 34
+CLOCK_START = 1_000_000
+
+# A shell function the rendered script defines, lifted whole (the same shape
+# `test_preflight.py`'s `REQUEST_FUNCTION` lifts `request()` with).
+SHELL_FUNCTION = re.compile(
+    r"^(?P<indent>[ ]*)(?P<name>[a-z_]+)\(\) \{\n(?:.*\n)*?(?P=indent)\}$",
+    re.MULTILINE,
+)
+# Functions the harness must not lift: the probes themselves, and the cleanup,
+# which reads a CREATED list the harness never builds.
+NOT_LIFTED = re.compile(r"^(?:probe_\w+|cleanup)$")
+QUOTED_ASSIGNMENT = re.compile(r"^[ ]*(?:USER_AGENT|PROGRAMMED_MESSAGE)=.*$", re.MULTILINE)
+SCRIPT_DEADLINE_ASSIGNMENT = re.compile(r"^[ ]*SCRIPT_DEADLINE=.*$", re.MULTILINE)
+
+FAKE_CLOCK = r"""
+advance() {
+  echo $(( $(cat "$CLOCK") + $1 )) >"$CLOCK"
+}
+date() {
+  cat "$CLOCK"
+}
+sleep() {
+  advance "$1"
+}
+curl() {
+  calls=$(( $(cat "$CALLS") + 1 ))
+  echo "$calls" >"$CALLS"
+  if [ "$calls" -gt 10000 ]; then
+    echo "harness: 10000 requests, the loop is unbounded" >&2
+    exit 99
+  fi
+  advance "$SLOW"
+  out=''
+  method=GET
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output|-o) out="$2"; shift 2 ;;
+      --request|-X) method="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '{}' >"$out"
+  # A REQUEST THAT RUNS INTO `--max-time`: curl writes `000` and exits 28.
+  if [ "${CURL_EXIT:-0}" != 0 ]; then
+    echo "curl: (28) Operation timed out" >&2
+    printf '000'
+    return "$CURL_EXIT"
+  fi
+  case "$method" in
+    GET) printf '%s' "${GET_STATUS:-200}" ;;
+    POST) printf '%s' "${POST_STATUS:-201}" ;;
+    *) printf '200' ;;
+  esac
+}
+"""
+
+# What each script's `await` is called with, by script: a needle the fake's `{}`
+# body never satisfies, and the operator the failure must name.
+AWAIT_DRIVERS = {
+    "preflight": ('await "/apis/probe.invalid/v1/probes/slow" Ready True cert-manager', "cert-manager"),
+    "envoy-gateway-probe": (
+        'await "/apis/probe.invalid/v1/probes/slow" Programmed True "never written" "Envoy Gateway"',
+        "Envoy Gateway",
+    ),
+}
+REMOVE_PATH = "/apis/probe.invalid/v1/probes/stuck"
+
+
+def slow_api_harness(script: str, driver: str, spend: str = "", strict: bool = False) -> str:
+    """The rendered script's constants and helpers over a slow fake API server.
+
+    `spend` is shell run after the script's own clock starts and before the driver,
+    so a gate can use up part of the budget first. PURE.
+    """
+    lines = [
+        "set -eu",
+        'api="https://kubernetes.default.svc"',
+        'sa="/var/run/secrets/kubernetes.io/serviceaccount"',
+        'ns="yadgar"',
+        'token="a-token-the-fake-never-reads"',
+        'body="$SCRATCH/answer"',
+        'STATUS=""',
+        'CREATED=""',
+        FAKE_CLOCK,
+    ]
+    lines += [m.group(0).strip() for m in VARIABLE_LITERAL.finditer(script)]
+    lines += [m.group(0).strip() for m in QUOTED_ASSIGNMENT.finditer(script)]
+    # ABSENT IS NOT AN ERROR HERE: before ledger 1235 there was no script clock, and
+    # gate (a) has to RUN in that state to be red for the right reason.
+    lines += [m.group(0).strip() for m in SCRIPT_DEADLINE_ASSIGNMENT.finditer(script)]
+    for function in SHELL_FUNCTION.finditer(script):
+        if not NOT_LIFTED.match(function.group("name")):
+            lines.append(textwrap.dedent(function.group(0)))
+    if strict:
+        # `set -e` STAYS ON, as it is in the Job: the driver is a plain top-level
+        # command, so a failing request inside it ends the script exactly as it
+        # would in the pod. `|| status=$?` would switch `set -e` off for the whole
+        # call and hide that.
+        lines += [
+            spend,
+            'started_at="$(date)"',
+            'trap \'echo "$(( $(date) - started_at )) $?" >"$SCRATCH/result"\' EXIT',
+            driver,
+            "",
+        ]
+        return "\n".join(lines)
+    lines += [
+        spend,
+        'started_at="$(date)"',
+        'status=0',
+        f"{driver} || status=$?",
+        'echo "$(( $(date) - started_at )) $status" >"$SCRATCH/result"',
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_slow(
+    script: str, driver: str, scratch: Path, spend: str = "", strict: bool = False, **fake: str
+):
+    """Run one driver; return (elapsed fake seconds, its status, stderr).
+
+    `fake` sets the fake API server's answers: GET_STATUS, POST_STATUS, CURL_EXIT.
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "clock").write_text(f"{CLOCK_START}\n")
+    (scratch / "calls").write_text("0\n")
+    harness = scratch / "harness.sh"
+    harness.write_text(slow_api_harness(script, driver, spend, strict))
+    binary = shutil.which("sh")
+    assert binary, "no POSIX shell is on PATH; the probe's container runs these loops under `sh`"
+    result = subprocess.run(
+        [binary, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "SCRATCH": str(scratch),
+            "CLOCK": str(scratch / "clock"),
+            "CALLS": str(scratch / "calls"),
+            "SLOW": str(SLOW_REQUEST_SECONDS),
+            **fake,
+        },
+    )
+    assert (scratch / "result").exists(), (
+        f"the harness did not reach its driver: rc={result.returncode} {result.stderr}"
+    )
+    elapsed, status = (int(word) for word in (scratch / "result").read_text().split())
+    return elapsed, status, result.stderr
+
+
+def probe_scripts(chart: Path = CHART) -> dict[str, str]:
+    documents = estate_render(chart)
+    return {name: script_of(job_named(documents, name)) for name in PROBE_JOBS}
+
+
+def loop_bound_failures(name: str, script: str, scratch: Path) -> list[str]:
+    """(a): each loop ends on the wall clock, near its own bound. PURE but for scratch."""
+    timeout = script_number(script, "TIMEOUT_SECONDS")
+    poll = script_number(script, "POLL_SECONDS")
+    request = script_number(script, "REQUEST_MAX_TIME")
+    ceiling = timeout + poll + request
+    failures = []
+    driver, operator = AWAIT_DRIVERS[name]
+    for label, call, needle in (
+        ("remove", f'remove "{REMOVE_PATH}"', REMOVE_PATH),
+        ("await", driver, operator),
+    ):
+        elapsed, status, stderr = run_slow(script, call, scratch / label)
+        if status == 0:
+            failures.append(f"{name}: {label} against a server that never answers succeeded")
+        if elapsed > ceiling:
+            failures.append(
+                f"{name}: {label} ran {elapsed}s of real time against a {SLOW_REQUEST_SECONDS}s-"
+                f"per-request API server; its own bound is {timeout}s, so it must end by "
+                f"{ceiling}s ({timeout} + {poll}s poll + {request}s request in flight)"
+            )
+        if needle not in stderr:
+            failures.append(f"{name}: {label}'s failure does not name {needle!r}: {stderr!r}")
+    return failures
+
+
+def test_each_loop_ends_on_the_wall_clock_against_a_slow_api_server(tmp_path):
+    failures = []
+    for name, script in probe_scripts().items():
+        failures += loop_bound_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+def budget_clamp_failures(name: str, script: str, scratch: Path) -> list[str]:
+    """(b): a loop started late ends at the script's budget, and says so."""
+    assert SCRIPT_DEADLINE_ASSIGNMENT.search(script), (
+        f"{name}: the rendered script sets no SCRIPT_DEADLINE, so no loop can be "
+        f"bounded by the script's own budget"
+    )
+    budget = script_number(script, "SCRIPT_BUDGET_SECONDS")
+    poll = script_number(script, "POLL_SECONDS")
+    request = script_number(script, "REQUEST_MAX_TIME")
+    left = 10
+    ceiling = left + worst_overrun(poll, request)
+    failures = []
+    driver, operator = AWAIT_DRIVERS[name]
+    elapsed, status, stderr = run_slow(script, driver, scratch / "late", spend=f"advance {budget - left}")
+    if status == 0:
+        failures.append(f"{name}: an await started {left}s before the budget ran out succeeded")
+    if elapsed > ceiling:
+        failures.append(
+            f"{name}: an await started with {left}s of the {budget}s budget left ran "
+            f"{elapsed}s; it must end by {ceiling}s ({left} + max({poll}s poll + 2 x "
+            f"{request}s, 3 x {request}s))"
+        )
+    if "budget" not in stderr or operator not in stderr:
+        failures.append(
+            f"{name}: an await ended by the script's budget must name {operator!r} and say "
+            f"the budget ended it, not that the controller is dead: {stderr!r}"
+        )
+    if "CONTROLLER is not running" in stderr:
+        failures.append(
+            f"{name}: an await ended by the script's budget claims the controller is not "
+            f"running, which an earlier slow probe can cause as well: {stderr!r}"
+        )
+    elapsed, status, stderr = run_slow(
+        script, f'remove "{REMOVE_PATH}"', scratch / "spent", spend=f"advance {budget}"
+    )
+    if status == 0 or elapsed > 0:
+        failures.append(
+            f"{name}: a remove entered with the budget spent ran {elapsed}s and returned "
+            f"{status}; it must fail at once, before its first request"
+        )
+    if "budget" not in stderr:
+        failures.append(f"{name}: a remove refused for want of budget does not say so: {stderr!r}")
+    # THE LONGEST PATH PAST THE BUDGET: a `create` whose `remove` passes its entry
+    # check one second before the deadline, then a DELETE, a GET that answers 404,
+    # and the POST — three requests in flight, none of them checked against the
+    # clock. The objects are gone at once (GET 404), so nothing loops.
+    elapsed, status, stderr = run_slow(
+        script, f'create "{REMOVE_PATH}" "/apis/probe.invalid/v1/probes" "{{}}"',
+        scratch / "create-late", spend=f"advance {budget - 1}", GET_STATUS="404",
+    )
+    ceiling = 1 + worst_overrun(poll, request)
+    if elapsed > ceiling:
+        failures.append(
+            f"{name}: a create entered 1s before the budget ran out ran {elapsed}s; the "
+            f"stated worst overrun is max({poll}s poll + 2 x {request}s, 3 x {request}s), "
+            f"so it must end by {ceiling}s"
+        )
+    if elapsed < 3 * SLOW_REQUEST_SECONDS:
+        failures.append(
+            f"{name}: a create entered 1s before the budget ran out ran only {elapsed}s, "
+            f"so it did not make the three requests this row exists to measure"
+        )
+    return failures
+
+
+def test_a_loop_started_late_ends_at_the_scripts_budget(tmp_path):
+    failures = []
+    for name, script in probe_scripts().items():
+        failures += budget_clamp_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+def worst_overrun(poll: int, request: int) -> int:
+    """The longest a script runs past SCRIPT_DEADLINE before it can end.
+
+    Two paths, whichever is longer. A loop that passed its clock check just before
+    the deadline sleeps one poll and makes one request, after a request already in
+    flight: poll + 2 requests. A `create` whose `remove` passed its entry check
+    just before the deadline makes a DELETE, a GET that answers 404 and its POST
+    with no check between: 3 requests. At production values that is 3 x 35 = 105s.
+    """
+    return max(poll + 2 * request, 3 * request)
+
+
+def budget_arithmetic_failures(job: dict) -> list[str]:
+    """(c): the budget is the recounted loops, and the deadline covers its overrun."""
+    name = job["metadata"]["name"]
+    script = script_of(job)
+    loops = bounded_loops(script)
+    timeout = script_number(script, "TIMEOUT_SECONDS")
+    budget = script_number(script, "SCRIPT_BUDGET_SECONDS")
+    poll = script_number(script, "POLL_SECONDS")
+    request = script_number(script, "REQUEST_MAX_TIME")
+    cleanup = script_number(script, "CLEANUP_MAX_TIME")
+    objects = cleanup_objects(script)
+    failures = []
+    if budget != loops * timeout:
+        failures.append(
+            f"{name}: SCRIPT_BUDGET_SECONDS is {budget} and the script runs {loops} "
+            f"bounded loops x {timeout}s = {loops * timeout}s"
+        )
+    overrun = worst_overrun(poll, request)
+    needed = budget + overrun + objects * cleanup
+    deadline = job["spec"]["activeDeadlineSeconds"]
+    if deadline <= needed:
+        failures.append(
+            f"{name}: activeDeadlineSeconds {deadline} does not exceed the script's "
+            f"{budget}s budget + {overrun}s worst overrun (max of {poll}s poll + 2 x "
+            f"{request}s and 3 x {request}s) + {objects} objects x {cleanup}s cleanup "
+            f"= {needed}s, so the deadline can still end the Job before the script "
+            f"names the slow operator"
+        )
+    return failures
+
+
+def test_each_probe_deadline_covers_its_scripts_budget_and_overrun():
+    documents = estate_render()
+    failures = []
+    for name in PROBE_JOBS:
+        failures += budget_arithmetic_failures(job_named(documents, name))
+    assert failures == [], "\n".join(failures)
+
+
+# THE RED CASES, one per half of the fix. Each mutates BOTH templates, since the
+# helpers are duplicated rather than shared, and asserts the message for each.
+
+CLAMP = """                if [ "$ends" -gt "$SCRIPT_DEADLINE" ]; then
+                  ends="$SCRIPT_DEADLINE"
+                fi
+"""
+COUNTER_LOOP_PATTERN = ("                  in_time || break\n", "                  [ \"$((now=$(date +%s)))\" ] && [ \"$((polls=${polls:-0}+1))\" -le \"$((TIMEOUT_SECONDS / POLL_SECONDS))\" ] || break\n")
+
+
+def chart_with_both_templates_mutated(destination: Path, old: str, new: str) -> Path:
+    copy = chart_copy(destination)
+    for template in ("preflight.yaml", "envoy-gateway-probe.yaml"):
+        path = copy / "templates" / template
+        text = path.read_text()
+        assert old in text, f"{template} no longer carries {old!r}; this red case tests nothing"
+        path.write_text(text.replace(old, new))
+    return copy
+
+
+def test_counting_polls_instead_of_the_clock_reddens_the_loop_gate(tmp_path):
+    """The defect's own shape: a loop bounded by how many polls it made, which
+    charges each poll only its sleep, however long its request took."""
+    copy = chart_with_both_templates_mutated(tmp_path, *COUNTER_LOOP_PATTERN)
+    failures = []
+    for name, script in probe_scripts(copy).items():
+        failures += loop_bound_failures(name, script, tmp_path / "run" / name)
+    message = "\n".join(failures)
+    assert re.search(r"preflight: await ran \d{4}s of real time .* must end by 158s", message), message
+    assert re.search(r"envoy-gateway-probe: await ran \d{4}s of real time .* must end by 338s", message), message
+
+
+def test_deleting_the_budget_clamp_reddens_the_budget_gate_alone(tmp_path):
+    copy = chart_with_both_templates_mutated(tmp_path, CLAMP, "")
+    scripts = probe_scripts(copy)
+    clamp = []
+    loop = []
+    for name, script in scripts.items():
+        clamp += budget_clamp_failures(name, script, tmp_path / "clamp" / name)
+        loop += loop_bound_failures(name, script, tmp_path / "loop" / name)
+    message = "\n".join(clamp)
+    assert "preflight: an await started with 10s of the 960s budget left ran" in message, message
+    assert "envoy-gateway-probe: an await started with 10s of the 900s budget left ran" in message, message
+    assert loop == [], "\n".join(loop)
+
+
+def test_dropping_the_entry_check_reddens_the_budget_gate(tmp_path):
+    copy = chart_copy(tmp_path)
+    for template in ("preflight.yaml", "envoy-gateway-probe.yaml"):
+        path = copy / "templates" / template
+        text = path.read_text()
+        entry = re.compile(r"(remove\(\) \{\n\s*bound\n)\s*if ! in_time; then\n.*?\n\s*return 1\n\s*fi\n", re.DOTALL)
+        assert entry.search(text), f"{template}: remove() no longer opens with the entry check"
+        path.write_text(entry.sub(r"\1", text, count=1))
+    failures = []
+    for name, script in probe_scripts(copy).items():
+        failures += budget_clamp_failures(name, script, tmp_path / "run" / name)
+    message = "\n".join(failures)
+    assert "preflight: a remove entered with the budget spent ran" in message, message
+    assert "envoy-gateway-probe: a remove entered with the budget spent ran" in message, message
+
+
+def test_a_budget_out_of_step_with_the_loops_reddens_the_arithmetic(tmp_path):
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "preflight.yaml",
+        "SCRIPT_BUDGET_SECONDS={{ mul $loops $preflight.timeoutSeconds }}",
+        "SCRIPT_BUDGET_SECONDS={{ mul (add $loops 3) $preflight.timeoutSeconds }}",
+    )
+    message = "\n".join(budget_arithmetic_failures(job_named(estate_render(copy), "preflight")))
+    assert "preflight: SCRIPT_BUDGET_SECONDS is 1320 and the script runs 8 bounded loops x 120s = 960s" in message, message
+    assert "preflight: activeDeadlineSeconds 1260 does not exceed" in message, message
+
+
+def test_a_margin_under_the_three_request_overrun_reddens_the_arithmetic(tmp_path):
+    """A margin that covers poll + 2 requests and not 3 requests must go red.
+
+    At 120s the preflight needs 960 + 105 + 25 = 1090s and gets 1080s; the old
+    poll + 2 x request bound (73s) would have accepted it at 1058s.
+    """
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "_preflight.tpl",
+        '"platform.hookDeadline.probeMargin" -}}300{{',
+        '"platform.hookDeadline.probeMargin" -}}120{{',
+    )
+    message = "\n".join(budget_arithmetic_failures(job_named(estate_render(copy), "preflight")))
+    assert "preflight: activeDeadlineSeconds 1080 does not exceed" in message, message
+    assert "105s worst overrun" in message, message
+
+
+# A REQUEST THAT RUNS INTO `--max-time` (curl exit 28). Both scripts run `set -eu`,
+# so before this a timed-out poll ended the Job at once with only curl's
+# `curl: (28) ...` on stderr — no operator, no path. A poll that times out is a
+# slow answer: it is retried within the bound, and the failure at the bound names
+# what was being waited on. Run with `set -e` ON (strict harness).
+
+def timed_out_request_failures(name: str, script: str, scratch: Path) -> list[str]:
+    driver, operator = AWAIT_DRIVERS[name]
+    timeout = script_number(script, "TIMEOUT_SECONDS")
+    poll = script_number(script, "POLL_SECONDS")
+    request = script_number(script, "REQUEST_MAX_TIME")
+    failures = []
+    for label, call, needle in (
+        ("remove", f'remove "{REMOVE_PATH}"', REMOVE_PATH),
+        ("await", driver, operator),
+        ("create", f'create "{REMOVE_PATH}" "/apis/probe.invalid/v1/probes" "{{}}"', REMOVE_PATH),
+    ):
+        elapsed, status, stderr = run_slow(script, call, scratch / label, strict=True, CURL_EXIT="28")
+        if status == 0:
+            failures.append(f"{name}: {label} with every request timing out succeeded")
+        if needle not in stderr:
+            failures.append(
+                f"{name}: {label} with every request timing out ended (status {status}) "
+                f"without naming {needle!r}: {stderr!r}"
+            )
+        if elapsed > timeout + poll + request:
+            failures.append(f"{name}: {label} ran {elapsed}s past its {timeout}s bound")
+    return failures
+
+
+def test_a_timed_out_request_is_retried_and_the_failure_names_what_was_awaited(tmp_path):
+    failures = []
+    for name, script in probe_scripts().items():
+        failures += timed_out_request_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)

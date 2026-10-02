@@ -497,8 +497,10 @@ def test_the_charts_default_interval_reddens_the_scrape_gate(tmp_path):
 REMOVAL_CALL = re.compile(r'^[ ]*(?:create|remove) "(?P<path>[^"]+)"', re.MULTILINE)
 AWAIT_CALL = re.compile(r'^[ ]*await "', re.MULTILINE)
 BOUNDED_WHILE = re.compile(r'^[ ]*while \[ "\$waited" -lt "\$TIMEOUT_SECONDS" \]', re.MULTILINE)
-# `remove()` and `await()` each own one `while`, counted through their calls.
-HELPER_LOOPS = 2
+# `remove()` and `await()` are counted through their calls. Since ledger 1235
+# they loop on the wall clock (`while :;`), so they carry none of the `while`
+# headers this counts and nothing is subtracted for them.
+HELPER_LOOPS = 0
 BUDGET_MARGIN_SECONDS = 300
 TIMEOUT_FLAG = re.compile(r"--timeout\s+(?P<budget>\d+)m\b")
 BUDGET_FILES = (REPO / "README.md", ADOPTER_VALUES)

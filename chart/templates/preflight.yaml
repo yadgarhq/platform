@@ -97,15 +97,17 @@ spec:
   # More attempts would only multiply the bound before the install is allowed to
   # fail.
   backoffLimit: {{ $preflight.backoffLimit }}
-  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AND IT IS THE REAL BOUND RATHER
-  # THAN A BACKSTOP BEHIND ONE THE SCRIPT KEEPS ITSELF. It covers everything the
-  # script cannot see — a pod that never schedules, an image that never pulls —
-  # so the sync fails here instead of waiting on Argo's sync timeout. `remove()`
-  # and `await()` charge `waited` only the sleep between polls, never the poll's
-  # own request, so a cluster answering every poll slowly can run this script past
-  # {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s of real time before the script's own check does
-  # — and on a cluster slow enough for that, this deadline ends the Job with no
-  # operator named: {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
+  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AS A BACKSTOP BEHIND THE ONE THE
+  # SCRIPT KEEPS ITSELF. It covers everything the script cannot see — a pod that
+  # never schedules, an image that never pulls — so the sync fails here instead
+  # of waiting on Argo's sync timeout. The script reads the WALL CLOCK (ledger
+  # 1235): every loop ends by its own `TIMEOUT_SECONDS` or by the script's
+  # `SCRIPT_BUDGET_SECONDS` of {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s, whichever comes first, so
+  # on a slow API server the script names the slow operator and cleans up before
+  # this fires. The margin covers scheduling, the image pull, the worst overrun
+  # past the budget — max(poll + 2 requests, 3 requests), 105s at the 35s request
+  # bound — and the cleanup (`test_hook_deadlines.py` checks it):
+  # {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
   activeDeadlineSeconds: {{ $deadline }}
   template:
     metadata:
@@ -166,6 +168,14 @@ spec:
 
               TIMEOUT_SECONDS={{ $preflight.timeoutSeconds }}
               POLL_SECONDS={{ $preflight.pollSeconds }}
+              # THE SCRIPT'S OWN WALL-CLOCK BUDGET (ledger 1235): every bounded
+              # loop it can run, each at `TIMEOUT_SECONDS`. Read off `date`, never
+              # off a counter of sleeps — a counter charged only the sleep let a
+              # loop against an API server answering each poll in 34s run 1480s
+              # of a 120s bound, and the Job deadline ended it with no operator
+              # named. The deadline above is this budget + the margin.
+              SCRIPT_BUDGET_SECONDS={{ mul $loops $preflight.timeoutSeconds }}
+              SCRIPT_DEADLINE=$(( $(date +%s) + SCRIPT_BUDGET_SECONDS ))
               PROBE_NAME={{ $preflight.probeName }}
               # EVERY REQUEST ENDS. `_preflight.tpl` records why each number is
               # what it is; the cleanup swaps in the shorter one.
@@ -283,29 +293,69 @@ spec:
               # the signal into an ordinary exit, and the EXIT trap then cleans up.
               trap 'exit 143' TERM INT
 
+              # ── THE WALL CLOCK EVERY BOUNDED LOOP READS ───────────────────
+              # `bound` starts a loop: it ends at the EARLIER of its own
+              # `TIMEOUT_SECONDS` and the script's `SCRIPT_DEADLINE`. `in_time`
+              # reads the clock after each poll — the poll's own request counts,
+              # which is the whole fix — and a loop entered with no budget left
+              # makes no request at all, so requests cannot stack up past the
+              # budget. `clamped` says which of the two bounds ended a loop: a loop
+              # cut short by the budget is not evidence its operator is dead,
+              # because the probes before it may have been the slow ones.
+              bound() {
+                started="$(date +%s)"
+                ends=$((started + TIMEOUT_SECONDS))
+                if [ "$ends" -gt "$SCRIPT_DEADLINE" ]; then
+                  ends="$SCRIPT_DEADLINE"
+                fi
+              }
+              in_time() {
+                now="$(date +%s)"
+                [ "$now" -lt "$ends" ]
+              }
+              clamped() {
+                [ "$ends" -lt "$((started + TIMEOUT_SECONDS))" ]
+              }
+
               # DELETE ANY OBJECT OF THIS NAME AND WAIT FOR IT TO BE GONE BEFORE
               # CREATING OURS. The names are FIXED, so a Job killed between create
               # and cleanup — a node eviction, an `OOMKilled` — leaks at most one
               # object of each name, and this is what makes the next run remove it
               # rather than collide with it.
               remove() {
-                waited=0
+                bound
+                if ! in_time; then
+                  echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget was spent before $1 could be removed; the probes before this one were slow." >&2
+                  return 1
+                fi
                 request DELETE "$1" "" || true
-                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
-                  request GET "$1" ""
+                while :; do
+                  # A POLL THAT TIMES OUT IS A SLOW ANSWER, NOT THE END (ledger
+                  # 1235). Under `set -e` a request past `--max-time` would end
+                  # the script with only curl's own `(28)`; here it leaves
+                  # `STATUS` at `000` and the loop polls again inside its bound.
+                  request GET "$1" "" || true
                   if [ "$STATUS" = "404" ]; then
                     return 0
                   fi
+                  in_time || break
                   sleep "$POLL_SECONDS"
-                  waited=$((waited + POLL_SECONDS))
                 done
-                echo "preflight: $1 was still present ${waited}s after a delete" >&2
+                if [ "$STATUS" = "000" ]; then
+                  echo "preflight: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                else
+                  echo "preflight: $1 was still present $((now - started))s after a delete" >&2
+                fi
+                if clamped; then
+                  echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound." >&2
+                fi
                 return 1
               }
 
               create() {
                 remove "$1"
-                request POST "$2" "$3"
+                # A timed-out POST answers `000` and is named by the check below.
+                request POST "$2" "$3" || true
                 if [ "$STATUS" != "201" ]; then
                   echo "preflight: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -335,17 +385,28 @@ spec:
                 kind="$2"
                 wanted="$3"
                 operator="$4"
-                waited=0
-                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
-                  request GET "$path" ""
+                bound
+                if ! in_time; then
+                  echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget was spent before $operator's $kind on $path could be read; the probes before this one were slow, so $operator is not shown to be down." >&2
+                  return 1
+                fi
+                while :; do
+                  # A timed-out poll leaves `STATUS` at `000` and is polled again.
+                  request GET "$path" "" || true
                   if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted"; then
                     return 0
                   fi
+                  in_time || break
                   sleep "$POLL_SECONDS"
-                  waited=$((waited + POLL_SECONDS))
                 done
-                echo "preflight: $operator did not set $kind on $path within ${waited}s." >&2
-                echo "preflight: its API is registered or this probe could not have created the object, so $operator's CONTROLLER is not running." >&2
+                echo "preflight: $operator did not set $kind on $path within $((now - started))s." >&2
+                if clamped; then
+                  echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the probes before this one were slow, so $operator is not shown to be down." >&2
+                elif [ "$STATUS" = "000" ]; then
+                  echo "preflight: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
+                else
+                  echo "preflight: its API is registered or this probe could not have created the object, so $operator's CONTROLLER is not running." >&2
+                fi
                 return 1
               }
 {{- if has "cert-manager" $probes }}
@@ -575,6 +636,10 @@ spec:
                 waited=0
                 code=""
                 while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
+                  # THE SCRIPT'S BUDGET BOUNDS THIS LOOP TOO (ledger 1235): its
+                  # own charge is a true bound on its own time, but it is the last
+                  # probe, and the budget is what keeps the Job deadline unused.
+                  [ "$(date +%s)" -lt "$SCRIPT_DEADLINE" ] || break
                   code="$(curl --silent --output "$body" --write-out '%{http_code}' \
                     --connect-timeout "$CONNECT_TIMEOUT" \
                     --max-time "$PROMETHEUS_MAX_TIME" --user-agent "$USER_AGENT" \
@@ -586,6 +651,9 @@ spec:
                   waited=$((waited + POLL_SECONDS + PROMETHEUS_MAX_TIME))
                 done
                 echo "preflight: Prometheus at $PROMETHEUS_ADDRESS did not answer ready within ${waited}s (last HTTP status: ${code:-none})." >&2
+                if [ "$(date +%s)" -ge "$SCRIPT_DEADLINE" ]; then
+                  echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait; the probes before this one were slow." >&2
+                fi
                 echo "preflight: expected HTTP 200 carrying: $PROMETHEUS_READY" >&2
                 echo "preflight: the module ScaledObjects query this address; install Prometheus there (operators.prometheus.create) or point preflight.prometheus.address and the modules' autoscaling.prometheusAddress at yours." >&2
                 return 1

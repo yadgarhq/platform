@@ -148,15 +148,16 @@ spec:
   # become "it is running" on the second attempt. More attempts would only multiply
   # the bound before the release is allowed to fail.
   backoffLimit: {{ $preflight.backoffLimit }}
-  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AND IT IS THE REAL BOUND RATHER
-  # THAN A BACKSTOP BEHIND ONE THE SCRIPT KEEPS ITSELF — for everything the script
-  # cannot see: a pod that never schedules, an image that never pulls. `remove()`
-  # and `await()` here charge `waited` only the sleep between polls, never the
-  # poll's own request, so a cluster answering every poll slowly can run this
-  # script past {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s before this deadline does, and on
-  # a cluster that slow this ends the Job without naming Envoy Gateway. It still
-  # ends inside the documented helm budget, so helm reports a failure rather than
-  # its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
+  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AS A BACKSTOP BEHIND THE ONE THE
+  # SCRIPT KEEPS ITSELF — for everything the script cannot see: a pod that never
+  # schedules, an image that never pulls. The script reads the WALL CLOCK (ledger
+  # 1235): every loop ends by its own `TIMEOUT_SECONDS` or by the script's
+  # `SCRIPT_BUDGET_SECONDS` of {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s, whichever comes first, so
+  # on a slow API server the script names Envoy Gateway and deletes its Gateway
+  # before this fires. The margin covers scheduling, the image pull, the worst
+  # overrun past the budget — max(poll + 2 requests, 3 requests), 105s at the 35s
+  # request bound — and the cleanup (`test_hook_deadlines.py` checks it). It still ends inside the documented helm budget, so helm reports a
+  # failure rather than its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
   activeDeadlineSeconds: {{ $deadline }}
   template:
     metadata:
@@ -217,6 +218,14 @@ spec:
 
               TIMEOUT_SECONDS={{ $probe.timeoutSeconds }}
               POLL_SECONDS={{ $preflight.pollSeconds }}
+              # THE SCRIPT'S OWN WALL-CLOCK BUDGET (ledger 1235): every bounded
+              # loop it can run, each at `TIMEOUT_SECONDS`. Read off `date`, never
+              # off a counter of sleeps — a counter charged only the sleep let a
+              # loop against an API server answering each poll in 34s run 3700s
+              # of a 300s bound, and the Job deadline ended it with Envoy Gateway
+              # never named. The deadline above is this budget + the margin.
+              SCRIPT_BUDGET_SECONDS={{ mul $loops $probe.timeoutSeconds }}
+              SCRIPT_DEADLINE=$(( $(date +%s) + SCRIPT_BUDGET_SECONDS ))
               PROBE_NAME={{ $probe.probeName }}
               # EVERY REQUEST ENDS. `_preflight.tpl` records why each number is
               # what it is; the cleanup swaps in the shorter one.
@@ -339,6 +348,28 @@ spec:
               # the signal into an ordinary exit, and the EXIT trap then cleans up.
               trap 'exit 143' TERM INT
 
+              # ── THE WALL CLOCK EVERY BOUNDED LOOP READS ───────────────────
+              # The preflight Job's three helpers, taken rather than re-derived.
+              # `bound` starts a loop: it ends at the EARLIER of its own
+              # `TIMEOUT_SECONDS` and the script's `SCRIPT_DEADLINE`. `in_time`
+              # reads the clock after each poll — the poll's own request counts —
+              # and a loop entered with no budget left makes no request at all.
+              # `clamped` says the budget, not the loop's own bound, ended it.
+              bound() {
+                started="$(date +%s)"
+                ends=$((started + TIMEOUT_SECONDS))
+                if [ "$ends" -gt "$SCRIPT_DEADLINE" ]; then
+                  ends="$SCRIPT_DEADLINE"
+                fi
+              }
+              in_time() {
+                now="$(date +%s)"
+                [ "$now" -lt "$ends" ]
+              }
+              clamped() {
+                [ "$ends" -lt "$((started + TIMEOUT_SECONDS))" ]
+              }
+
               # DELETE ANY OBJECT OF THIS NAME AND WAIT FOR IT TO BE GONE BEFORE
               # CREATING OURS. This is what keeps the probe FRESH as well as what
               # bounds a leak: a Gateway left by a killed Job carries a status a
@@ -346,23 +377,39 @@ spec:
               # already-persisted-condition defect the pre-install probe was
               # dropped for.
               remove() {
-                waited=0
+                bound
+                if ! in_time; then
+                  echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget was spent before $1 could be removed." >&2
+                  return 1
+                fi
                 request DELETE "$1" "" || true
-                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
-                  request GET "$1" ""
+                while :; do
+                  # A POLL THAT TIMES OUT IS A SLOW ANSWER, NOT THE END (ledger
+                  # 1235). Under `set -e` a request past `--max-time` would end
+                  # the script with only curl's own `(28)`; here it leaves
+                  # `STATUS` at `000` and the loop polls again inside its bound.
+                  request GET "$1" "" || true
                   if [ "$STATUS" = "404" ]; then
                     return 0
                   fi
+                  in_time || break
                   sleep "$POLL_SECONDS"
-                  waited=$((waited + POLL_SECONDS))
                 done
-                echo "envoy-gateway-probe: $1 was still present ${waited}s after a delete" >&2
+                if [ "$STATUS" = "000" ]; then
+                  echo "envoy-gateway-probe: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                else
+                  echo "envoy-gateway-probe: $1 was still present $((now - started))s after a delete" >&2
+                fi
+                if clamped; then
+                  echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound." >&2
+                fi
                 return 1
               }
 
               create() {
                 remove "$1"
-                request POST "$2" "$3"
+                # A timed-out POST answers `000` and is named by the check below.
+                request POST "$2" "$3" || true
                 if [ "$STATUS" != "201" ]; then
                   echo "envoy-gateway-probe: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -414,19 +461,30 @@ spec:
                 wanted="$3"
                 message="$4"
                 operator="$5"
-                waited=0
-                while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
-                  request GET "$path" ""
+                bound
+                if ! in_time; then
+                  echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget was spent before $operator's $kind on $path could be read; the removals before it were slow, so $operator is not shown to be down." >&2
+                  return 1
+                fi
+                while :; do
+                  # A timed-out poll leaves `STATUS` at `000` and is polled again.
+                  request GET "$path" "" || true
                   if [ "$STATUS" = "200" ] && condition_matches "$kind" "$wanted" "$message"; then
                     return 0
                   fi
+                  in_time || break
                   sleep "$POLL_SECONDS"
-                  waited=$((waited + POLL_SECONDS))
                 done
-                echo "envoy-gateway-probe: $operator did not set $kind on $path within ${waited}s, or set it without the message it writes when the Gateway is programmed." >&2
+                echo "envoy-gateway-probe: $operator did not set $kind on $path within $((now - started))s, or set it without the message it writes when the Gateway is programmed." >&2
                 echo "envoy-gateway-probe: expected a $kind condition with status $wanted whose message contains: $message" >&2
                 cat "$body" >&2
-                echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running, or it is running and could not program this Gateway." >&2
+                if clamped; then
+                  echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the removals before it were slow, so $operator is not shown to be down." >&2
+                elif [ "$STATUS" = "000" ]; then
+                  echo "envoy-gateway-probe: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
+                else
+                  echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running, or it is running and could not program this Gateway." >&2
+                fi
                 return 1
               }
 {{- if has "envoy-gateway" $probes }}

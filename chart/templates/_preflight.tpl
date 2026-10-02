@@ -215,13 +215,18 @@ weakening direction nothing here needs.
 {{- define "platform.hookRequest.connectTimeout" -}}5{{- end -}}
 
 {{/*
-THE MARGIN A PROBE JOB'S DEADLINE KEEPS OVER ITS COMPOSED LOOPS: pod scheduling
-and the image pull. IT IS NOT SIZED AGAINST A SLOW POLL. `remove()` and `await()`
-charge each loop's `waited` only its POLL_SECONDS sleep, never the poll's own
-request, so a cluster that answers every poll slowly can run a loop's real time
-well past `preflight.timeoutSeconds` before this margin is used up.
-`activeDeadlineSeconds` still ends the Job in that case; it just does so without
-the script naming which operator was slow. The same 300 seconds `README.md`
+THE MARGIN A PROBE JOB'S DEADLINE KEEPS OVER ITS COMPOSED LOOPS: pod scheduling,
+the image pull, and what the script runs past its own budget. Since ledger 1235
+each script keeps a WALL-CLOCK budget of exactly its composed loops
+(`SCRIPT_BUDGET_SECONDS`), and every loop reads `date` rather than counting its
+sleeps, so a slow API server ends the script — naming the slow operator — at
+that budget plus its worst overrun, then its cleanup. The overrun is the longer
+of two paths: a poll that passed its clock check just before the deadline (one
+request in flight, one poll, one more request) and a `create` whose removal
+passed its entry check just before it (DELETE, a GET answering 404, the POST):
+max(poll + 2 requests, 3 requests), 105 seconds at the 35-second request bound.
+`test_hook_deadlines.py` checks this margin covers that overrun with room left
+for scheduling and the pull. The same 300 seconds `README.md`
 states for the helm budget — a stated CEILING, not a measurement. The healthy
 runs measured on kind-yadgar took 10s (preflight) and 15s (envoy-gateway-probe)
 in all.
