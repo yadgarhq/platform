@@ -540,6 +540,151 @@ def script_probe_set_failures(script: str, expected: list[str]) -> list[str]:
     return failures
 
 
+# ── WHAT EACH LABEL'S PROBE ACTUALLY CREATES (ledger 1054, ADR-0679) ─────────
+#
+# THE GATES ABOVE READ THE LABEL, NEVER THE BODY. They count the `PROBES=` list and
+# compare it with `EXPECTED_PROBES`, which proves the Job runs the probes its
+# values ask for BY NAME. Neither reads what the function behind a name POSTs.
+# Measured on origin/main: changing the keda body's kind from `ScaledObject` to
+# `ScaledJob`, or the cert-manager Certificate body's kind to `Issuer`, left the
+# whole suite green (303 passed each time). That is the label-vs-body false green
+# ADR-0679 names, the fourth instance of it here.
+#
+# So this gate follows each label through its `case` arm to the function the
+# arm calls, lifts that function, and reads the apiVersion and kind of every
+# HEREDOC body it carries, in order. The expected bodies are an INDEPENDENT
+# restatement: written here, never read off the template or the values. The
+# kind each probe waits on (Certificate, ScaledObject, MariaDB) is the same kind
+# `yadgarhq/chart`'s `PROBE_KIND` pairs each probe with
+# (`scripts/tests/test_parent_chart.py`). Prometheus POSTs nothing, so it
+# expects no body.
+PROBE_BODY_KINDS = {
+    "cert-manager": [("cert-manager.io/v1", "Issuer"), ("cert-manager.io/v1", "Certificate")],
+    "keda": [("apps/v1", "Deployment"), ("keda.sh/v1alpha1", "ScaledObject")],
+    "mariadb-operator": [("k8s.mariadb.com/v1alpha1", "MariaDB")],
+    "prometheus": [],
+    "envoy-gateway": [
+        ("gateway.envoyproxy.io/v1alpha1", "EnvoyProxy"),
+        ("gateway.networking.k8s.io/v1", "Gateway"),
+    ],
+}
+
+# Every label the two Jobs can carry, with every probe on. Asserted, so the gate
+# cannot pass having followed fewer labels than exist.
+EXPECTED_LABELS_FOLLOWED = 5
+
+# `keda) probe_keda ;;`: the label, and the function its arm runs.
+PROBE_CASE_ARM = re.compile(r"^[ ]*(?P<label>[a-z][a-z-]*)\) (?P<function>probe_\w+) ;;$", re.MULTILINE)
+
+
+def lifted_function(script: str, name: str) -> str | None:
+    """The whole text of shell function `name`, or None. PURE."""
+    match = re.search(
+        rf"^(?P<indent>[ ]*){re.escape(name)}\(\) \{{\n(?:.*\n)*?(?P=indent)\}}$",
+        script,
+        re.MULTILINE,
+    )
+    return match.group(0) if match else None
+
+
+def probe_body_failures(job: str, script: str) -> tuple[list[str], int]:
+    """Whether each label's function POSTs the bodies that label probes. PURE.
+
+    Returns the failures and how many labels were followed.
+    """
+    failures = []
+    arms = {m.group("label"): m.group("function") for m in PROBE_CASE_ARM.finditer(script)}
+    followed = 0
+    for label in probe_list(script):
+        function = arms.get(label)
+        if function is None:
+            failures.append(f"{job}: the label {label!r} has no `case` arm that runs a probe function")
+            continue
+        if label not in PROBE_BODY_KINDS:
+            failures.append(f"{job}: no expected bodies are recorded for the label {label!r}")
+            continue
+        text = lifted_function(script, function)
+        if text is None:
+            failures.append(f"{job}: {label!r} runs {function}, and the script defines no such function")
+            continue
+        found = []
+        for match in HEREDOC.finditer(text):
+            body = json.loads(match.group("body"))
+            found.append((body.get("apiVersion"), body.get("kind")))
+        if found != PROBE_BODY_KINDS[label]:
+            failures.append(
+                f"{job}: the label {label!r} runs {function}, which POSTs {found}; a "
+                f"{label} probe POSTs {PROBE_BODY_KINDS[label]}. The probe set gate "
+                f"counts the label, so it passes whatever this function creates"
+            )
+        followed += 1
+    return failures, followed
+
+
+def every_probe_on_scripts(chart: Path = CHART) -> dict[str, str]:
+    documents = adopter_render(
+        chart,
+        "--set",
+        "preflight.probes.keda=true,preflight.probes.mariadb=true,preflight.probes.prometheus=true",
+    )
+    return {
+        PREFLIGHT_JOB: preflight_script(documents),
+        "envoy-gateway-probe": post_install_probe_script(documents),
+    }
+
+
+def all_probe_body_failures(chart: Path = CHART) -> list[str]:
+    failures = []
+    followed = 0
+    for job, script in every_probe_on_scripts(chart).items():
+        found, count = probe_body_failures(job, script)
+        failures += found
+        followed += count
+    if followed != EXPECTED_LABELS_FOLLOWED:
+        failures.append(
+            f"followed {followed} probe labels to their bodies; with every probe on the "
+            f"two Jobs carry {EXPECTED_LABELS_FOLLOWED}"
+        )
+    return failures
+
+
+def test_each_probe_label_posts_the_kinds_it_probes():
+    failures = all_probe_body_failures()
+    assert failures == [], "\n".join(failures)
+
+
+def test_a_probe_body_of_another_kind_reddens_the_body_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path, "preflight.yaml",
+        '"kind":"ScaledObject",',
+        '"kind":"ScaledJob",',
+    )
+    message = "\n".join(all_probe_body_failures(chart))
+    assert "the label 'keda' runs probe_keda, which POSTs" in message, message
+    assert "('keda.sh/v1alpha1', 'ScaledJob')" in message, message
+
+
+def test_a_certificate_body_turned_issuer_reddens_the_body_gate(tmp_path):
+    chart = mutated_chart(
+        tmp_path, "preflight.yaml",
+        '{"apiVersion":"{{ $preflight.certManager.apiVersion }}","kind":"Certificate",',
+        '{"apiVersion":"{{ $preflight.certManager.apiVersion }}","kind":"Issuer",',
+    )
+    message = "\n".join(all_probe_body_failures(chart))
+    assert "the label 'cert-manager' runs probe_cert_manager, which POSTs" in message, message
+
+
+def test_a_label_wired_to_another_probe_reddens_the_body_gate(tmp_path):
+    """The label stays, so the probe set gate stays green; the body it runs moves."""
+    chart = mutated_chart(
+        tmp_path, "preflight.yaml",
+        "keda) probe_keda ;;",
+        "keda) probe_mariadb ;;",
+    )
+    message = "\n".join(all_probe_body_failures(chart))
+    assert "the label 'keda' runs probe_mariadb, which POSTs [('k8s.mariadb.com/v1alpha1', 'MariaDB')]" in message, message
+
+
 # ── R1 — EVERY PROBE RESOLVES FALSE, SO NO JOB RENDERS AT ALL ────────────────
 
 
