@@ -2463,7 +2463,7 @@ curl() {
       --request|-X) method="$2"; shift 2 ;;
       --output|-o) out="$2"; shift 2 ;;
       --data-binary|-d) data="$2"; shift 2 ;;
-      --user-agent|-A|--cacert|--header|-H|--write-out|-w) shift 2 ;;
+      --user-agent|-A|--cacert|--header|-H|--write-out|-w|--max-time|--connect-timeout) shift 2 ;;
       -*) shift ;;
       *) url="$1"; shift ;;
     esac
@@ -3149,11 +3149,12 @@ def test_an_empty_programmed_message_reddens_the_reading_gate(tmp_path):
 # gained a second `create` when it gained its own EnvoyProxy (ledger 1189), and a
 # constant would have gone on describing the script it used to be.
 #
-# WHAT IS LOST WHEN HELM GIVES UP FIRST IS THE MESSAGE, NOT THE GATEWAY. The Job
-# carries `backoffLimit: 0` and no `activeDeadlineSeconds`, so the pod runs on and
-# the trap still deletes what it made. The operator reads `timed out waiting for the
-# condition` instead of the probe naming Envoy Gateway, which is exactly what ruling
-# 10 asks the probe to do.
+# WHAT IS LOST WHEN HELM GIVES UP FIRST IS THE MESSAGE, NOT THE GATEWAY. Helm
+# leaves the Job alone, so the pod runs on to its own `activeDeadlineSeconds`
+# (ledger 1224) and the trap still deletes what it made. The operator reads `timed
+# out waiting for the condition` instead of the probe naming Envoy Gateway, which is
+# exactly what ruling 10 asks the probe to do. `test_hook_deadlines.py` checks that
+# each deadline, plus its pod's grace, ends inside the documented budget.
 #
 # THE BOUND IS NOT LOWERED TO FIT. `Programmed` includes replica availability, so a
 # cold cluster may genuinely need 300s, and a bound cut to fit helm's default would
@@ -3816,7 +3817,7 @@ curl() {
         esac
         shift 2 ;;
       --output|-o) out="$2"; shift 2 ;;
-      --cacert|--request|-X|--write-out|-w|--data-binary|-d) shift 2 ;;
+      --cacert|--request|-X|--write-out|-w|--data-binary|-d|--max-time|--connect-timeout) shift 2 ;;
       -*) shift ;;
       *) url="$1"; shift ;;
     esac
@@ -3843,6 +3844,11 @@ curl() {
   printf '200'
 }
 """
+
+
+REQUEST_TIMEOUT_ASSIGNMENTS = re.compile(
+    r"^[ ]*(?:REQUEST_MAX_TIME|CONNECT_TIMEOUT)=\d+$", re.MULTILINE
+)
 
 
 def request_harness(script: str, driver: str) -> str:
@@ -3872,6 +3878,9 @@ def request_harness(script: str, driver: str) -> str:
     assignment = PROGRAMMED_MESSAGE_ASSIGNMENT.search(script)
     if assignment:
         lines.append(assignment.group(0).strip())
+    # The request timeouts `request()` passes to curl (ledger 1224), bound as the
+    # Job's preamble binds them, so `set -u` does not stop the lifted function.
+    lines += [m.group(0).strip() for m in REQUEST_TIMEOUT_ASSIGNMENTS.finditer(script)]
     lines += [
         textwrap.dedent(request.group(0)),
         textwrap.dedent(matcher.group(0)),

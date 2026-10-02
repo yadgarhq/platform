@@ -111,6 +111,26 @@ by field, minus the pin.
         "envoyDeployment" $probeDeployment
         "envoyService" (dict "type" $envoyProxy.serviceType))) }}
 {{- if and $preflight.enabled $probes }}
+{{- /*
+WHAT EACH PROBE COSTS THE DEADLINE: [bounded loops, objects left for the cleanup].
+  envoy-gateway  3 loops (Gateway and EnvoyProxy removals — the Gateway's second
+                 `remove`, inside its `create`, answers 404 at once — and the
+                 Gateway await), 2 objects (Gateway, EnvoyProxy)
+`test_hook_deadlines.py` recounts both numbers off the RENDERED script.
+*/}}
+{{- $shape := dict "envoy-gateway" (list 3 2) }}
+{{- $loops := 0 }}
+{{- $objects := 0 }}
+{{- range $probes }}
+{{- if not (hasKey $shape .) }}{{ fail (printf "platform: the post-install probe carries no deadline shape for probe %s" .) }}{{ end }}
+{{- $loops = add $loops (index (get $shape .) 0) }}
+{{- $objects = add $objects (index (get $shape .) 1) }}
+{{- end }}
+{{- $margin := include "platform.hookDeadline.probeMargin" . | int }}
+{{- $deadline := add (mul $loops $probe.timeoutSeconds) $margin }}
+{{- $requestMaxTime := include "platform.hookRequest.maxTime" . | int }}
+{{- $cleanupMaxTime := include "platform.hookRequest.cleanupMaxTime" . | int }}
+{{- $grace := add $requestMaxTime (mul $objects $cleanupMaxTime) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -128,6 +148,12 @@ spec:
   # become "it is running" on the second attempt. More attempts would only multiply
   # the bound before the release is allowed to fail.
   backoffLimit: {{ $preflight.backoffLimit }}
+  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), for everything the script cannot
+  # see — a pod that never schedules, an image that never pulls. It exceeds the
+  # script's own worst case, so the script names Envoy Gateway first, and it ends
+  # inside the documented helm budget, so helm reports this Job's failure rather
+  # than its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
+  activeDeadlineSeconds: {{ $deadline }}
   template:
     metadata:
       labels: { app.kubernetes.io/name: envoy-gateway-probe }
@@ -135,6 +161,10 @@ spec:
       serviceAccountName: {{ $probe.serviceAccountName }}
       automountServiceAccountToken: true
       restartPolicy: Never
+      # TIME FOR THE TRAP TO DELETE THE GATEWAY AFTER A KILL. `sh` runs its TERM
+      # trap only once the foreground command returns: {{ $requestMaxTime }}s for the request
+      # in flight + {{ $objects }} objects x {{ $cleanupMaxTime }}s per cleanup DELETE = {{ $grace }}s.
+      terminationGracePeriodSeconds: {{ $grace }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 100
@@ -184,6 +214,11 @@ spec:
               TIMEOUT_SECONDS={{ $probe.timeoutSeconds }}
               POLL_SECONDS={{ $preflight.pollSeconds }}
               PROBE_NAME={{ $probe.probeName }}
+              # EVERY REQUEST ENDS. `_preflight.tpl` records why each number is
+              # what it is; the cleanup swaps in the shorter one.
+              REQUEST_MAX_TIME={{ $requestMaxTime }}
+              CLEANUP_MAX_TIME={{ $cleanupMaxTime }}
+              CONNECT_TIMEOUT={{ include "platform.hookRequest.connectTimeout" . }}
 
               # THE OPERATOR'S OWN WORDING, REQUIRED ALONGSIDE `Programmed=True`.
               # `squote` rather than bare, as the preflight's three strings are: the
@@ -261,6 +296,7 @@ spec:
                 esac
                 if [ -n "$payload" ]; then
                   STATUS="$(printf '%s' "$payload" | curl --silent --show-error \
+                    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
                     --user-agent "$USER_AGENT" \
                     --cacert "$sa/ca.crt" \
                     --header "Authorization: Bearer $token" \
@@ -270,6 +306,7 @@ spec:
                     "$api$path$query")"
                 else
                   STATUS="$(curl --silent --show-error \
+                    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
                     --user-agent "$USER_AGENT" \
                     --cacert "$sa/ca.crt" \
                     --header "Authorization: Bearer $token" \
@@ -286,6 +323,7 @@ spec:
               # nobody recognises. The trap runs on EXIT, and it runs BEFORE the
               # failure is reported.
               cleanup() {
+                REQUEST_MAX_TIME="$CLEANUP_MAX_TIME"
                 for path in $CREATED; do
                   request DELETE "$path" "" || true
                 done

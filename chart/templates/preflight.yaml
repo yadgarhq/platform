@@ -56,6 +56,32 @@ probe is post-install and arrives with the Gateway listener it probes.
 {{- $preflight := .Values.preflight }}
 {{- $probes := without (splitList " " (include "platform.preflight.probes" (dict "context" $))) "" }}
 {{- if and $preflight.enabled $probes }}
+{{- /*
+WHAT EACH PROBE COSTS THE DEADLINE: [bounded loops, objects left for the cleanup].
+A loop is one `remove()` per distinct path (a `create()` runs one), one `await()`,
+or one loop written out inline; each runs to `preflight.timeoutSeconds`.
+  cert-manager      4 loops (Issuer, Secret, Certificate removals; Certificate
+                    await), 3 objects (Issuer, Certificate, its Secret)
+  keda              3 loops (Deployment, ScaledObject removals; ScaledObject
+                    await), 2 objects
+  mariadb-operator  0 loops (one dry-run POST), 0 objects
+  prometheus        1 loop (its own, charged poll + --max-time per attempt), 0
+A probe missing from this dict fails the render rather than costing nothing.
+`test_hook_deadlines.py` recounts both numbers off the RENDERED script.
+*/}}
+{{- $shape := dict "cert-manager" (list 4 3) "keda" (list 3 2) "mariadb-operator" (list 0 0) "prometheus" (list 1 0) }}
+{{- $loops := 0 }}
+{{- $objects := 0 }}
+{{- range $probes }}
+{{- if not (hasKey $shape .) }}{{ fail (printf "platform: the preflight carries no deadline shape for probe %s" .) }}{{ end }}
+{{- $loops = add $loops (index (get $shape .) 0) }}
+{{- $objects = add $objects (index (get $shape .) 1) }}
+{{- end }}
+{{- $margin := include "platform.hookDeadline.probeMargin" . | int }}
+{{- $deadline := add (mul $loops $preflight.timeoutSeconds) $margin }}
+{{- $requestMaxTime := include "platform.hookRequest.maxTime" . | int }}
+{{- $cleanupMaxTime := include "platform.hookRequest.cleanupMaxTime" . | int }}
+{{- $grace := add $requestMaxTime (mul $objects $cleanupMaxTime) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -71,6 +97,12 @@ spec:
   # More attempts would only multiply the bound before the install is allowed to
   # fail.
   backoffLimit: {{ $preflight.backoffLimit }}
+  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224). The script's bound is its loops;
+  # this bounds everything the script cannot see — a pod that never schedules, an
+  # image that never pulls — so the sync fails here instead of waiting on Argo's
+  # sync timeout. It exceeds the script's own worst case, so the script names the
+  # operator first: {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
+  activeDeadlineSeconds: {{ $deadline }}
   template:
     metadata:
       labels: { app.kubernetes.io/name: preflight }
@@ -78,6 +110,10 @@ spec:
       serviceAccountName: {{ $preflight.serviceAccountName }}
       automountServiceAccountToken: true
       restartPolicy: Never
+      # TIME FOR THE TRAP TO CLEAN UP AFTER A KILL. `sh` runs its TERM trap only
+      # once the foreground command returns: {{ $requestMaxTime }}s for the request in flight
+      # + {{ $objects }} objects x {{ $cleanupMaxTime }}s per cleanup DELETE = {{ $grace }}s.
+      terminationGracePeriodSeconds: {{ $grace }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 100
@@ -127,6 +163,11 @@ spec:
               TIMEOUT_SECONDS={{ $preflight.timeoutSeconds }}
               POLL_SECONDS={{ $preflight.pollSeconds }}
               PROBE_NAME={{ $preflight.probeName }}
+              # EVERY REQUEST ENDS. `_preflight.tpl` records why each number is
+              # what it is; the cleanup swaps in the shorter one.
+              REQUEST_MAX_TIME={{ $requestMaxTime }}
+              CLEANUP_MAX_TIME={{ $cleanupMaxTime }}
+              CONNECT_TIMEOUT={{ include "platform.hookRequest.connectTimeout" . }}
 
               # THE PATHS THE CLEANUP WALKS. Appended as each object is created,
               # so a probe that dies half-way still leaves its cleanup a complete
@@ -198,6 +239,7 @@ spec:
                 esac
                 if [ -n "$payload" ]; then
                   STATUS="$(printf '%s' "$payload" | curl --silent --show-error \
+                    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
                     --user-agent "$USER_AGENT" \
                     --cacert "$sa/ca.crt" \
                     --header "Authorization: Bearer $token" \
@@ -207,6 +249,7 @@ spec:
                     "$api$path$query")"
                 else
                   STATUS="$(curl --silent --show-error \
+                    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
                     --user-agent "$USER_AGENT" \
                     --cacert "$sa/ca.crt" \
                     --header "Authorization: Bearer $token" \
@@ -224,6 +267,7 @@ spec:
               # inherits. So the trap runs on EXIT, and it runs before the failure
               # is reported.
               cleanup() {
+                REQUEST_MAX_TIME="$CLEANUP_MAX_TIME"
                 for path in $CREATED; do
                   request DELETE "$path" "" || true
                 done
@@ -528,6 +572,7 @@ spec:
                 code=""
                 while [ "$waited" -lt "$TIMEOUT_SECONDS" ]; do
                   code="$(curl --silent --output "$body" --write-out '%{http_code}' \
+                    --connect-timeout "$CONNECT_TIMEOUT" \
                     --max-time "$PROMETHEUS_MAX_TIME" --user-agent "$USER_AGENT" \
                     "$PROMETHEUS_ADDRESS/-/ready" || true)"
                   if [ "$code" = "200" ] && grep -qF "$PROMETHEUS_READY" "$body"; then
