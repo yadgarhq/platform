@@ -84,14 +84,23 @@ EXEMPT_UPSTREAM_HOOK_JOBS = {
 }
 
 # ── THE LITERALS THE ARITHMETIC IS CHECKED AGAINST ────────────────────────────
-# The margin over a probe Job's composed loops: pod scheduling, image pull and the
-# request time of every poll. A stated CEILING, the same 300s README.md documents
-# for the helm budget, not a measurement.
+# The margin over a probe Job's composed loops: pod scheduling and the image pull.
+# NOT the request time of every poll: `remove()` and `await()` charge `waited`
+# only the sleep between polls, so this margin does not reliably cover a cluster
+# that answers every poll slowly — `activeDeadlineSeconds` is still the real
+# bound there, it just ends the Job without the script naming the slow operator.
+# The same 300s README.md documents for the helm budget — a stated CEILING, not a
+# measurement.
 PROBE_DEADLINE_MARGIN_SECONDS = 300
 
-# Kubernetes caps an admission webhook's `timeoutSeconds` at 30. The probes' POSTs
-# pass through cert-manager's, KEDA's and mariadb-operator's webhooks, so a request
-# timeout at or under this reads a healthy-but-slow admission as a failure.
+# Kubernetes caps ONE admission webhook's `timeoutSeconds` at 30. Measured on
+# kind-yadgar (2026-10-02): of the objects these probes create, only
+# cert-manager's Issuer and Certificate cross a webhook at all, and only its
+# VALIDATING one (30s) — its MUTATING webhook matches `certificaterequests`
+# only, which no probe creates directly. KEDA's and mariadb-operator's webhooks
+# are validating-only, at 10s. So today this is the largest SINGLE webhook any
+# probed request can cross, not a sum over a mutating-then-validating chain; an
+# adopter whose own admission webhooks also match these kinds could need more.
 LARGEST_WEBHOOK_TIMEOUT_SECONDS = 30
 
 # The Job controller's pod-failure backoff: 10s, doubled per failure, capped at six
@@ -286,6 +295,64 @@ HELPER_DEFINITIONS = ("remove() {", "await() {")
 EXTRA_CLEANUP = re.compile(r'^[ ]*CREATED="\$CREATED \$(?!1")\w+"$', re.MULTILINE)
 BOOTSTRAP_CREATE = re.compile(r"^[ ]*create \S+ <<JSON$", re.MULTILINE)
 
+# `cleanup()` MUST SWAP THE SHORTER TIMEOUT IN before it runs its DELETEs, or the
+# pod's terminationGracePeriodSeconds — sized off CLEANUP_MAX_TIME — no longer
+# covers what `request()` can actually take once a kill fires.
+CLEANUP_SWAP = re.compile(r'cleanup\(\) \{\s*\n\s*REQUEST_MAX_TIME="\$CLEANUP_MAX_TIME"\s*\n')
+
+# THE PROMETHEUS LOOP, ISOLATED SO ITS CURL AND ITS CHARGE CAN BE COMPARED. No
+# other `{` appears inside the function, so a non-greedy DOTALL match to the
+# first lone `}` is the whole body.
+PROMETHEUS_FUNCTION = re.compile(r"probe_prometheus\(\) \{(?P<body>.*?)\n\s*\}\n", re.DOTALL)
+PROMETHEUS_MAXTIME_FLAG = re.compile(r'--max-time "\$(?P<ref>[A-Za-z_]\w*)"')
+PROMETHEUS_WAITED_CHARGE = re.compile(r"waited=\$\(\(waited \+ POLL_SECONDS \+ (?P<ref>[A-Za-z0-9_]+)\)\)")
+
+# A LITERAL NUMBER ASSIGNED TO A SHELL VARIABLE, the same shape `script_number`
+# reads one name of at a time. Built once per script so a curl's `--max-time
+# "$VAR"` can be resolved to the number VAR actually holds, rather than only
+# checked for presence.
+VARIABLE_LITERAL = re.compile(r"^\s*(?P<name>[A-Z_][A-Z0-9_]*)=(?P<value>\d+)\s*$", re.MULTILINE)
+
+
+def literal_values(script: str) -> dict[str, int]:
+    return {m.group("name"): int(m.group("value")) for m in VARIABLE_LITERAL.finditer(script)}
+
+
+def cleanup_swap_failures(name: str, script: str) -> list[str]:
+    """`cleanup()` swaps CLEANUP_MAX_TIME in before its DELETEs. PURE."""
+    if "cleanup() {" not in script:
+        return []
+    if not CLEANUP_SWAP.search(script):
+        return [
+            f"{name}: cleanup() does not swap REQUEST_MAX_TIME for CLEANUP_MAX_TIME before "
+            f"its DELETEs, so a kill mid-cleanup can run past terminationGracePeriodSeconds"
+        ]
+    return []
+
+
+def prometheus_charge_failures(script: str) -> list[str]:
+    """The Prometheus loop charges waited its own curl's --max-time, not a guess. PURE."""
+    if "probe_prometheus() {" not in script:
+        return []
+    match = PROMETHEUS_FUNCTION.search(script)
+    if not match:
+        return ["preflight: could not isolate probe_prometheus() to check its waited charge"]
+    body = match.group("body")
+    maxtime = PROMETHEUS_MAXTIME_FLAG.search(body)
+    charge = PROMETHEUS_WAITED_CHARGE.search(body)
+    if not maxtime or not charge:
+        return [
+            "preflight: probe_prometheus() no longer sets --max-time or charges waited the "
+            "way this check expects"
+        ]
+    if maxtime.group("ref") != charge.group("ref"):
+        return [
+            f"preflight: the Prometheus loop charges waited += POLL_SECONDS + "
+            f"{charge.group('ref')}, not the {maxtime.group('ref')} its own curl's "
+            f"--max-time uses, so a hanging address is not bounded by its own request timeout"
+        ]
+    return []
+
 
 def script_number(script: str, name: str) -> int:
     match = re.search(rf"^\s*{name}=(?P<n>\d+)\s*$", script, re.MULTILINE)
@@ -345,6 +412,8 @@ def probe_job_failures(job: dict, expected_loops: int, expected_objects: int) ->
             f"{name}: terminationGracePeriodSeconds is {found!r} and its cleanup "
             f"needs {grace}s: {request}s in flight + {objects} objects x {cleanup}s"
         )
+    failures += cleanup_swap_failures(name, script)
+    failures += prometheus_charge_failures(script)
     return failures
 
 
@@ -367,6 +436,17 @@ def bootstrap_job_failures(job: dict, expected_requests: int) -> list[str]:
         )
     limit = job["spec"]["backoffLimit"]
     request = script_number(script, "REQUEST_MAX_TIME")
+    connect = script_number(script, "CONNECT_TIMEOUT")
+    # A REQUEST CANNOT TAKE LESS THAN ITS OWN CONNECT PHASE. `REQUEST_MAX_TIME` at
+    # or under `CONNECT_TIMEOUT` aborts a request that only just finished
+    # connecting, so curl could never see a POST through — the arithmetic above
+    # stays consistent at any value, which is why this floor is checked here and
+    # not inferred from it.
+    if request <= connect:
+        failures.append(
+            f"{name}: REQUEST_MAX_TIME is {request}s, at or under its own "
+            f"{connect}s CONNECT_TIMEOUT"
+        )
     attempt = BOOTSTRAP_ATTEMPT_START_SECONDS + requests * request
     wanted = job_backoff_seconds(limit) + (limit + 1) * attempt
     deadline = job["spec"].get("activeDeadlineSeconds")
@@ -468,6 +548,66 @@ def test_a_request_timeout_under_a_webhooks_reddens_the_probe_gate(tmp_path):
     assert "preflight: REQUEST_MAX_TIME is 30s, at or under the 30s" in message, message
 
 
+def test_deleting_the_cleanup_swap_reddens_the_gate(tmp_path):
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "preflight.yaml",
+        'REQUEST_MAX_TIME="$CLEANUP_MAX_TIME"',
+        "NOOP_SWAP_REMOVED=1",
+    )
+    documents = render(copy, RELEASE_NAMESPACE, *API_VERSIONS, "-f", str(ADOPTER_VALUES), *EVERY_VARIANT_ON)
+    message = "\n".join(probe_job_failures(job_named(documents, "preflight"), 8, 5))
+    assert (
+        "preflight: cleanup() does not swap REQUEST_MAX_TIME for CLEANUP_MAX_TIME"
+        in message
+    ), message
+
+
+def test_the_envoy_probes_cleanup_swap_also_reddens_the_gate(tmp_path):
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "envoy-gateway-probe.yaml",
+        'REQUEST_MAX_TIME="$CLEANUP_MAX_TIME"',
+        "NOOP_SWAP_REMOVED=1",
+    )
+    documents = render(copy, RELEASE_NAMESPACE, *API_VERSIONS, "-f", str(ADOPTER_VALUES), *EVERY_VARIANT_ON)
+    message = "\n".join(probe_job_failures(job_named(documents, "envoy-gateway-probe"), 3, 2))
+    assert (
+        "envoy-gateway-probe: cleanup() does not swap REQUEST_MAX_TIME for "
+        "CLEANUP_MAX_TIME" in message
+    ), message
+
+
+def test_charging_the_prometheus_loop_a_constant_reddens_the_gate(tmp_path):
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "preflight.yaml",
+        "waited=$((waited + POLL_SECONDS + PROMETHEUS_MAX_TIME))",
+        "waited=$((waited + POLL_SECONDS + 1))",
+    )
+    documents = render(copy, RELEASE_NAMESPACE, *API_VERSIONS, "-f", str(ADOPTER_VALUES), *EVERY_VARIANT_ON)
+    message = "\n".join(probe_job_failures(job_named(documents, "preflight"), 8, 5))
+    assert (
+        "preflight: the Prometheus loop charges waited += POLL_SECONDS + 1, not "
+        "the PROMETHEUS_MAX_TIME" in message
+    ), message
+
+
+def test_a_bootstrap_request_at_its_connect_timeout_reddens_the_floor_gate(tmp_path):
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "_preflight.tpl",
+        '"platform.hookRequest.bootstrapMaxTime" -}}10{{',
+        '"platform.hookRequest.bootstrapMaxTime" -}}1{{',
+    )
+    documents = render(copy, RELEASE_NAMESPACE, *API_VERSIONS, "-f", str(ADOPTER_VALUES), *EVERY_VARIANT_ON)
+    message = "\n".join(bootstrap_job_failures(job_named(documents, "bootstrap-secrets"), 4))
+    assert (
+        "bootstrap-secrets: REQUEST_MAX_TIME is 1s, at or under its own 5s CONNECT_TIMEOUT"
+        in message
+    ), message
+
+
 # ── THE DEADLINES AGAINST THE DOCUMENTED HELM BUDGET ──────────────────────────
 # Helm's `--timeout` covers each hook Job from its creation. A deadline (plus the
 # grace its pod is given) at or past that budget means helm gives up first and
@@ -526,19 +666,38 @@ def logical_lines(script: str) -> list[str]:
     return lines
 
 
+def flag_reference(flag: str, invocation: str) -> re.Match[str] | None:
+    """Where $(flag) points: a shell variable or a bare literal, either quoted."""
+    return re.search(rf'(?:^|\s){re.escape(flag)}\s+"?\$?(?P<ref>[A-Za-z_]\w*|\d+)"?', invocation)
+
+
 def curl_failures(scripts: dict[str, str]) -> list[str]:
-    """Every curl in every hook script carries both timeouts. PURE."""
+    """Every curl in every hook script carries both timeouts, each a positive
+    value. PURE. A flag that is merely PRESENT is not enough: `--max-time 0`
+    means no limit at all, and `--max-time "$VAR"` where VAR resolves to 0 or
+    less is the same defect spelled through a variable.
+    """
     failures = []
     counted = 0
     for name, script in scripts.items():
+        values = literal_values(script)
         for line in logical_lines(script):
             for match in CURL_COMMAND.finditer(line):
                 counted += 1
                 invocation = line[match.end():]
                 for flag in REQUIRED_CURL_FLAGS:
-                    if not re.search(rf"(?:^|\s){flag}\s", invocation):
+                    flag_match = flag_reference(flag, invocation)
+                    if not flag_match:
                         failures.append(
                             f"{name}: a curl carries no {flag}: {line.strip()[:160]}"
+                        )
+                        continue
+                    ref = flag_match.group("ref")
+                    value = int(ref) if ref.isdigit() else values.get(ref)
+                    if value is None or value <= 0:
+                        failures.append(
+                            f"{name}: {flag} resolves to {ref}={value!r}, not a positive "
+                            f"timeout: {line.strip()[:160]}"
                         )
     if counted == 0:
         failures.append("no curl found in any hook script; this gate compared nothing")
@@ -588,3 +747,33 @@ def test_dropping_a_connect_timeout_from_the_prometheus_curl_reddens_the_curl_ga
     scripts["preflight"] = mutated
     message = "\n".join(curl_failures(scripts))
     assert "preflight: a curl carries no --connect-timeout" in message, message
+
+
+def test_a_literal_zero_max_time_reddens_the_curl_value_gate():
+    """`--max-time 0` means no limit at all. A flag that is merely present passes
+    it, which is the gap this check exists to close."""
+    scripts = hook_scripts(every_render())
+    original = scripts["admin-bootstrap-token"]
+    mutated = original.replace('--max-time "$REQUEST_MAX_TIME"', "--max-time 0", 1)
+    assert mutated != original, "admin-bootstrap-token's curl no longer spells its --max-time this way"
+    scripts["admin-bootstrap-token"] = mutated
+    message = "\n".join(curl_failures(scripts))
+    assert "admin-bootstrap-token: --max-time resolves to 0=0, not a positive timeout" in message, message
+
+
+def test_a_zero_bootstrap_max_time_reddens_the_curl_value_gate(tmp_path):
+    """The real-world shape of the same defect: the TEMPLATE value a curl's
+    `--max-time "$REQUEST_MAX_TIME"` resolves through is zeroed, so the flag
+    itself never changes and a presence-only check cannot see it."""
+    copy = chart_copy(tmp_path)
+    replace_once(
+        copy / "templates" / "_preflight.tpl",
+        '"platform.hookRequest.bootstrapMaxTime" -}}10{{',
+        '"platform.hookRequest.bootstrapMaxTime" -}}0{{',
+    )
+    scripts = hook_scripts(every_render(copy))
+    message = "\n".join(curl_failures(scripts))
+    assert (
+        "admin-bootstrap-token: --max-time resolves to REQUEST_MAX_TIME=0, not a "
+        "positive timeout" in message
+    ), message

@@ -148,11 +148,15 @@ spec:
   # become "it is running" on the second attempt. More attempts would only multiply
   # the bound before the release is allowed to fail.
   backoffLimit: {{ $preflight.backoffLimit }}
-  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), for everything the script cannot
-  # see — a pod that never schedules, an image that never pulls. It exceeds the
-  # script's own worst case, so the script names Envoy Gateway first, and it ends
-  # inside the documented helm budget, so helm reports this Job's failure rather
-  # than its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
+  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AND IT IS THE REAL BOUND RATHER
+  # THAN A BACKSTOP BEHIND ONE THE SCRIPT KEEPS ITSELF — for everything the script
+  # cannot see: a pod that never schedules, an image that never pulls. `remove()`
+  # and `await()` here charge `waited` only the sleep between polls, never the
+  # poll's own request, so a cluster answering every poll slowly can run this
+  # script past {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s before this deadline does, and on
+  # a cluster that slow this ends the Job without naming Envoy Gateway. It still
+  # ends inside the documented helm budget, so helm reports a failure rather than
+  # its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
   activeDeadlineSeconds: {{ $deadline }}
   template:
     metadata:

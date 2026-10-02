@@ -171,11 +171,20 @@ HOW LONG ONE REQUEST FROM A HOOK SCRIPT MAY TAKE (ledger 1224). Before these, no
 connection and never answered held the Job — and the sync behind it — open for as
 long as the caller would wait.
 
-`maxTime` IS 35 FOR THE PROBES, AND IT HAS TO EXCEED 30. The probes' POSTs pass
-through admission webhooks — cert-manager's renders `timeoutSeconds: 30`, KEDA's
-10, mariadb-operator's the API server's default of 10 — and Kubernetes caps a
-webhook's timeout at 30. A request bound at or under that reads a healthy-but-slow
-admission as a failure. The 5 seconds over it is for the API server's own work.
+`maxTime` IS 35 FOR THE PROBES, AND IT HAS TO EXCEED 30. Measured on kind-yadgar
+(2026-10-02): of what these probes create, only cert-manager's Issuer and
+Certificate cross an admission webhook — its VALIDATING one, at
+`timeoutSeconds: 30`. Its MUTATING webhook matches `certificaterequests` only,
+which no probe creates directly, so this probe never pays for both in the same
+request. KEDA's and mariadb-operator's webhooks are validating-only, at 10s.
+Kubernetes caps any ONE webhook's timeout at 30, which is what `35` has to
+exceed HERE — NOT a chain of several. A request that crossed a mutating webhook
+and then a validating one would pay for both, one after the other (mutating
+webhooks run serially, validating ones in parallel), so an adopter whose own
+admission webhooks also match these kinds, or a future operator version that
+adds a mutating webhook where only a validating one exists today, can need more
+than 35s; this estate's own probes do not, measured. The 5 seconds over 30 is
+for the API server's own work.
 
 `cleanupMaxTime` IS 5. The cleanup only DELETEs, which no webhook here intercepts,
 so a healthy answer takes milliseconds. It is small because it is paid INSIDE the
@@ -205,11 +214,16 @@ weakening direction nothing here needs.
 {{- define "platform.hookRequest.connectTimeout" -}}5{{- end -}}
 
 {{/*
-THE MARGIN A PROBE JOB'S DEADLINE KEEPS OVER ITS COMPOSED LOOPS: pod scheduling,
-image pull, and the request time of every poll (each loop counts only its sleeps).
-The same 300 seconds `README.md` states for the helm budget — a stated CEILING,
-not a measurement. The healthy runs measured on kind-yadgar took 10s (preflight)
-and 15s (envoy-gateway-probe) in all.
+THE MARGIN A PROBE JOB'S DEADLINE KEEPS OVER ITS COMPOSED LOOPS: pod scheduling
+and the image pull. IT IS NOT SIZED AGAINST A SLOW POLL. `remove()` and `await()`
+charge each loop's `waited` only its POLL_SECONDS sleep, never the poll's own
+request, so a cluster that answers every poll slowly can run a loop's real time
+well past `preflight.timeoutSeconds` before this margin is used up.
+`activeDeadlineSeconds` still ends the Job in that case; it just does so without
+the script naming which operator was slow. The same 300 seconds `README.md`
+states for the helm budget — a stated CEILING, not a measurement. The healthy
+runs measured on kind-yadgar took 10s (preflight) and 15s (envoy-gateway-probe)
+in all.
 */}}
 {{- define "platform.hookDeadline.probeMargin" -}}300{{- end -}}
 

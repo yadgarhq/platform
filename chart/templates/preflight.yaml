@@ -97,11 +97,15 @@ spec:
   # More attempts would only multiply the bound before the install is allowed to
   # fail.
   backoffLimit: {{ $preflight.backoffLimit }}
-  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224). The script's bound is its loops;
-  # this bounds everything the script cannot see — a pod that never schedules, an
-  # image that never pulls — so the sync fails here instead of waiting on Argo's
-  # sync timeout. It exceeds the script's own worst case, so the script names the
-  # operator first: {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
+  # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AND IT IS THE REAL BOUND RATHER
+  # THAN A BACKSTOP BEHIND ONE THE SCRIPT KEEPS ITSELF. It covers everything the
+  # script cannot see — a pod that never schedules, an image that never pulls —
+  # so the sync fails here instead of waiting on Argo's sync timeout. `remove()`
+  # and `await()` charge `waited` only the sleep between polls, never the poll's
+  # own request, so a cluster answering every poll slowly can run this script past
+  # {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s of real time before the script's own check does
+  # — and on a cluster slow enough for that, this deadline ends the Job with no
+  # operator named: {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
   activeDeadlineSeconds: {{ $deadline }}
   template:
     metadata:
