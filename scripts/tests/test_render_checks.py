@@ -64,9 +64,9 @@ THE CHART DECLARES TWO KINDS OF CHECK, AND ONLY ONE OF THEM IS CONSTRUCTED THE W
 EVERYTHING ABOVE DESCRIBES. A CAPABILITY check calls `platform.require-api` and reads
 `.Capabilities.APIVersions.Has`, so every paragraph above applies to it: the trap, the
 filler, and the `--api-versions` construction on both halves. A VALUES check reads the
-release's own values and nothing else — this chart carries seven, the mixed-release
-refusal, the two arms of the `operators` shape refusal and two branches each of the two
-register-key arms, whose behaviour `scripts/tests/test_operators_shape.py` owns — and
+release's own values and nothing else — this chart carries eight, the mixed-release
+refusal, the type arm of its toggle list (ledger 1121), the two arms of the
+`operators` shape refusal and two branches each of the two register-key arms, whose behaviour `scripts/tests/test_operators_shape.py` owns — and
 for it NONE of that applies. It
 touches no `.Capabilities`, so a bare
 render answers it exactly as a cluster would, and ITS RED AND GREEN CASES ARE TWO BARE
@@ -126,14 +126,15 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and seven values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and eight values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted.
-EXPECTED_RENDER_CHECKS = 9
+EXPECTED_RENDER_CHECKS = 10
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
-# SEVEN: the mixed-release refusal, the TWO ARMS of the `operators` shape refusal
+# EIGHT: the mixed-release refusal, the type arm of its toggle list (ledger
+# 1121, root only for the register arms' reason), the TWO ARMS of the `operators` shape refusal
 # — a deleted key, refused wherever this chart runs, and a present non-map,
 # refused only when it is the root — and TWO BRANCHES EACH for the two
 # register-key arms, one arm per dependency `condition:` this chart declares. Each
@@ -142,10 +143,10 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # PRESENT non-bool `create`, refused only at the root because `yadgarhq/chart`
 # already names it. They are counted separately because each is its own `fail`
 # with its own message and its own red case;
-# `scripts/tests/test_operators_shape.py` owns what the seven of them DO, and this
+# `scripts/tests/test_operators_shape.py` owns what seven of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 7
+EXPECTED_VALUES_CHECKS = 8
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
@@ -1100,3 +1101,200 @@ def test_the_guard_names_every_OTHER_create_toggle_the_values_file_carries():
         f"and values.yaml carries {carried}: a toggle missing from the guard renders "
         f"its objects beside the operators and is never refused"
     )
+
+
+# ── LEDGER 1121: WHAT THE MIXED-RELEASE REFUSAL CLAIMS, AND WHAT IT READS ────
+#
+# F4. The refusal names every `create` toggle that is on, and it used to give ONE
+# reason for all of them: "a CRD this very release is installing is not
+# registered". That is true of the toggles that render a CRD-backed kind and false
+# of the rest. Measured on origin/main (helm v4.3.0, each toggle on alone, with
+# the cert-manager and Envoy Gateway groups passed so the capability checks stay
+# quiet): `certificates`, `edgeTLS` and `internalCA` render cert-manager.io/v1
+# kinds and `gatewayListener` renders gateway.envoyproxy.io and
+# gateway.networking.k8s.io kinds; `bootstrap`, `nats` and `valkey` render only
+# built-in kinds. Those three are still refused, for the release SHAPE alone
+# (ADR-0787), and the message now says so instead of blaming a CRD.
+#
+# F5. The toggle loop read each `create` by truthiness, with no type arm. Measured
+# on origin/main: `operators.create=true` beside `valkey.create: "false"` (a
+# string) was refused saying `valkey.create asked for the objects` — the adopter
+# wrote "false". Beside `valkey.create: 0` or `{}` it rendered at exit 0. The
+# operator side already refuses a present non-bool `create` by name; this side
+# now does too, at the ROOT ONLY, because `yadgarhq/chart` names a non-bool
+# `platform.<name>.create` itself and a subchart `fail` would shadow it.
+
+# The groups Kubernetes serves without a CRD, among the ones this chart renders.
+BUILTIN_GROUPS = {"", "apps", "batch", "rbac.authorization.k8s.io", "networking.k8s.io", "policy"}
+CRD_APIS = ("--api-versions", "cert-manager.io/v1", "--api-versions", "gateway.envoyproxy.io/v1alpha1")
+# What a toggle needs beside itself to render at all.
+TOGGLE_ALONE_EXTRA = {
+    "edgeTLS": ("--set", "edgeTLS.issuerRef.name=edge-issuer,edgeTLS.issuerRef.kind=ClusterIssuer"),
+}
+GUARD_CRD_BACKED = re.compile(r"\$crdBacked := \(list (?P<names>[^)]*)\)")
+THE_CRD_REASON = "a CustomResourceDefinition this very release is installing is not registered"
+THE_SHAPE_REASON = "no CRD-backed kind"
+
+
+def crd_backed_toggles_measured(chart: Path) -> list[str]:
+    """The guard's toggles whose render, alone, carries a non-built-in kind. PURE."""
+    found = []
+    for toggle in guard_list(GUARD_TOGGLES, chart):
+        result = render(
+            chart, *CRD_APIS, "--set", f"{toggle}.create=true,preflight.enabled=false",
+            *TOGGLE_ALONE_EXTRA.get(toggle, ()),
+        )
+        assert result.returncode == 0, f"{toggle}.create alone did not render: {result.stderr}"
+        groups = {
+            str(d["apiVersion"]).rpartition("/")[0] for d in objects(result.stdout)
+        }
+        if groups - BUILTIN_GROUPS:
+            found.append(toggle)
+    return sorted(found)
+
+
+def test_the_crd_backed_list_is_the_toggles_that_render_a_crd_backed_kind():
+    """F4's list against the RENDER, not against a reading of the templates."""
+    measured = crd_backed_toggles_measured(CHART)
+    assert measured == ["certificates", "edgeTLS", "gatewayListener", "internalCA"], measured
+    assert sorted(QUOTED.findall(GUARD_CRD_BACKED.search(RENDER_CHECKS.read_text()).group("names"))) == measured
+
+
+def test_a_mixed_release_of_built_in_toggles_blames_the_shape_not_a_crd():
+    result = render(CHART, "--set", "operators.create=true,valkey.create=true")
+    assert_it_is_the_mixed_release_refusal(result, "operators.create", "valkey.create")
+    assert THE_CRD_REASON not in result.stderr, result.stderr
+    assert "valkey.create renders no CRD-backed kind, and it is refused" in result.stderr, result.stderr
+
+
+def test_a_mixed_release_names_each_toggle_under_its_own_reason():
+    result = render(
+        CHART, "--set", "operators.create=true,certificates.create=true,valkey.create=true"
+    )
+    assert_it_is_the_mixed_release_refusal(
+        result, "operators.create", "certificates.create", "valkey.create"
+    )
+    assert "certificates.create renders objects whose kind needs a CustomResourceDefinition" in result.stderr, result.stderr
+    assert THE_CRD_REASON in result.stderr, result.stderr
+    assert "valkey.create renders no CRD-backed kind, and it is refused" in result.stderr, result.stderr
+
+
+NON_BOOL_TOGGLES = (
+    ("a-string-false", 'valkey:\n  create: "false"\n', "valkey", "string"),
+    ("a-zero", "valkey:\n  create: 0\n", "valkey", "float64"),
+    ("an-empty-map", "certificates:\n  create: {}\n", "certificates", "map"),
+)
+
+
+def test_a_non_bool_create_toggle_is_refused_by_name_at_the_root(tmp_path):
+    """F5: with and without the operators on, a non-bool toggle is named."""
+    for name, body, toggle, kind in NON_BOOL_TOGGLES:
+        for operators in ("false", "true"):
+            values = tmp_path / f"{name}-{operators}.yaml"
+            values.write_text(f"operators:\n  create: {operators}\n{body}")
+            result = render(CHART, "-f", str(values))
+            assert result.returncode != 0, f"{name} with operators {operators} rendered"
+            assert f"{toggle}.create is a {kind} rather than true or false" in result.stderr, (
+                f"{name} with operators {operators}: {result.stderr}"
+            )
+            assert "asked for the objects" not in result.stderr, result.stderr
+
+
+def test_dropping_the_toggle_type_arm_reddens_the_type_gate(tmp_path):
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    arm = re.compile(
+        r"\{\{- else if and \(hasKey \$block \"create\"\).*?(?=\{\{- else if \$create \}\})", re.DOTALL
+    )
+    assert len(arm.findall(original)) == 1, "the toggle type arm moved; this red case tests nothing"
+    template.write_text(arm.sub("", original))
+    values = tmp_path / "string-false.yaml"
+    values.write_text('operators:\n  create: true\nvalkey:\n  create: "false"\n')
+    result = render(copy, "-f", str(values))
+    # Without the arm the string is counted by truthiness, as on origin/main: the
+    # adopter who wrote "false" is told valkey.create asked for the objects.
+    assert result.returncode != 0, result.stdout[:400]
+    assert "valkey.create asked for the objects" in result.stderr, result.stderr
+    assert "valkey.create is a string rather than true or false" not in result.stderr, result.stderr
+
+
+def test_a_shape_reason_for_every_toggle_reddens_the_crd_list_gate(tmp_path):
+    """F4's red case: the old single reason, restored by emptying the CRD list."""
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    match = GUARD_CRD_BACKED.search(original)
+    assert match, "the CRD-backed list moved; this red case tests nothing"
+    template.write_text(original.replace(match.group(0), '$crdBacked := (list "valkey")'))
+    result = render(copy, "--set", "operators.create=true,certificates.create=true")
+    assert result.returncode != 0
+    assert "certificates.create renders no CRD-backed kind" in result.stderr, result.stderr
+    measured = crd_backed_toggles_measured(CHART)
+    listed = sorted(QUOTED.findall(GUARD_CRD_BACKED.search(template.read_text()).group("names")))
+    assert listed != measured
+
+
+# THE TYPE ARM IS ROOT ONLY, AND THAT HALF IS LOAD-BEARING TOO. Under a parent
+# that names a non-bool `platform.<name>.create` itself — `yadgarhq/chart` does —
+# the parent's message must be the one that arrives; helm runs the subchart's
+# templates first, so a subchart refusal would shadow it.
+THE_TOGGLE_PARENT_REFUSAL = "THE-PARENT-NAMED-THE-TOGGLE"
+TOGGLE_ROOT_ONLY_PIVOT = '(not (contains "/charts/" $.Template.BasePath))'
+
+
+def toggle_parent(destination: Path, child: Path) -> Path:
+    """A throwaway parent that declares `child` and refuses a non-bool toggle itself."""
+    (destination / "templates").mkdir(parents=True)
+    manifest = yaml.safe_load((child / "Chart.yaml").read_text())
+    (destination / "Chart.yaml").write_text(
+        "apiVersion: v2\nname: parent\nversion: 0.1.0\ndependencies:\n"
+        f"  - name: {manifest['name']}\n    version: {manifest['version']}\n"
+        '    repository: ""\n'
+    )
+    (destination / "values.yaml").write_text(f"{manifest['name']}: {{}}\n")
+    (destination / "templates" / "validate.yaml").write_text(
+        '{{- if not (kindIs "bool" .Values.platform.valkey.create) }}'
+        f'{{{{ fail "{THE_TOGGLE_PARENT_REFUSAL}" }}}}'
+        "{{- end }}\n"
+    )
+    shutil.copytree(child, destination / "charts" / manifest["name"])
+    return destination
+
+
+def render_toggle_under_parent(parent: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    values = tmp_path / f"{parent.name}.yaml"
+    values.write_text('platform:\n  valkey:\n    create: "false"\n')
+    return helm("template", "yadgar", str(parent), "-f", str(values))
+
+
+def test_the_parent_names_a_non_bool_toggle_and_this_chart_stays_quiet(tmp_path):
+    result = render_toggle_under_parent(toggle_parent(tmp_path / "parent", CHART), tmp_path)
+    assert result.returncode != 0, result.stdout[:400]
+    assert THE_TOGGLE_PARENT_REFUSAL in result.stderr, result.stderr
+    assert "rather than true or false" not in result.stderr, result.stderr
+
+
+def test_refusing_a_non_bool_toggle_from_the_subchart_would_shadow_the_parent(tmp_path):
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    assert original.count(TOGGLE_ROOT_ONLY_PIVOT) == 1, "the toggle arm's root-only test moved"
+    template.write_text(original.replace(TOGGLE_ROOT_ONLY_PIVOT, "true"))
+    result = render_toggle_under_parent(toggle_parent(tmp_path / "parent", copy), tmp_path)
+    assert result.returncode != 0
+    assert "valkey.create is a string rather than true or false" in result.stderr, result.stderr
+    assert THE_TOGGLE_PARENT_REFUSAL not in result.stderr, result.stderr
+
+
+def test_one_and_several_keys_read_in_the_right_number():
+    """The reason's verb agrees with how many keys it names."""
+    one = render(CHART, "--set", "operators.create=true,valkey.create=true").stderr
+    assert "valkey.create renders no CRD-backed kind, and it is refused" in one, one
+    several = render(CHART, "--set", "operators.create=true,nats.create=true,valkey.create=true").stderr
+    assert "nats.create, valkey.create render no CRD-backed kind, and they are refused" in several, several
+    one = render(CHART, "--set", "operators.create=true,certificates.create=true").stderr
+    assert "certificates.create renders objects whose kind" in one, one

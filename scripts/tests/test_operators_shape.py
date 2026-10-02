@@ -764,6 +764,30 @@ def test_a_parent_with_no_refusal_is_the_residual_this_chart_documents(tmp_path)
             f"{label} — the documented residual"
         )
 
+    # THE TOGGLE RANGE DOES NOT STAND DOWN, and this row is what holds it (ledger
+    # 1121 review). A truthy non-bool `create` on an estate toggle is refused by
+    # name only at the root; under a parent it is still COUNTED as on, the way the
+    # object templates read it, so the mixed release stays refused. Measured
+    # before this row existed: `certificates.create: "false"` beside
+    # `operators.create: true` under this bare parent, with the cert-manager group
+    # passed, rendered at exit 0 with the Certificates and the operators' CRDs in
+    # one release. The group is passed so the capability check cannot be the
+    # refusal that arrives.
+    for toggle in ("certificates", "valkey"):
+        overlay = values_file(
+            tmp_path / f"toggle-{toggle}.yaml",
+            f'platform:\n  operators:\n    create: true\n  {toggle}:\n    create: "false"\n',
+        )
+        result = helm(
+            "template", "yadgar", str(parent), "-f", str(overlay),
+            "--api-versions", "cert-manager.io/v1",
+        )
+        assert result.returncode != 0, (
+            f'{toggle}.create: "false" beside the operators rendered under a bare parent '
+            f"— the mixed release this chart refuses at the root went through"
+        )
+        assert f"{toggle}.create asked for the objects" in result.stderr, result.stderr
+
 
 # ═══ THE GREEN SIDE: THE GUARD CHANGED NO USABLE VALUE ═══════════════════════
 
