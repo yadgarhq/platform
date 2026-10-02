@@ -164,3 +164,88 @@ The caller splits it.
 {{- end -}}
 {{- join " " $probes -}}
 {{- end -}}
+
+{{/*
+HOW LONG ONE REQUEST FROM A HOOK SCRIPT MAY TAKE (ledger 1224). Before these, no
+`curl` in a hook script carried a timeout, so an API server that accepted the
+connection and never answered held the Job — and the sync behind it — open for as
+long as the caller would wait.
+
+`maxTime` IS 35 FOR THE PROBES, AND IT HAS TO EXCEED 30. Measured on kind-yadgar
+(2026-10-02): of what these probes create, cert-manager's Issuer and
+Certificate cross its VALIDATING webhook (30s); KEDA's ScaledObject and the
+mariadb-operator dry-run cross validating-only webhooks at 10s. NO PROBED
+CREATE CROSSES A MUTATING WEBHOOK: cert-manager's matches
+`certificaterequests` only, which no probe creates directly, so this probe
+never pays for both in the same request. Kubernetes caps any ONE webhook's
+timeout at 30, which is what `35` has to exceed HERE — NOT a chain of several.
+A request that crossed a mutating webhook
+and then a validating one would pay for both, one after the other (mutating
+webhooks run serially, validating ones in parallel), so an adopter whose own
+admission webhooks also match these kinds, or a future operator version that
+adds a mutating webhook where only a validating one exists today, can need more
+than 35s; this estate's own probes do not, measured. The 5 seconds over 30 is
+for the API server's own work.
+
+`cleanupMaxTime` IS 5. The cleanup only DELETEs, which no webhook here intercepts,
+so a healthy answer takes milliseconds. It is small because it is paid INSIDE the
+pod's termination grace period: `sh` defers its TERM trap until the foreground
+command returns, so a pod killed at its deadline first waits out the request in
+flight (up to `maxTime`), then runs one DELETE per object the probe made. Each Job's
+`terminationGracePeriodSeconds` is that sum, computed beside it.
+
+`bootstrapMaxTime` IS 10. The bootstrap Jobs only POST Secrets, which no webhook in
+this estate intercepts; the whole script measured 3s for three requests on
+kind-yadgar (2026-10-01, Job start to completion).
+
+`connectTimeout` IS 5, for all of them. An in-cluster connection to the API server
+or to Prometheus opens in milliseconds; a refused or blackholed one is the failure
+this bounds.
+
+A CURL TIMEOUT EXITS THE SCRIPT, on purpose. Every request sits under `set -e`, so
+an exceeded `--max-time` ends the Job with curl's own message where it used to hang.
+The cleanup's DELETEs carry `|| true` and still run.
+
+LITERALS, NOT VALUES: `--max-time 0` means no limit at all, so a key would be a
+weakening direction nothing here needs.
+*/}}
+{{- define "platform.hookRequest.maxTime" -}}35{{- end -}}
+{{- define "platform.hookRequest.cleanupMaxTime" -}}5{{- end -}}
+{{- define "platform.hookRequest.bootstrapMaxTime" -}}10{{- end -}}
+{{- define "platform.hookRequest.connectTimeout" -}}5{{- end -}}
+
+{{/*
+THE MARGIN A PROBE JOB'S DEADLINE KEEPS OVER ITS COMPOSED LOOPS: pod scheduling
+and the image pull. IT IS NOT SIZED AGAINST A SLOW POLL. `remove()` and `await()`
+charge each loop's `waited` only its POLL_SECONDS sleep, never the poll's own
+request, so a cluster that answers every poll slowly can run a loop's real time
+well past `preflight.timeoutSeconds` before this margin is used up.
+`activeDeadlineSeconds` still ends the Job in that case; it just does so without
+the script naming which operator was slow. The same 300 seconds `README.md`
+states for the helm budget — a stated CEILING, not a measurement. The healthy
+runs measured on kind-yadgar took 10s (preflight) and 15s (envoy-gateway-probe)
+in all.
+*/}}
+{{- define "platform.hookDeadline.probeMargin" -}}300{{- end -}}
+
+{{/*
+THE JOB CONTROLLER'S POD BACKOFF BEFORE ATTEMPT `limit + 1`: 10s, doubled after
+each failure, capped at six minutes (Kubernetes, "Pod backoff failure policy").
+`backoffLimit: 4` gives 10 + 20 + 40 + 80 = 150. Takes the limit; returns seconds.
+*/}}
+{{- define "platform.hookDeadline.jobBackoff" -}}
+{{- $total := 0 -}}
+{{- $delay := 10 -}}
+{{- range until (int .) -}}
+{{- $total = add $total (min $delay 360) -}}
+{{- $delay = mul $delay 2 -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
+{{/*
+A BOOTSTRAP ATTEMPT'S ALLOWANCE BEFORE ITS FIRST REQUEST: scheduling the pod and
+starting its container. A stated ceiling; the image is the preflight's, pinned by
+digest and pulled `IfNotPresent`.
+*/}}
+{{- define "platform.hookDeadline.bootstrapStart" -}}30{{- end -}}
