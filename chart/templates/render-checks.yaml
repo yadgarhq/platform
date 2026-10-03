@@ -4,13 +4,14 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. SEVEN of the second kind live below — the
+release's own values and nothing else. NINE of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
-arms, and then the mixed-release refusal — and everything that makes a capability
+arms, the per-operator create arm, and then the mixed-release refusal and the type
+arm of its toggle list — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all seven;
+the mixed-release pair and the count of all nine;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
@@ -225,10 +226,9 @@ deleted key is not one. The three rows above at EXIT 0 are that hole measured.
 that arrives, so the two repositories cannot drift into both refusing without a
 test going red.
 
-THE SUB-KEYS ARE STILL OUT OF THE CLASS, and that is measured rather than
-asserted: `values.yaml` declares no `operators.<op>`, so helm does not delete a
-null written there and it raises instead — ADR-0794's knowingly-open residual,
-held by `test_a_sub_key_is_not_in_this_class`.
+THE SUB-KEYS ARE NOT IN THIS ARM'S CLASS: `values.yaml` declares no
+`operators.<op>`, so helm does not delete a null written there. They get the
+per-operator create arm below (ledger 1252).
 
 A PRESENT NON-MAP `nats` NEEDS NO ARM, MEASURED: `nats: true` and `nats: []` are
 refused by HELM ITSELF, `type mismatch on nats`, before any template runs. The
@@ -263,6 +263,57 @@ why it gets no such protection and needs arms one and two.
 {{- end }}
 {{- end }}
 {{- end }}{{/* end of the operators register-key arm */}}
+
+{{/*
+THE PER-OPERATOR SUB-KEY, REFUSED WHEN IT IS PRESENT AND NOT A BOOL (ledger 1252).
+
+Each operator is declared `condition: operators.<op>.create,operators.create`.
+helm uses the FIRST path that holds a bool and SKIPS any other — so
+`keda: {create: "false"}` does not turn KEDA off, it hands the decision to
+`operators.create`, which is never what somebody who typed the sub-key meant.
+`templates/_operators.tpl` now resolves the sub-key exactly as helm does, so the
+vendored CRDs follow the operator either way; this arm makes the typo LOUD.
+MEASURED on helm v4.3.0, 2026-10-03, before the helper changed:
+
+  operators: {create: false, keda: {create: "false"}}  -> EXIT 0, 6 vendored
+                                                          KEDA CRDs, no KEDA
+
+`create: null` IS A PRESENT KEY HERE, unlike the register key's: `values.yaml`
+declares no per-operator sub-key, so helm leaves the null in place and `kindOf`
+reads `invalid`, printed as `null`. A sub-block that is null, a scalar, or a
+map with no `create` is NOT refused: helm's condition cannot read a path there,
+falls through to the register key, and the helper does the same.
+
+ROOT ONLY, for the register arms' reason: helm executes the subchart's templates
+first, so a refusal here would shadow any parent that names the key itself, and
+under a parent the helper already matches helm.
+
+THE LIST IS A LITERAL, AND IT IS GATED AGAINST `Chart.yaml`. `.Chart.Dependencies`
+cannot stand in for it, measured on helm v4.3.0: helm DROPS a disabled dependency
+from that list before any template runs, so with `operators.create: false` the
+very operator whose sub-key is mistyped is the one missing from it.
+`test_the_sub_key_arm_ranges_over_every_two_path_operator` compares this list
+with the conditions `Chart.yaml` declares, and
+`test_a_non_bool_sub_key_is_refused_at_the_root_by_name` is what it does. The
+variable is not `$operator`, so the mixed-release guard's own list stays the
+first `range $operator` in this file, which `test_render_checks.py` reads.
+*/}}
+{{- if and (kindIs "map" .Values.operators) (not (contains "/charts/" .Template.BasePath)) }}
+{{- range $subKeyOperator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator" "prometheus") }}
+{{- $block := index $.Values.operators $subKeyOperator }}
+{{- if and (kindIs "map" $block) (hasKey $block "create") (not (kindIs "bool" (index $block "create"))) }}
+{{- $kind := kindOf (index $block "create") }}
+{{- if eq $kind "invalid" }}{{ $kind = "null" }}{{ end }}
+{{- fail (printf (join "" (list
+      "platform: operators.%s.create is a %s rather than true or false. "
+      "Its dependency is declared `condition: operators.%s.create,operators.create`, and helm uses the first "
+      "path that holds a bool — so helm skips it and operators.create decides whether that operator is "
+      "installed, which is not what a value written here means. "
+      "Write `operators.%s.create: true` or `false`, unquoted, or delete the key to let `operators.create` decide."))
+      $subKeyOperator $kind $subKeyOperator $subKeyOperator) }}
+{{- end }}
+{{- end }}
+{{- end }}{{/* end of the per-operator create arm */}}
 
 {{- if kindIs "map" .Values.nats }}
 {{- if not (hasKey .Values.nats "create") }}
@@ -324,8 +375,9 @@ THE FIRST CONJUNCT IS NOT `operators.create`, AND THE DIFFERENCE IS A HOLE. Each
 dependency's `condition:` is `operators.<op>.create,operators.create`, and helm
 reads the FIRST VALID path and stops — so an adopter who sets
 `operators.certManager.create: true` alone installs cert-manager with the register
-key still false. `dig` with the register key as the FALLBACK is that same
-resolution, which is why the guard below uses it. `or .Values.operators.keda.create
+key still false. `templates/_operators.tpl` — the operator's own `create` when it
+is a bool inside a map, the register key otherwise — is that same resolution, which
+is why the guard below uses it (ledger 1252: a truthy `dig` was not). `or .Values.operators.keda.create
 .Values.operators.create` does NOT reproduce it, and reading `operators.create`
 alone misses the sub-key shape entirely.
 `test_a_guard_reading_only_the_register_key_misses_the_sub_key_case` constructs that
@@ -364,8 +416,8 @@ these two gates keep the LISTS in step, which the helper says nothing about.
 `map[string]interface{}` and the ROOT `.Values` is helm's own `chartutil.Values`
 type, so `dig <key> "create" false $.Values` dies with `interface conversion:
 interface {} is common.Values` — measured on helm v4.3.0, 2026-09-25. The operator
-side above passes `.Values.operators`, an ordinary map, which is why `dig` is
-correct there and its fallback semantics are available there.
+side above goes through `templates/_operators.tpl`, which uses `index` as well since
+ledger 1252: `dig` read the sub-key by truthiness, and helm's condition does not.
 */}}
 {{/*
 THE TYPE ARM, AND IT IS THE OPERATOR SIDE'S (ledger 1121, F5). A toggle read by
