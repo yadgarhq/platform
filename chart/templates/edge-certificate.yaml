@@ -38,6 +38,12 @@ so a name with no kind is half an address.
 own empty default — with `internalCA.create` false, so no fallback applies —
 meets the `required` message rather than a nil-pointer error naming a template
 line.
+
+`argocd.argoproj.io/sync-options: Prune=false` (ADR-0851), FOR THE SAME REASON
+AS THE LISTENER'S THREE OBJECTS IN `gateway-listener.yaml`. This leaf has no
+Helm-side replacement either: an argocd prune drops the Secret the listener
+terminates on, and the listener itself still renders, so no render check sees
+the loss coming. `Delete=false` stays out, same as there.
 */}}
 {{- if .Values.edgeTLS.create }}
 {{- $edge := .Values.edgeTLS }}
@@ -49,6 +55,8 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ $edge.name }}
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   secretName: {{ $edge.name }}
   {{- /* `edgeTLS.commonName` and `edgeTLS.dnsNames`, else `global.hostname`

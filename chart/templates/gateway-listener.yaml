@@ -19,6 +19,14 @@ nothing saying so. The GatewayClass is cluster-scoped and has no namespace to se
 THE RENDER CHECK FOR THIS TOGGLE LIVES IN `render-checks.yaml`, on
 `gateway.envoyproxy.io/v1alpha1` and NOT on the Gateway API's own group — the
 reason is written there and in `values.yaml` beside the recorded string.
+
+ALL THREE CARRY `argocd.argoproj.io/sync-options: Prune=false` (ADR-0851).
+None of the three has a Helm-side replacement, so an argocd prune of any one —
+a manual sync with pruning on, a values key renamed out from under it — drops
+the edge with the other two still rendering, which is exactly the failure a
+render check cannot see. `scripts/tests/test_shared_infrastructure.py` asserts
+the annotation on all three independently. `Delete=false` is a separate,
+unruled question and deliberately absent here.
 */}}
 {{- if .Values.gatewayListener.create }}
 {{- $listener := .Values.gatewayListener }}
@@ -27,6 +35,8 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
   name: {{ $listener.className }}
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   # NOT A CONVENTION TO GUESS AT. This is the value Envoy Gateway's own chart
   # carries as `config.envoyGateway.gateway.controllerName`, read off
@@ -38,6 +48,8 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: {{ $listener.gatewayName }}
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   gatewayClassName: {{ $listener.className }}
 
@@ -91,6 +103,8 @@ apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
   name: {{ $listener.envoyProxy.name }}
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   provider:
     type: Kubernetes
