@@ -676,12 +676,35 @@ def test_a_listener_secret_nothing_writes_reddens_the_gate(tmp_path):
 
 
 def prune_false(document: dict) -> bool:
-    """True when `document` carries argocd's non-prune sync-option. PURE."""
-    return (
-        document.get("metadata", {}).get("annotations", {}).get(
-            "argocd.argoproj.io/sync-options"
-        )
-        == "Prune=false"
+    """True when `document` carries argocd's non-prune sync-option. PURE.
+
+    `sync-options` is argocd's own COMMA-SEPARATED gate form: an object may
+    carry `Prune=false` alongside other options, e.g. `Prune=false,Delete=false`,
+    so an exact `==` against the whole annotation value misses that case.
+    """
+    value = document.get("metadata", {}).get("annotations", {}).get(
+        "argocd.argoproj.io/sync-options"
+    )
+    return "Prune=false" in [option.strip() for option in str(value).split(",")]
+
+
+def test_prune_false_accepts_a_multi_value_sync_options_annotation():
+    """argocd's gate form is comma-separated: `Prune=false` need not stand alone.
+
+    An object that also opts out of `Delete` carries
+    `Prune=false,Delete=false` in the one annotation, and `prune_false` must
+    still read true — an exact `==` against the whole value would miss it.
+    """
+    document = {
+        "metadata": {
+            "annotations": {
+                "argocd.argoproj.io/sync-options": "Prune=false,Delete=false"
+            }
+        }
+    }
+    assert prune_false(document), (
+        "prune_false missed Prune=false inside a multi-value sync-options "
+        "annotation"
     )
 
 
