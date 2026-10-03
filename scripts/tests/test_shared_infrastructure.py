@@ -675,6 +675,90 @@ def test_a_listener_secret_nothing_writes_reddens_the_gate(tmp_path):
     )
 
 
+def prune_false(document: dict) -> bool:
+    """True when `document` carries argocd's non-prune sync-option. PURE.
+
+    `sync-options` is argocd's own COMMA-SEPARATED gate form: an object may
+    carry `Prune=false` alongside other options, e.g. `Prune=false,Delete=false`,
+    so an exact `==` against the whole annotation value misses that case.
+    """
+    value = document.get("metadata", {}).get("annotations", {}).get(
+        "argocd.argoproj.io/sync-options"
+    )
+    return "Prune=false" in [option.strip() for option in str(value).split(",")]
+
+
+def test_prune_false_accepts_a_multi_value_sync_options_annotation():
+    """argocd's gate form is comma-separated: `Prune=false` need not stand alone.
+
+    An object that also opts out of `Delete` carries
+    `Prune=false,Delete=false` in the one annotation, and `prune_false` must
+    still read true — an exact `==` against the whole value would miss it.
+    """
+    document = {
+        "metadata": {
+            "annotations": {
+                "argocd.argoproj.io/sync-options": "Prune=false,Delete=false"
+            }
+        }
+    }
+    assert prune_false(document), (
+        "prune_false missed Prune=false inside a multi-value sync-options "
+        "annotation"
+    )
+
+
+def test_every_edge_object_is_protected_from_a_prune():
+    """ADR-0851: argocd never prunes an object whose loss takes the edge down.
+
+    THE FOUR OBJECTS, AND WHY EACH ONE QUALIFIES. The GatewayClass, the Gateway
+    and the EnvoyProxy are the "three objects and one toggle" this file's own
+    header describes — none usable without the other two — and the edge
+    Certificate is the leaf the listener terminates on (asserted above by
+    `test_the_listener_serves_the_secret_the_edge_certificate_writes`). None of
+    the four has a Helm-side replacement: an argocd prune of any one drops the
+    edge, and no render check can see that coming, because this is an argocd
+    sync-option on the object, not a Helm chart shape.
+    """
+    rendered = adopter_render()
+    gateway_class = one(rendered, "GatewayClass")
+    gateway = one(rendered, "Gateway")
+    envoy_proxy = one(rendered, "EnvoyProxy")
+    certificate = by_name(rendered, "Certificate", chart_values()["edgeTLS"]["name"])
+
+    for document in (gateway_class, gateway, envoy_proxy, certificate):
+        assert prune_false(document), (
+            f"{document['kind']} {document['metadata']['name']} carries no "
+            f"argocd.argoproj.io/sync-options: Prune=false, so argocd may prune "
+            f"it on a diff and take the edge down with it (ADR-0851)"
+        )
+
+
+def test_an_edge_object_losing_the_annotation_reddens_the_gate(tmp_path):
+    """The red case, and it is a TEMPLATE edit by construction.
+
+    Only the GatewayClass's copy of the annotation is cut, which is enough: the
+    gate above checks all four independently, so a single missing annotation on
+    any one of them has to turn it red.
+    """
+    copy = chart_with(
+        tmp_path,
+        "templates/gateway-listener.yaml",
+        lambda text: text.replace(
+            "  annotations:\n"
+            "    argocd.argoproj.io/sync-options: Prune=false\n",
+            "",
+            1,
+        ),
+    )
+    rendered = render(copy, *api_version_arguments(), "-f", str(ADOPTER_VALUES))
+    gateway_class = one(rendered, "GatewayClass")
+    assert not prune_false(gateway_class), (
+        "the red case removed the GatewayClass's annotation and the render "
+        "still carried it, so this construction is testing nothing"
+    )
+
+
 def test_the_gateway_listener_renders_the_objects_it_counts():
     """The denominator, asserted rather than assumed."""
     rendered = adopter_render()
@@ -1688,11 +1772,15 @@ def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
 # files, not a restatement of what this chart happens to render.
 DEPLOY_EDGE = Path(__file__).resolve().parent / "fixtures" / "deploy-edge"
 
-# THE FIELDS DEPLOY'S COPIES CARRY THAT THIS CHART MUST NOT. `metadata.namespace`
-# is supplied by the release (and must stay absent here — `gateway-listener.yaml`
-# says why), and `argocd.argoproj.io/sync-options: Prune=false` is deploy#68's
-# handover guard on the copies being retired, not a property of the objects.
-DEPLOY_ONLY_METADATA = ("namespace", "annotations")
+# THE ONE FIELD DEPLOY'S COPIES CARRY THAT THIS CHART MUST NOT.
+# `metadata.namespace` is supplied by the release, and must stay absent here —
+# `gateway-listener.yaml` says why. `argocd.argoproj.io/sync-options:
+# Prune=false` used to be stripped here too, as deploy#68's own handover guard
+# on the copies being retired rather than a property of the objects. ADR-0851
+# makes it exactly that property, on the chart's own render as well as on
+# deploy's copies — so it is no longer stripped, and the equality below now
+# asserts the two annotations agree rather than ignoring the field.
+DEPLOY_ONLY_METADATA = ("namespace",)
 
 # THIS ORGANISATION'S VALUES FOR THE FOUR OBJECTS, as its parent chart's
 # `platform:` block will state them at handover. The issuer is EXPLICIT: with
@@ -1721,11 +1809,16 @@ gatewayListener:
 # THE ENVOYPROXY `main` RENDERED FROM `example/values.yaml` BEFORE ADR-0809, parsed.
 # A LITERAL, so the default path is pinned to what shipped rather than to whatever
 # the template renders now. The keys ADR-0809 adds must leave this unchanged when
-# they are unset.
+# they are unset. `metadata.annotations` is the one exception: ADR-0851 adds the
+# `Prune=false` sync-option unconditionally, so it is stated here too rather than
+# recorded as a property ADR-0809's keys could still leave unset.
 PRE_ADR_0809_ENVOYPROXY = {
     "apiVersion": "gateway.envoyproxy.io/v1alpha1",
     "kind": "EnvoyProxy",
-    "metadata": {"name": "edge"},
+    "metadata": {
+        "name": "edge",
+        "annotations": {"argocd.argoproj.io/sync-options": "Prune=false"},
+    },
     "spec": {
         "provider": {
             "type": "Kubernetes",
