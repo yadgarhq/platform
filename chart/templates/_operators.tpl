@@ -13,14 +13,32 @@ boolean tests the result for truth; the mixed-release guard uses the string
 itself, so the key it names in its refusal is derived here rather than in a
 second place.
 
-WHY `dig` WITH THE REGISTER KEY AS THE FALLBACK. It is helm's own resolution of
-the `condition:` each of the five dependencies carries. `Chart.yaml` declares
-`condition: operators.<op>.create,operators.create`, and helm evaluates the
-FIRST VALID path and stops — so an unset `operators.<op>.create` defers to
-`operators.create` and a set one wins, in either direction. `or
-.Values.operators.keda.create .Values.operators.create` does NOT reproduce it:
-it is TRUE in the case where the dependency's own condition is false, which
-applies KEDA's CRDs to a cluster running no KEDA at all.
+WHY THE SUB-KEY COUNTS ONLY AS A BOOL INSIDE A MAP. It is helm's own resolution
+of the `condition:` each of the five dependencies carries. `Chart.yaml` declares
+`condition: operators.<op>.create,operators.create`, and helm reads each path in
+turn and uses THE FIRST ONE THAT HOLDS A BOOL: a path that is absent, null, a
+string, a number or a map is skipped (with at most a `returned non-bool value`
+warning) and the register key decides. So an unset `operators.<op>.create`
+defers to `operators.create` and a bool one wins, in either direction.
+
+`dig .operator "create" $operators.create $operators` DID NOT REPRODUCE IT, and
+that is ledger 1252, measured on helm v4.3.0 on 2026-10-03. `dig` reads the
+sub-key by TRUTHINESS, so `operators: {create: false, keda: {create: "false"}}`
+rendered KEDA's six vendored CRDs at exit 0 while helm, skipping the string,
+left KEDA itself out. And `dig` walks into the sub-block, so `keda:` null or
+`keda: true` RAISED. Nor does `or .Values.operators.keda.create
+.Values.operators.create`: it is TRUE where the dependency's own condition is
+false, which applies KEDA's CRDs to a cluster running no KEDA at all.
+
+THE KEY NAMED IS THE KEY THAT DECIDED. The sub-key is named only when it holds a
+bool; a `keda` block with no usable `create` in it is the register key's doing,
+and the mixed-release refusal says so rather than pointing at a key that
+decided nothing.
+
+A PRESENT NON-BOOL SUB-KEY IS REFUSED BY NAME, AT THE ROOT ONLY, in
+`templates/render-checks.yaml` — the per-operator create arm. Under a parent
+this helper stays quiet and resolves it exactly as helm does, so the CRDs follow
+the operator either way.
 
 ── THE TYPE ARM, WHICH IS THE WHOLE REASON THIS FILE EXISTS ────────────────────
 
@@ -45,12 +63,6 @@ five on. Coercing here would install five operators while skipping every CRD
 this chart owns. The refusal in `templates/render-checks.yaml` is what stops
 that, and this helper going quiet is only safe because that refusal exists.
 
-WHAT IS STILL NOT GUARDED, STATED HERE SO NOBODY READS SILENCE AS COVERAGE.
-`operators.<name>` set to a non-map is left alone — ADR-0794's knowingly-open
-residual, because refusing present non-maps in that range would also have to
-exclude `create` by name, and that enumeration is a design question nobody has
-answered.
-
 CALL IT WITH A DICT:
 
   {{- if (include "platform.operator-create" (dict "context" $ "operator" "keda")) }}
@@ -58,12 +70,17 @@ CALL IT WITH A DICT:
 {{- define "platform.operator-create" -}}
 {{- $operators := .context.Values.operators -}}
 {{- if kindIs "map" $operators -}}
-{{- if (dig .operator "create" $operators.create $operators) -}}
-{{- if hasKey $operators .operator -}}
-operators.{{ .operator }}.create
-{{- else -}}
-operators.create
+{{- $block := index $operators .operator -}}
+{{- $own := "" -}}
+{{- if kindIs "map" $block -}}
+{{- $own = index $block "create" -}}
 {{- end -}}
+{{- if kindIs "bool" $own -}}
+{{- if $own -}}
+operators.{{ .operator }}.create
+{{- end -}}
+{{- else if $operators.create -}}
+operators.create
 {{- end -}}
 {{- end -}}
 {{- end -}}

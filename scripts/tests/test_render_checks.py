@@ -126,14 +126,14 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and eight values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and nine values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted.
-EXPECTED_RENDER_CHECKS = 10
+EXPECTED_RENDER_CHECKS = 11
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
-# EIGHT: the mixed-release refusal, the type arm of its toggle list (ledger
+# NINE: the mixed-release refusal, the type arm of its toggle list (ledger
 # 1121, root only for the register arms' reason), the TWO ARMS of the `operators` shape refusal
 # — a deleted key, refused wherever this chart runs, and a present non-map,
 # refused only when it is the root — and TWO BRANCHES EACH for the two
@@ -141,12 +141,14 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # arm splits the same way the shape refusal does: a DELETED `create`, refused
 # wherever this chart runs because the parent's guard cannot reach it, and a
 # PRESENT non-bool `create`, refused only at the root because `yadgarhq/chart`
-# already names it. They are counted separately because each is its own `fail`
+# already names it. And the per-operator create arm (ledger 1252): a present
+# non-bool `operators.<op>.create`, refused only at the root, for the same reason.
+# They are counted separately because each is its own `fail`
 # with its own message and its own red case;
-# `scripts/tests/test_operators_shape.py` owns what seven of them DO, and this
+# `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 8
+EXPECTED_VALUES_CHECKS = 9
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
@@ -908,8 +910,8 @@ def test_a_guard_reading_only_the_register_key_misses_the_sub_key_case(tmp_path)
     """THE CONSTRUCTED RED CASE FOR THE GUARD'S SHAPE (ADR-0793).
 
     The mutation is one line: the guard resolves each operator the way helm resolves
-    the dependency's own two-path `condition:` — `dig`, with the register key as the
-    FALLBACK — and this rewrites it to read the register key ALONE. That is the
+    the dependency's own two-path `condition:` — the sub-key when it holds a bool,
+    the register key otherwise — and this rewrites it to read the register key ALONE. That is the
     plausible-but-wrong guard, and under it the sub-key shape is no longer refused by
     this check: the render falls through to the cert-manager capability check, which
     refuses for a different reason and says to pass `--api-versions`.
