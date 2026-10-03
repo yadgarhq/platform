@@ -34,8 +34,9 @@ THE GUARD BELOW IS THIS FILE'S OWN, AND IT GOES THROUGH THE SHARED HELPER. It
 mirrors the `condition:` of the dependency this CRD belongs to; it is NOT
 `operators.create` over the directory. `templates/_operators.tpl` holds the one
 expression every site reading `operators` calls, and its header carries the whole
-argument: `dig` with `operators.create` as the fallback reproduces helm's own
-resolution of a comma-separated `condition:`, `or` does not, and the
+argument: the operator's own `create` when it is a bool, else `operators.create`,
+reproduces helm's own resolution of a comma-separated `condition:` (ledger 1252:
+a truthy `dig` did not), `or` does not either, and the
 `kindIs "map"` arm inside it is what stops an adopter's `operators: true` raising
 a Go stack trace out of THIS file before the refusal that names the key can run
 (ADR-0794).

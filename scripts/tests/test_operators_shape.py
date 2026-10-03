@@ -271,6 +271,82 @@ BROKER_ARM_CLOSES = "{{- end }}{{/* end of the nats register-key arm */}}\n"
 # reader does not have to check whether two spellings mean the same thing.
 THE_ROOT_ONLY_PIVOT = '{{- else if not (contains "/charts/" .Template.BasePath) }}'
 
+# ── THE PER-OPERATOR SUB-KEY, RESOLVED THE WAY HELM RESOLVES IT (ledger 1252) ──
+# Each operator is declared `condition: operators.<op>.create,operators.create`.
+# helm reads each path in turn and USES THE FIRST ONE THAT HOLDS A BOOL: a path
+# that is absent, null, or any other kind is skipped with at most a warning, and
+# the register key decides. The helper used to read the sub-key by truthiness
+# through `dig`, so it disagreed with helm in both directions. MEASURED on helm
+# v4.3.0, 2026-10-03, with this chart as the root, before the fix:
+#
+#   create: false, keda: {create: "false"}  -> EXIT 0, 6 vendored KEDA CRDs,
+#                                              0 documents from KEDA's chart
+#   create: true,  keda: {create: "false"}  -> EXIT 0, KEDA installed, and the
+#                                              mixed refusal named the sub-key
+#   create: false, keda:                    -> RAISE inside the helper
+#   create: false, keda: true               -> RAISE inside the helper
+#
+# The first row is CRDs for an operator that is not there; ADR-0794's class one
+# level down. So a present non-bool sub-key is REFUSED BY NAME at the root, and
+# under a parent the helper resolves it exactly as helm does and stays quiet.
+THE_SUB_KEY_REFUSAL = "so helm skips it and operators.create decides"
+# EACH ROW: (name, the `operators:` block, the operator, the kind reported).
+# `create: null` IS PRESENT HERE, unlike the register key's: `values.yaml`
+# declares no per-operator sub-key, so helm does not delete a null written there,
+# and `kindOf` answers `invalid`, which the refusal prints as `null`.
+THE_SUB_KEY_IS_NOT_A_BOOL = (
+    (
+        "keda-create-is-the-string-false",
+        'operators:\n  create: false\n  keda:\n    create: "false"\n',
+        "keda",
+        "string",
+    ),
+    (
+        "keda-create-is-the-string-false-under-a-true-register",
+        'operators:\n  create: true\n  keda:\n    create: "false"\n',
+        "keda",
+        "string",
+    ),
+    ("keda-create-is-zero", "operators:\n  create: false\n  keda:\n    create: 0\n", "keda", "float64"),
+    ("keda-create-is-an-empty-map", "operators:\n  create: false\n  keda:\n    create: {}\n", "keda", "map"),
+    ("keda-create-is-null", "operators:\n  create: false\n  keda:\n    create:\n", "keda", "null"),
+    (
+        "cert-manager-create-is-the-string-yes",
+        'operators:\n  create: false\n  certManager:\n    create: "yes"\n',
+        "certManager",
+        "string",
+    ),
+)
+# Sub-blocks helm's condition CANNOT read a `create` out of, and so skips: the
+# register key decides. Each is rendered with the register key false and true.
+THE_SUB_BLOCKS_THE_CONDITION_SKIPS = (
+    ("keda-is-null", "  keda:\n"),
+    ("keda-is-a-bool", "  keda: true\n"),
+    ("keda-is-a-string", '  keda: "on"\n'),
+    ("keda-is-a-map-with-no-create", "  keda:\n    foo: x\n"),
+)
+# WHERE THE SUB-KEY ARM OPENS AND CLOSES, for its red case. The opener is NOT
+# `REGISTER_ARM_OPENS`, and it carries no `else if` pivot, so the cuts the red
+# cases above make cannot reach it by accident.
+SUB_KEY_ARM_OPENS = (
+    '{{- if and (kindIs "map" .Values.operators) '
+    '(not (contains "/charts/" .Template.BasePath)) }}'
+)
+SUB_KEY_ARM_CLOSES = "{{- end }}{{/* end of the per-operator create arm */}}\n"
+# The helper as it stood before ledger 1252, for the red case that reverts it.
+THE_DIG_HELPER = """{{- define "platform.operator-create" -}}
+{{- $operators := .context.Values.operators -}}
+{{- if kindIs "map" $operators -}}
+{{- if (dig .operator "create" $operators.create $operators) -}}
+{{- if hasKey $operators .operator -}}
+operators.{{ .operator }}.create
+{{- else -}}
+operators.create
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}"""
+
 # THE THREE TEXTS A RAISE LEAVES IN STDERR (ADR-0794). A refusal and a raise both
 # exit 1, so the exit code alone cannot tell a named key from a stack trace — and
 # the refusal's own wording may not contain any of them, or the assertion below
@@ -484,6 +560,39 @@ def vendored_crd_names(stdout: str) -> list[str]:
         if document.get("kind") == "CustomResourceDefinition"
         and (document.get("spec") or {}).get("group") in VENDORED_GROUPS
     )
+
+
+def keda_crds(stdout: str) -> int:
+    """How many of the six vendored KEDA CRDs rendered."""
+    return sum(1 for name in vendored_crd_names(stdout) if "keda.sh" in name)
+
+
+def keda_documents(stdout: str) -> int:
+    """How many documents came from KEDA's own subchart, by `# Source:`.
+
+    The vendored CRDs live under `platform/templates/vendored-crds/`, so they are
+    NOT counted here. The two numbers must agree on zero-or-not: CRDs without the
+    operator, or the operator without its CRDs, is the defect ledger 1252 names.
+    """
+    return sum(
+        1
+        for line in stdout.splitlines()
+        if line.startswith("# Source: ") and "platform/charts/keda/" in line
+    )
+
+
+def assert_crds_follow_the_operator(label: str, stdout: str, installed: bool) -> None:
+    crds, operator = keda_crds(stdout), keda_documents(stdout)
+    if installed:
+        assert crds == 6 and operator > 0, (
+            f"{label}: helm installs KEDA here, so its 6 vendored CRDs must render "
+            f"beside it; got {crds} CRDs and {operator} KEDA documents"
+        )
+    else:
+        assert crds == 0 and operator == 0, (
+            f"{label}: helm leaves KEDA out here, so none of its vendored CRDs may "
+            f"render; got {crds} CRDs and {operator} KEDA documents"
+        )
 
 
 # ═══ THE GUARD IS FACTORED ONCE, AND EVERY SITE GOES THROUGH IT ══════════════
@@ -823,6 +932,158 @@ def test_the_helper_resolves_exactly_what_the_dependency_condition_resolves(tmp_
     print("operators-shape: 4 usable shapes resolve exactly as helm's condition does")
 
 
+# ═══ THE PER-OPERATOR SUB-KEY, ONE LEVEL BELOW THE REGISTER KEY (ledger 1252) ═
+
+
+def test_a_non_bool_sub_key_is_refused_at_the_root_by_name(tmp_path):
+    """A present `operators.<op>.create` that is not a bool is refused, named.
+
+    helm skips it and lets `operators.create` decide, which is never what the
+    adopter who wrote `keda: {create: "false"}` meant. Before ledger 1252 the
+    first row rendered KEDA's six CRDs at exit 0 with KEDA itself left out.
+
+    ROOT ONLY, for the register arms' reason: helm runs the subchart's templates
+    first, so a refusal here would shadow any parent that names the key itself.
+    `test_under_a_parent_the_helper_resolves_a_sub_key_exactly_as_helm_does`
+    holds the other half.
+    """
+    for name, body, operator, kind in THE_SUB_KEY_IS_NOT_A_BOOL:
+        result = render_root(tmp_path, name, body)
+        assert result.returncode != 0, (
+            f"`{name}` rendered exit 0, so a sub-key helm cannot read went "
+            f"unrefused.\n{result.stdout[:2000]}"
+        )
+        assert f"operators.{operator}.create is a {kind} rather than true or false" in (
+            result.stderr
+        ), f"`{name}` refused without naming what the adopter wrote: {result.stderr}"
+        assert THE_SUB_KEY_REFUSAL in result.stderr, (
+            f"`{name}` was refused by some other arm: {result.stderr}"
+        )
+        assert THE_DELETED_OPERATORS_REGISTER_REFUSAL not in result.stderr, result.stderr
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, (
+                f"`{name}` RAISED instead of refusing: {result.stderr}"
+            )
+    print(
+        f"operators-shape: {len(THE_SUB_KEY_IS_NOT_A_BOOL)} non-bool per-operator "
+        f"create values refused by name"
+    )
+
+
+def test_the_sub_key_arm_ranges_over_every_two_path_operator():
+    """The arm's operator list against `Chart.yaml`. READ OFF THE FILES.
+
+    `.Chart.Dependencies` cannot replace the literal: helm drops a disabled
+    dependency from it before templates run. So the literal is compared with the
+    first path of every `condition:` that falls back to `operators.create`, and a
+    seventh operator reddens this gate until the arm covers it.
+    """
+    manifest = yaml.safe_load(CHART_MANIFEST.read_text())
+    declared = sorted(
+        paths[0].strip().split(".")[1]
+        for dependency in manifest.get("dependencies", [])
+        if len(paths := (dependency.get("condition") or "").split(",")) == 2
+        and paths[1].strip() == "operators.create"
+    )
+    assert declared, "no dependency in Chart.yaml falls back to operators.create"
+    text = RENDER_CHECKS.read_text()
+    arm = text[text.index(SUB_KEY_ARM_OPENS) : text.index(SUB_KEY_ARM_CLOSES)]
+    listed = re.search(r"range \$subKeyOperator := \(list (?P<names>[^)]*)\)", arm)
+    assert listed, "the sub-key arm no longer ranges over a literal list"
+    names = sorted(re.findall(r'"([^"]+)"', listed.group("names")))
+    assert names == declared, (
+        f"the sub-key arm ranges over {names} and Chart.yaml declares {declared}: "
+        f"a mistyped sub-key for a missing operator goes unrefused"
+    )
+    print(f"operators-shape: the sub-key arm covers all {len(declared)} operators")
+
+
+def test_a_sub_block_the_condition_skips_falls_back_to_the_register_key(tmp_path):
+    """`keda:` null, a scalar, or a map with no `create`: the register key decides.
+
+    helm's condition finds no bool at `operators.keda.create` in any of these and
+    falls through to `operators.create`. The helper must do the same, with NO
+    RAISE: `null` and `true` used to raise inside `dig`.
+    """
+    for name, sub_block in THE_SUB_BLOCKS_THE_CONDITION_SKIPS:
+        for register in (False, True):
+            label = f"{name}-register-{str(register).lower()}"
+            body = f"operators:\n  create: {str(register).lower()}\n{sub_block}"
+            result = render_root(tmp_path, label, body)
+            for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+                assert raise_text not in result.stderr, (
+                    f"{label} RAISED: {result.stderr}"
+                )
+            assert result.returncode == 0, f"{label}: {result.stderr}"
+            assert_crds_follow_the_operator(label, result.stdout, installed=register)
+            expected = 18 if register else 0
+            assert len(vendored_crd_names(result.stdout)) == expected, (
+                f"{label}: {vendored_crd_names(result.stdout)}"
+            )
+    print(
+        f"operators-shape: {2 * len(THE_SUB_BLOCKS_THE_CONDITION_SKIPS)} unreadable "
+        f"sub-blocks fall back to the register key with no raise"
+    )
+
+
+def test_the_mixed_refusal_names_the_key_that_turned_the_operator_on(tmp_path):
+    """`keda: {foo: x}` under a true register key is `operators.create`'s doing.
+
+    The helper named `operators.keda.create` whenever a `keda` block EXISTED,
+    whether or not it carried a usable `create`, so the mixed-release refusal
+    told the adopter to change a key that decided nothing.
+    """
+    result = render_root(
+        tmp_path,
+        "mixed-with-an-inert-sub-block",
+        "operators:\n  create: true\n  keda:\n    foo: x\ncertificates:\n  create: true\n",
+    )
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "operators.create asked for the operators" in result.stderr, result.stderr
+    assert "operators.keda.create" not in result.stderr, (
+        f"the refusal named a sub-key that holds no bool: {result.stderr}"
+    )
+    # The usable sub-key is still named when it is the one that decided.
+    result = render_root(
+        tmp_path,
+        "mixed-with-a-deciding-sub-key",
+        "operators:\n  create: false\n  keda:\n    create: true\ncertificates:\n  create: true\n",
+    )
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "operators.keda.create asked for the operators" in result.stderr, result.stderr
+    print("operators-shape: the mixed refusal names the key helm's condition used")
+
+
+def test_under_a_parent_the_helper_resolves_a_sub_key_exactly_as_helm_does(tmp_path):
+    """No refusal as a subchart, and the CRDs follow the operator.
+
+    This is the only place the helper's handling of a non-bool sub-key is
+    observable, because at the root the refusal fires first. Both parents are
+    used: neither refuses a sub-key, so neither may be shadowed.
+    """
+    rows = (
+        ('operators:\n  create: false\n  keda:\n    create: "false"\n', False),
+        ('operators:\n  create: true\n  keda:\n    create: "false"\n', True),
+        ("operators:\n  create: false\n  keda:\n    create: 0\n", False),
+        ("operators:\n  create: false\n  keda:\n", False),
+        ("operators:\n  create: true\n  keda: true\n", True),
+        ("operators:\n  create: true\n  keda:\n    create: false\n", False),
+        ("operators:\n  create: false\n  keda:\n    create: true\n", True),
+    )
+    for with_refusal in (False, True):
+        parent = parent_around(tmp_path, with_refusal=with_refusal)
+        for index, (body, installed) in enumerate(rows):
+            label = f"{parent.name}-row-{index}"
+            result = render_under_parent_body(tmp_path, parent, label, body)
+            assert result.returncode == 0, f"{label}: {body!r}: {result.stderr}"
+            assert THE_SUB_KEY_REFUSAL not in result.stderr, result.stderr
+            assert_crds_follow_the_operator(f"{label}: {body!r}", result.stdout, installed)
+    print(
+        f"operators-shape: {2 * len(rows)} sub-key rows under a parent, CRDs "
+        f"follow the operator in every one"
+    )
+
+
 # ═══ THE REGISTER KEY ITSELF, ONE LEVEL DOWN FROM THE EIGHT SHAPES ═══════════
 
 
@@ -842,6 +1103,7 @@ def test_no_two_refusal_phrases_are_substrings_of_one_another():
         THE_REGISTER_KEY_REFUSAL,
         THE_DELETED_OPERATORS_REGISTER_REFUSAL,
         THE_DELETED_BROKER_REGISTER_REFUSAL,
+        THE_SUB_KEY_REFUSAL,
     )
     overlapping = [
         (one, other)
@@ -1089,9 +1351,10 @@ def test_every_condition_path_in_chart_yaml_has_a_guarded_register_key():
     THE REGISTER KEY IS THE LAST PATH of a `condition:`, which is helm's own
     fallback: `operators.<op>.create,operators.create` falls back to
     `operators.create`, and a single-path `nats.create` is its own fallback. The
-    per-operator paths are NOT in the class and this gate does not ask for them —
-    `values.yaml` declares none of them, so a null there is not deleted, which
-    `test_a_sub_key_is_not_in_this_class` measures.
+    per-operator paths are NOT in this gate's class — `values.yaml` declares none
+    of them, so a null there is not deleted. They have an arm of their own, which
+    ranges over `.Chart.Dependencies` and so needs no list kept in step here;
+    `test_a_non_bool_sub_key_is_refused_at_the_root_by_name` holds it (ledger 1252).
     """
     manifest = yaml.safe_load(CHART_MANIFEST.read_text())
     registers = sorted(
@@ -1126,34 +1389,6 @@ def test_every_condition_path_in_chart_yaml_has_a_guarded_register_key():
         f"condition cannot be resolved."
     )
     print(f"operators-shape: {len(registers)} condition register keys, all guarded")
-
-
-def test_a_sub_key_is_not_in_this_class(tmp_path):
-    """THE BOUNDARY OF THE CLASS, MEASURED — `operators.<op>` is OUT of it.
-
-    The rule is: a key a `condition:` reads AND some chart DECLARES. `values.yaml`
-    deliberately declares no per-operator sub-key, so helm does NOT delete a null
-    written there, and the shape cannot become the silent fail-open the register
-    keys do. It raises instead — ADR-0794's knowingly-open residual, recorded here
-    as a measurement rather than left to be rediscovered.
-
-    THIS TEST ASSERTS THE RESIDUAL, NOT DESIRED BEHAVIOUR. If a later change
-    closes it, this goes red; delete it together with the residual paragraph in
-    `_operators.tpl`.
-    """
-    result = render_root(
-        tmp_path, "sub-key-null", "operators:\n  create: false\n  keda:\n"
-    )
-    assert result.returncode != 0
-    assert any(text in result.stderr for text in THE_TEXTS_A_RAISE_LEAVES), (
-        f"`operators.keda: null` no longer raises, so the residual this test "
-        f"records has changed: {result.stderr}"
-    )
-    assert THE_REGISTER_KEY_REFUSAL not in result.stderr, (
-        "the register-key arm claimed a sub-key, which it does not examine: "
-        f"{result.stderr}"
-    )
-    print("operators-shape: a null sub-key still raises — the documented residual")
 
 
 # ═══ THE CONSTRUCTED RED CASES ═══════════════════════════════════════════════
@@ -1524,3 +1759,65 @@ def test_refusing_from_the_subchart_would_shadow_the_parent(tmp_path):
         "operators-shape: red case 3 — a subchart that refuses shadows the parent's "
         "message"
     )
+
+
+def test_the_dig_helper_puts_crds_beside_an_operator_helm_left_out(tmp_path):
+    """RED CASE 8 — revert the helper to `dig`, and the CRDs stop following KEDA.
+
+    Under a parent no refusal fires, so the helper alone decides. The `dig`
+    helper reads `keda.create: "false"` as TRUE, while helm skips it and reads
+    `operators.create: false`: KEDA's six CRDs on a cluster with no KEDA.
+    """
+    copy = chart_copy(tmp_path, "dig-helper")
+    partial = copy / "templates" / "_operators.tpl"
+    original = partial.read_text()
+    start = original.index('{{- define "platform.operator-create" -}}')
+    partial.write_text(original[:start] + THE_DIG_HELPER + "\n")
+    assert partial.read_text() != original
+    parent = build_parent(tmp_path / "parent-dig-helper", copy)
+    result = render_under_parent_body(
+        tmp_path,
+        parent,
+        "dig-helper",
+        'operators:\n  create: false\n  keda:\n    create: "false"\n',
+    )
+    assert result.returncode == 0, result.stderr
+    assert keda_crds(result.stdout) == 6 and keda_documents(result.stdout) == 0, (
+        "the dig helper no longer renders KEDA's CRDs without KEDA, so this case "
+        "does not record what the fix buys"
+    )
+    print("operators-shape: red case 8 — the dig helper renders 6 KEDA CRDs with no KEDA")
+
+
+def test_deleting_the_sub_key_arm_lets_a_non_bool_sub_key_through(tmp_path):
+    """RED CASE 9 — cut the per-operator arm, and the typo renders at exit 0."""
+    copy = chart_copy(tmp_path, "no-sub-key-arm")
+    template = copy / "templates" / "render-checks.yaml"
+    original = template.read_text()
+    assert original.count(SUB_KEY_ARM_OPENS) == 1, (
+        f"the sub-key arm no longer opens with {SUB_KEY_ARM_OPENS!r}"
+    )
+    assert original.count(SUB_KEY_ARM_CLOSES) == 1, (
+        f"the sub-key arm no longer closes with {SUB_KEY_ARM_CLOSES!r}"
+    )
+    head, rest = original.split(SUB_KEY_ARM_OPENS, 1)
+    _, tail = rest.split(SUB_KEY_ARM_CLOSES, 1)
+    template.write_text(head + tail)
+    assert template.read_text() != original
+    result = helm(
+        "template",
+        "platform",
+        str(copy),
+        "-f",
+        str(
+            values_file(
+                tmp_path / "no-sub-key-arm.yaml",
+                'operators:\n  create: false\n  keda:\n    create: "false"\n',
+            )
+        ),
+    )
+    assert result.returncode == 0, (
+        f"the chart without the sub-key arm still refused, so this case does not "
+        f"measure what that arm buys: {result.stderr}"
+    )
+    print("operators-shape: red case 9 — without the sub-key arm, the typo renders at exit 0")

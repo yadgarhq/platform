@@ -935,8 +935,8 @@ def test_each_vendored_set_travels_with_its_own_operator():
     `or` does not fix it either, because `or .Values.operators.keda.create
     .Values.operators.create` is TRUE in the first row, where helm's own
     `condition:` — which reads the first valid path and ignores the rest — is
-    false. `dig` with `operators.create` as the fallback is the expression that
-    mirrors helm.
+    false. The operator's own `create` when it is a bool, else `operators.create`,
+    is the expression that mirrors helm (`templates/_operators.tpl`, ledger 1252).
     """
     mariadb_only = render(
         CHART,
