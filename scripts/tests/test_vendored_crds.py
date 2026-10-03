@@ -741,8 +741,8 @@ def test_editing_a_vendored_schema_reddens_the_digest_and_nothing_else(tmp_path)
 
     The mutation has to unwrap the guard first: these files are helm templates —
     which is why `check-yaml` excludes `chart/templates/` — so the body is sliced
-    out from between the `{{- if (dig ...) }}` line and the `{{- end }}`, parsed,
-    edited and re-wrapped.
+    out from between the `{{- if (include "platform.operator-create" ...) }}`
+    line and the `{{- end }}`, parsed, edited and re-wrapped.
     """
     copy = chart_copy(tmp_path)
     target = copy / "templates" / "vendored-crds" / "keda-scaledobjects.yaml"

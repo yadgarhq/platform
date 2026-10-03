@@ -1353,7 +1353,9 @@ def test_every_condition_path_in_chart_yaml_has_a_guarded_register_key():
     `operators.create`, and a single-path `nats.create` is its own fallback. The
     per-operator paths are NOT in this gate's class — `values.yaml` declares none
     of them, so a null there is not deleted. They have an arm of their own, which
-    ranges over `.Chart.Dependencies` and so needs no list kept in step here;
+    ranges over a literal list that
+    `test_the_sub_key_arm_ranges_over_every_two_path_operator` keeps in step with
+    `Chart.yaml`;
     `test_a_non_bool_sub_key_is_refused_at_the_root_by_name` holds it (ledger 1252).
     """
     manifest = yaml.safe_load(CHART_MANIFEST.read_text())
