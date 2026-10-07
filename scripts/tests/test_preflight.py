@@ -4757,3 +4757,441 @@ def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
         f"refusal, naming the chart rather than this constant. Move this tuple to "
         f"match the chart, or restore the check the chart lost"
     )
+
+
+# ── A REQUEST THAT FAILS IS REPORTED, NEVER READ AS AN ANSWER (ledger 1263) ──
+# `curl --write-out '%{http_code}'` PRINTS A STATUS EVEN WHEN IT FAILS, and the two
+# failures this section is about come out of that one fact.
+#
+#   1. `000`, exit 28. No answer within `--max-time`. Under `set -e` the assignment
+#      `STATUS="$(curl …)"` carries curl's exit status, so a caller that does not
+#      write `|| true` — the mariadb probe's one dry-run POST — ends the script with
+#      curl's `(28)` and no `preflight:` line naming anything.
+#   2. `200`, exit 28. The headers arrived and the body did not finish. `STATUS`
+#      reads `200`, and `$body` holds whatever was written — a partial answer, or
+#      the PREVIOUS request's answer where nothing was written at all. An `await`
+#      polling a body that matches returns 0 on an answer it never got.
+#
+# So `request()` turns every curl failure into `STATUS=000`, empties `$body`, and
+# returns 0: a caller decides what `000` means, exactly as it decides what a 404
+# means. These gates RUN the rendered shell over a scripted API server.
+#
+# THE HARNESS IS MEANT TO BE EXTENDED (ledger 1264 drives the real probes with it).
+# `run_over_fake_api` lifts everything up to the denominator, verbatim, and runs a
+# driver over:
+#
+#   curl()     a fake that records every call (`$SCRATCH/record`: `N METHOD PATH`,
+#              and `$SCRATCH/payload.N` for a request body), asks `respond` what to
+#              answer, writes the answer to `--output` ONLY when `respond` names one
+#              — real curl leaves the file untouched when no byte arrives — then
+#              prints the status and returns the exit code.
+#   respond()  the DEFAULT answers from the `responses` table, first match wins.
+#              A caller replaces it by passing `extra_shell` that redefines it,
+#              e.g. to answer a GET with the condition body for the kind POSTed at
+#              that path. It runs inside curl's own subshell, so it sets `RESP_*`
+#              and nothing it assigns leaks into the probe.
+#   date()     a file-backed clock, one second per read, so a bounded loop ends after
+#              `timeout_seconds` reads without waiting on the wall clock. A file
+#              rather than a variable, because every read is `$(date +%s)`.
+#   sleep()    a no-op.
+
+FAKE_API = r"""
+date() {
+  tick=$(( $(cat "$SCRATCH/clock") + 1 ))
+  echo "$tick" >"$SCRATCH/clock"
+  echo "$tick"
+}
+sleep() { :; }
+
+# respond METHOD PATH CALL-NUMBER -> RESP_STATUS RESP_RC RESP_BODY ('-' writes nothing)
+respond() {
+  RESP_STATUS=404; RESP_RC=0; RESP_BODY=-
+  while read -r r_method r_glob r_status r_rc r_body; do
+    [ "$r_method" = "$1" ] || [ "$r_method" = "*" ] || continue
+    case "$2" in
+      $r_glob) RESP_STATUS="$r_status"; RESP_RC="$r_rc"; RESP_BODY="$r_body"; return 0 ;;
+    esac
+  done <"$SCRATCH/responses"
+}
+
+curl() {
+  method=GET; out=''; url=''; data=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --request|-X) method="$2"; shift 2 ;;
+      --output|-o) out="$2"; shift 2 ;;
+      --data-binary|-d) data="$2"; shift 2 ;;
+      --user-agent|-A|--cacert|--header|-H|--write-out|-w|--max-time|--connect-timeout) shift 2 ;;
+      -*) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+  path="${url#https://kubernetes.default.svc}"
+  path="${path%%\?*}"
+  count=$(( $(cat "$SCRATCH/count") + 1 ))
+  echo "$count" >"$SCRATCH/count"
+  if [ "$data" = "@-" ]; then cat >"$SCRATCH/payload.$count"; fi
+  printf '%s %s %s\n' "$count" "$method" "$path" >>"$SCRATCH/record"
+  respond "$method" "$path" "$count"
+  if [ "$RESP_BODY" != "-" ]; then cat "$RESP_BODY" >"$out"; fi
+  printf '%s' "$RESP_STATUS"
+  return "$RESP_RC"
+}
+"""
+
+# The fake clock's epoch. Any value: only differences are read.
+FAKE_EPOCH = 1_000_000
+
+# A bounded loop polls about this many times under the fake clock. Small, so a red
+# case ends fast; above one, so a loop that polls again after a failure is exercised.
+FAKE_TIMEOUT_SECONDS = 3
+
+# A body an EARLIER request left in `$body`, which a failing one must not leave.
+STALE = "stale"
+
+# The wording each Job's `000` arms share: the API server gave no answer.
+NO_ANSWER = "got no answer within"
+
+
+def lifted_prefix(script: str) -> str:
+    """Everything the rendered Job runs before its denominator, bound to `$SCRATCH`."""
+    assert THE_PROBES_OWN_PREFIX_END in script, "the denominator marker moved"
+    assert THE_JOBS_SERVICE_ACCOUNT_LINE in script, "the service-account line moved"
+    assert THE_JOBS_BODY_LINE in script, "the response-body line moved"
+    prefix = script.split(THE_PROBES_OWN_PREFIX_END)[0]
+    return prefix.replace(THE_JOBS_SERVICE_ACCOUNT_LINE, 'sa="$SCRATCH/sa"').replace(
+        THE_JOBS_BODY_LINE, 'body="$SCRATCH/answer"'
+    )
+
+
+def run_over_fake_api(
+    script: str,
+    driver: str,
+    responses: list[tuple[str, str, str, int, str | None]],
+    scratch: Path,
+    *,
+    stale_body: str | None = None,
+    extra_shell: str = "",
+    timeout_seconds: int = FAKE_TIMEOUT_SECONDS,
+):
+    """Run `driver` after the rendered `script`'s own prefix, over the scripted API.
+
+    `responses` rows are (method or `*`, path glob, status, curl exit, body or None);
+    None writes nothing to `--output`. `stale_body` is in `$body` before the driver
+    runs. Returns (result, calls, payloads): calls as (n, method, path), payloads by n.
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "sa").mkdir(exist_ok=True)
+    (scratch / "sa" / "namespace").write_text(RELEASE_NAMESPACE)
+    (scratch / "sa" / "token").write_text("a-token-the-fake-never-reads")
+    (scratch / "count").write_text("0")
+    (scratch / "clock").write_text(str(FAKE_EPOCH))
+    (scratch / "record").write_text("")
+    rows = []
+    for index, (method, glob, status, code, body) in enumerate(responses):
+        source = "-"
+        if body is not None:
+            source = str(scratch / f"response.{index}")
+            Path(source).write_text(body)
+        rows.append(f"{method} {glob} {status} {code} {source}")
+    (scratch / "responses").write_text("\n".join(rows) + "\n")
+    if stale_body is not None:
+        (scratch / "answer").write_text(stale_body)
+    harness = scratch / "harness.sh"
+    harness.write_text(
+        FAKE_API
+        + extra_shell
+        + lifted_prefix(script)
+        + f"\nTIMEOUT_SECONDS={timeout_seconds}\n"
+        + driver
+        + "\n"
+    )
+    binary = shutil.which("sh")
+    assert binary, "no POSIX shell is on PATH, and the probe's container runs this under `sh`"
+    result = subprocess.run(
+        [binary, str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": os.environ.get("PATH", ""), "SCRATCH": str(scratch)},
+    )
+    calls = []
+    for line in (scratch / "record").read_text().splitlines():
+        number, method, path = line.split(" ", 2)
+        calls.append((int(number), method, path))
+    payloads = {
+        int(path.name.split(".")[1]): path.read_text() for path in scratch.glob("payload.*")
+    }
+    return result, calls, payloads
+
+
+def r3_documents(tmp_path: Path) -> list[dict]:
+    """R3 with keda and mariadb on: every preflight `await` and the mariadb probe render."""
+    both = overrides(
+        tmp_path / "keda-and-mariadb.yaml",
+        "preflight:\n  probes:\n    keda: true\n    mariadb: true\n",
+    )
+    return adopter_render(CHART, "-f", str(both))
+
+
+# (label, the status curl prints, curl's exit, whether curl writes a body)
+FAILED_REQUESTS = (
+    ("no answer, exit 28", "000", 28, False),
+    ("headers then timeout, exit 28", "200", 28, True),
+    ("connection refused, exit 7", "000", 7, False),
+)
+SERVED = '{"kind":"Served"}'
+
+
+def request_failure_failures(name: str, script: str, scratch: Path) -> list[str]:
+    """`request()` maps every curl failure to `STATUS=000`, an empty `$body`, and 0."""
+    failures = []
+    examined = 0
+    for method, payload in (("GET", '""'), ("POST", "'{\"kind\":\"Probe\"}'")):
+        # INSIDE AN `if`, so a non-zero return is RECORDED rather than ending the
+        # script under `set -e`; the trap is dropped so the cleanup adds no call.
+        driver = (
+            f'if request {method} "/apis/probe.invalid/v1/probes" {payload}; then rc=0; '
+            "else rc=$?; fi\n"
+            'printf \'%s %s\' "$rc" "$STATUS" >"$SCRATCH/outcome"\n'
+            "trap - EXIT\n"
+        )
+        rows = list(FAILED_REQUESTS) + [("answered, exit 0", "200", 0, True)]
+        for label, status, code, writes in rows:
+            run = scratch / f"{method}-{label.replace(' ', '-').replace(',', '')}"
+            result, _, _ = run_over_fake_api(
+                script,
+                driver,
+                [("*", "*", status, code, SERVED if writes else None)],
+                run,
+                stale_body=STALE,
+            )
+            examined += 1
+            where = f"{name}: {method} {label}"
+            if result.returncode != 0 or not (run / "outcome").exists():
+                failures.append(
+                    f"{where}: the driver did not finish (exit {result.returncode}): "
+                    f"{result.stderr.strip()!r}"
+                )
+                continue
+            rc, got = (run / "outcome").read_text().split(" ", 1)
+            left = (run / "answer").read_text()
+            if code == 0:
+                if (rc, got, left) != ("0", status, SERVED):
+                    failures.append(
+                        f"{where}: an answered request gave rc={rc} STATUS={got} body={left!r}, "
+                        f"so this gate's red rows prove nothing"
+                    )
+                continue
+            if rc != "0":
+                failures.append(
+                    f"{where}: `request()` returned {rc}; it returns 0 and the caller reads STATUS"
+                )
+            if got != "000":
+                failures.append(
+                    f"{where}: curl failed and STATUS reads {got!r}, not 000, so a caller "
+                    f"reads it as an answer"
+                )
+            if left != "":
+                failures.append(
+                    f"{where}: curl failed and `$body` still holds {left!r}, an answer this "
+                    f"request never got"
+                )
+    assert examined == 2 * (len(FAILED_REQUESTS) + 1), f"examined {examined} requests"
+    return failures
+
+
+def test_a_failed_request_reads_as_000_with_an_empty_body(tmp_path):
+    failures = []
+    for name, script in matching_scripts(r3_documents(tmp_path)).items():
+        failures += request_failure_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+def await_drivers(name: str, script: str) -> list[tuple[str, str, str]]:
+    """(label, an `await` call on a fixed path, a body that satisfies it), per call site.
+
+    THE CONDITION, STATUS, MESSAGE AND OPERATOR ARE THE CALL SITE'S OWN; only the
+    path is fixed, because the probe's path is built inside its probe function.
+    """
+    path = f"/apis/probe.invalid/v1/namespaces/{RELEASE_NAMESPACE}/probes/{PROBE_NAME}"
+    if name == "envoy-gateway-probe":
+        call = await_call(script)
+        return [
+            (
+                f"{name}/{call.group('condition')}",
+                f'await "{path}" {call.group("condition")} {call.group("status")} '
+                f'"{call.group("message")}" "{call.group("operator")}"',
+                gateway_body("True", ADDRESS_ASSIGNED, "True", LISTENER_TRANSLATED),
+            )
+        ]
+    drivers = []
+    for call in PREFLIGHT_AWAIT_CALL.finditer(script):
+        status = call.group("status")
+        drivers.append(
+            (
+                f"{name}/{call.group('operator')}",
+                f'await "{path}" {call.group("condition")} \'{status}\' {call.group("operator")}',
+                compact(
+                    condition_body(call.group("condition"), status.split("|")[0], BODY_SENTINEL)
+                ),
+            )
+        )
+    assert drivers, f"the rendered {name} script makes no `await` call this gate can read"
+    return drivers
+
+
+def await_failure_failures(name: str, script: str, scratch: Path) -> list[str]:
+    """`await` never returns 0 on a poll curl failed, whatever STATUS or body it left."""
+    failures = []
+    for label, driver, body in await_drivers(name, script):
+        for row, status, code, served, stale in (
+            ("answered", "200", 0, body, None),
+            ("200 then timeout", "200", 28, body, None),
+            ("no answer over a stale match", "000", 28, None, body),
+        ):
+            run = scratch / f"{label.replace('/', '-').replace(' ', '-')}-{row.replace(' ', '-')}"
+            result, calls, _ = run_over_fake_api(
+                script, driver, [("GET", "*", status, code, served)], run, stale_body=stale
+            )
+            where = f"{label} ({row}, status {status}, curl exit {code})"
+            if code == 0:
+                if result.returncode != 0:
+                    failures.append(
+                        f"{where}: a poll answering the awaited condition did not return 0, "
+                        f"so this gate's body or call is wrong and its red rows prove "
+                        f"nothing: {result.stderr.strip()!r}"
+                    )
+                continue
+            if result.returncode == 0:
+                failures.append(
+                    f"{where}: `await` RETURNED 0 on a poll curl failed — the probe reports "
+                    f"its operator healthy on an answer it never got"
+                )
+            elif NO_ANSWER not in result.stderr:
+                failures.append(
+                    f"{where}: `await` failed without saying the API server gave no "
+                    f"answer: {result.stderr.strip()!r}"
+                )
+            if len(calls) < 2:
+                failures.append(
+                    f"{where}: `await` polled {len(calls)} time(s); a failed poll is polled again"
+                )
+    return failures
+
+
+def test_await_never_passes_on_a_poll_curl_failed(tmp_path):
+    failures = []
+    for name, script in matching_scripts(r3_documents(tmp_path)).items():
+        failures += await_failure_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+def mariadb_no_answer_failures(script: str, scratch: Path) -> list[str]:
+    """The mariadb probe's one POST failing is named, single-shot, as mariadb-operator's.
+
+    THE STALE BODY IS THE UNREACHABLE-WEBHOOK REFUSAL, so a probe that read it would
+    report a dead operator on an answer the POST never got.
+    """
+    failures = []
+    for label, status, code, writes in FAILED_REQUESTS:
+        run = scratch / label.replace(" ", "-").replace(",", "")
+        result, calls, _ = run_over_fake_api(
+            script,
+            "probe_mariadb",
+            [("POST", "*", status, code, SERVED if writes else None)],
+            run,
+            stale_body=api_server_body(MARIADB_UNREACHABLE_MESSAGE),
+        )
+        where = f"mariadb ({label}, status {status}, curl exit {code})"
+        named = [
+            line
+            for line in result.stderr.splitlines()
+            if line.startswith("preflight:") and "mariadb-operator" in line and NO_ANSWER in line
+        ]
+        if result.returncode != 1 or not named:
+            failures.append(
+                f"{where}: exited {result.returncode} without a `preflight:` line naming "
+                f"mariadb-operator and the missing answer: {result.stderr.strip()!r}"
+            )
+        if "CONTROLLER is not running" in result.stderr:
+            failures.append(f"{where}: the probe read a stale body as the operator being down")
+        if [method for _, method, _ in calls] != ["POST"]:
+            failures.append(
+                f"{where}: the probe made {calls}; it is one dry-run POST and nothing else"
+            )
+    return failures
+
+
+def test_the_mariadb_probe_names_its_operator_when_its_post_gets_no_answer(tmp_path):
+    script = preflight_script(r3_documents(tmp_path))
+    failures = mariadb_no_answer_failures(script, tmp_path / "run")
+    assert failures == [], "\n".join(failures)
+
+
+# ── THE RED CASES: EACH HALF OF THE FIX, REMOVED FROM ONE TEMPLATE ───────────
+# `request()` is DUPLICATED in the two templates, so each mutation is made in ONE
+# of them and the gates must name THAT script. The fallback sits on BOTH curl
+# branches (with and without a payload), so its removal is asserted to touch two.
+
+CURL_FAILURE_FALLBACK = '"$api$path$query")" || STATUS=000\n'
+BODY_TRUNCATION = '                  : >"$body"\n'
+MARIADB_NO_ANSWER_ARM = '                if [ "$STATUS" = "000" ]; then\n                  echo "preflight: mariadb-operator could not be probed'
+
+
+def chart_with_every(destination: Path, template: str, old: str, new: str, count: int) -> Path:
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    path = copy / "templates" / template
+    text = path.read_text()
+    assert text.count(old) == count, (
+        f"{old!r} appears {text.count(old)} times in {template}, not {count}; this red "
+        f"case is now testing something else"
+    )
+    path.write_text(text.replace(old, new))
+    return copy
+
+
+def mutated_scripts(chart: Path, tmp_path: Path) -> dict[str, str]:
+    both = overrides(
+        tmp_path / "keda-and-mariadb.yaml",
+        "preflight:\n  probes:\n    keda: true\n    mariadb: true\n",
+    )
+    return matching_scripts(adopter_render(chart, "-f", str(both)))
+
+
+def test_dropping_the_curl_failure_fallback_reddens_the_gates(tmp_path):
+    for template, name in ((PREFLIGHT_TEMPLATE, "preflight"), (PROBE_TEMPLATE, "envoy-gateway-probe")):
+        case = tmp_path / name
+        chart = chart_with_every(
+            case, template, CURL_FAILURE_FALLBACK, '"$api$path$query")"\n', count=2
+        )
+        scripts = mutated_scripts(chart, case)
+        request = request_failure_failures(name, scripts[name], case / "request")
+        assert any("not 000" in failure for failure in request), "\n".join(request) or name
+        waited = await_failure_failures(name, scripts[name], case / "await")
+        assert any("RETURNED 0" in failure for failure in waited), "\n".join(waited) or name
+        if name == "preflight":
+            mariadb = mariadb_no_answer_failures(scripts[name], case / "mariadb")
+            assert mariadb, "the fallback was dropped and the mariadb gate passed"
+
+
+def test_dropping_the_body_truncation_reddens_the_request_gate(tmp_path):
+    for template, name in ((PREFLIGHT_TEMPLATE, "preflight"), (PROBE_TEMPLATE, "envoy-gateway-probe")):
+        case = tmp_path / name
+        chart = chart_with_every(case, template, BODY_TRUNCATION, "                  :\n", count=1)
+        failures = request_failure_failures(name, mutated_scripts(chart, case)[name], case / "run")
+        assert any("still holds" in failure for failure in failures), "\n".join(failures) or name
+
+
+def test_dropping_the_mariadb_no_answer_arm_reddens_the_mariadb_gate(tmp_path):
+    chart = chart_with_every(
+        tmp_path,
+        PREFLIGHT_TEMPLATE,
+        MARIADB_NO_ANSWER_ARM,
+        '                if false; then\n                  echo "preflight: mariadb-operator could not be probed',
+        count=1,
+    )
+    script = mutated_scripts(chart, tmp_path)["preflight"]
+    failures = mariadb_no_answer_failures(script, tmp_path / "run")
+    assert len(failures) >= len(FAILED_REQUESTS), "\n".join(failures)

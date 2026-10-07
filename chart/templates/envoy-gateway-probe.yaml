@@ -285,6 +285,14 @@ spec:
               # The status lands in `STATUS` and the answer in `$body`. NOTHING
               # HERE EXITS: a caller decides what a status means, because a 404 is
               # a failure to a probe and a success to the cleanup.
+              #
+              # A FAILED REQUEST IS `000` AND AN EMPTY BODY (ledger 1263). curl
+              # prints a status even when it fails: `000` with no answer, `200`
+              # when the headers came and the body did not. Under `set -e` the
+              # assignment carries curl's exit; and `$body` kept a partial
+              # answer, or the previous request's, which a poll could match. So
+              # every curl failure is `STATUS=000`, `$body` is emptied, and this
+              # returns 0: `000` is one more status a caller reads.
               STATUS=""
               request() {
                 method="$1"
@@ -316,7 +324,7 @@ spec:
                     --header "Content-Type: application/json" \
                     --request "$method" --data-binary @- \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path$query")"
+                    "$api$path$query")" || STATUS=000
                 else
                   STATUS="$(curl --silent --show-error \
                     --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
@@ -325,8 +333,12 @@ spec:
                     --header "Authorization: Bearer $token" \
                     --request "$method" \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path$query")"
+                    "$api$path$query")" || STATUS=000
                 fi
+                if [ "$STATUS" = "000" ]; then
+                  : >"$body"
+                fi
+                return 0
               }
 
               # ── CLEANUP ON EVERY EXIT PATH, SUCCESS AND FAILURE ALIKE ─────
