@@ -1,5 +1,5 @@
 {{/*
-THE ONE EXPRESSION THAT READS `operators`, AND THE NINETEEN SITES THAT CALL IT.
+THE ONE EXPRESSION THAT READS `operators`, AND THE TWENTY SITES THAT CALL IT.
 
 `plans/the-operators-toggle.md` asked for one shared helper between the
 mixed-release guard of its step 3 and the vendored-CRD guards of its step 2, and

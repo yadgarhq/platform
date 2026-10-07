@@ -841,8 +841,9 @@ def test_a_parent_with_no_refusal_is_the_residual_this_chart_documents(tmp_path)
     ONE ROW PER RANGE THAT STANDS DOWN AS A SUBCHART, and the vendored-CRD count
     differs between them, which is the point of carrying both. Arm two's shapes
     make the whole block unreadable, so the helper skips and NO vendored CRD
-    renders. The register arm's truthy shapes leave the block readable, so all
-    eighteen render — beside five operators the adopter did not ask for.
+    renders. The register arm's non-bool shapes, falsy ones included since
+    ledger 1291, leave the block readable, so all eighteen render — beside
+    five operators the adopter did not ask for.
     """
     parent = parent_around(tmp_path, with_refusal=False)
     for label, body, expected_crds in THE_RESIDUAL_ROWS:
@@ -1597,7 +1598,7 @@ def subchart_documents(stdout: str) -> int:
     )
 
 
-def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_path):
+def test_deleting_the_register_arm_lets_the_operators_fail_open_through(tmp_path):
     """RED CASE 5 — the measurement that makes the register-key arm necessary.
 
     Cut the `operators` register arm out and render `operators: {create: }`. The
@@ -1620,16 +1621,18 @@ def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_pat
     missing NAMED REFUSAL — the adopter still gets five operators installed out
     of a key they do not know they deleted, with no message saying so, which is
     the one thing only this arm (removed here) can see (`render-checks.yaml`'s
-    own prose above this arm). The new assertions say so: `vendored_crd_names`
-    is now asserted NON-EMPTY, at the chart's own fixed count of eighteen, and
-    `assert_crds_follow_the_operator` confirms KEDA's six are among them.
+    own prose above this arm). `test_under_a_bare_parent_the_register_key_
+    resolves_exactly_as_helm_does` and RED CASE 10 below already assert the
+    CRD/operator agreement itself, across every non-bool register-key shape;
+    this case keeps only the print's informational count.
 
-    THE SUBCHART COUNT IS STILL ASSERTED AS AN INEQUALITY. 171 is what the five
-    operator charts plus their CRDs render at the versions `Chart.yaml` pins
-    today; a version bump moves it for a reason that has nothing to do with this
-    guard, and a row that reddens for the wrong reason is worse than one that
-    does not redden at all. What must stay true is that a LOT of subchart
-    objects arrive where the baseline renders NONE.
+    THE SUBCHART COUNT IS STILL ASSERTED AS AN INEQUALITY. 171 is what the six
+    operator subcharts (the five operators and prometheus) render, not counting
+    the eighteen vendored CRDs, at the versions `Chart.yaml` pins today; a
+    version bump moves it for a reason that has nothing to do with this guard,
+    and a row that reddens for the wrong reason is worse than one that does not
+    redden at all. What must stay true is that a LOT of subchart objects arrive
+    where the baseline renders NONE.
     """
     copy = chart_copy(tmp_path, "no-register-arm")
     template = copy / "templates" / "render-checks.yaml"
@@ -1654,14 +1657,12 @@ def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_pat
         f"the chart without the register arm still refused, so this case does not "
         f"measure what that arm buys: {result.stderr}"
     )
+    # `len(names) == EXPECTED_VENDORED_FILES` and `assert_crds_follow_the_operator`
+    # are NOT asserted here: `test_under_a_bare_parent_the_register_key_resolves_
+    # exactly_as_helm_does` and RED CASE 10 below already own that property, for
+    # every non-bool register-key shape including this one's `nil`. `names` is
+    # kept for the print only.
     names = vendored_crd_names(result.stdout)
-    assert len(names) == EXPECTED_VENDORED_FILES, (
-        f"expected all {EXPECTED_VENDORED_FILES} vendored CRDs to follow the "
-        f"silently-installed operators (ledger 1291), got {len(names)}: {names}"
-    )
-    assert_crds_follow_the_operator(
-        "no-register-arm, a deleted operators.create", result.stdout, installed=True
-    )
     arrived = subchart_documents(result.stdout)
     assert arrived > 100, (
         f"only {arrived} documents arrived from the operator subcharts, so the "
