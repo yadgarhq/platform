@@ -244,7 +244,7 @@ why it gets no such protection and needs arms one and two.
       "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
       "and helm leaves a dependency ENABLED when no path of a condition resolves — so this does not turn the "
       "operators off, it installs cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD CLUSTER-WIDE, "
-      "while this chart skips every CustomResourceDefinition it vendored for them. "
+      "along with every CustomResourceDefinition this chart vendored for them. "
       "Write `operators.create: false` to leave the operators out, or `operators.create: true` to install them "
       "in a release of their own (ADR-0787). To accept the chart's default, omit the key entirely.")) }}
 {{- else if not (contains "/charts/" .Template.BasePath) }}
@@ -255,8 +255,7 @@ why it gets no such protection and needs arms one and two.
       "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
       "and helm leaves a dependency ENABLED when no path of a condition resolves — so a value in this shape does "
       "not turn the operators off, it installs cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD "
-      "CLUSTER-WIDE, and whether the CustomResourceDefinitions this chart vendored for them go too depends on "
-      "whether the value happens to read as truthy. "
+      "CLUSTER-WIDE, along with every CustomResourceDefinition this chart vendored for them. "
       "Write `operators.create: false` to leave the operators out, or `operators.create: true` to install them "
       "in a release of their own (ADR-0787)."))
       (kindOf (index .Values.operators "create"))) }}
