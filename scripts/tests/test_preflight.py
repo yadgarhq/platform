@@ -5321,6 +5321,8 @@ def test_a_no_answer_arm_that_falls_through_reddens_the_mariadb_gate(tmp_path):
 #   POST    to a collection: 400 when the body's apiVersion or kind is not the
 #           collection's, 409 when the name exists, else 201 and the object is
 #           stored under `<collection>/<metadata.name>` with the body's kind.
+#           The fake curl strips `?dryRun=All`, so mariadb's dry-run is stored as a
+#           create; harmless, because mariadb's outcome is skipped here.
 #   DELETE  of a stored object: 200 and it is gone. Of anything else: 404.
 #   GET     of a stored object: the condition body for ITS KIND (from
 #           `KIND_CONDITION_BODIES`, a restatement independent of `PROBE_AWAITS`).
@@ -5330,9 +5332,11 @@ def test_a_no_answer_arm_that_falls_through_reddens_the_mariadb_gate(tmp_path):
 #
 # `await` is wrapped: the wrapper records the call number it started at and its
 # arguments, then runs the rendered `await` verbatim under another name. What the
-# gate asserts comes from the FAKE'S records, not from the wrapper's arguments:
-# every GET after the `await` started polls one path, that path was answered 201 to
-# a POST earlier in this run, and (apiVersion, kind) is what that POST stored.
+# gate asserts about the OBJECT comes from the fake's records: every GET after
+# `await` started polls one path, that path was answered 201 to a POST earlier in
+# this run, and (apiVersion, kind) is what that POST stored. The condition, status
+# and operator are `await`'s own arguments, so this gate proves what `await` is
+# CALLED with, not what it checks; the unset-condition row proves it reads them.
 
 # `<apiVersion> <resource>` -> the kind a real API server serves there. The fake
 # answers 404 to any collection not listed.
@@ -5467,6 +5471,23 @@ await() {
 # The `STATUS=000` row, the first of `FAILED_REQUESTS`: no answer, curl exit 28.
 NO_ANSWER_POLL = ("GET", "*", FAILED_REQUESTS[0][1], FAILED_REQUESTS[0][2], None)
 
+# A 200 whose conditions carry each awaited TYPE with no status set, beside a
+# condition of another type that IS True. An `await` that ignores its condition's
+# type or its status reads this as healthy.
+UNSET_BODY = json.dumps(
+    {
+        "status": {
+            "conditions": [
+                {"type": "Ready", "status": "Unknown"},
+                {"type": "Programmed", "status": "Unknown"},
+                {"type": "NotTheOneWaitedFor", "status": "True"},
+            ]
+        }
+    },
+    separators=(",", ":"),
+)
+UNSET_POLL = ("GET", "*", "200", 0, UNSET_BODY)
+
 # With every probe on, the labels whose probe `await`s: cert-manager, keda and
 # envoy-gateway. mariadb-operator and prometheus are driven and reach none.
 EXPECTED_AWAITS_REACHED = 3
@@ -5548,10 +5569,11 @@ def executed_await_failures(
                 failures.append(f"{where}, which awaited {found}; a {label} probe awaits {expected}")
             if not expected:
                 continue
-            if len(created) != len(PROBE_BODY_KINDS[label]):
+            made = [(api_version, kind) for _, _, api_version, kind in created]
+            if made != PROBE_BODY_KINDS[label]:
                 failures.append(
-                    f"{where}, which had {len(created)} object(s) created; a {label} probe "
-                    f"creates {PROBE_BODY_KINDS[label]}"
+                    f"{where}, which created {made}; a {label} probe creates "
+                    f"{PROBE_BODY_KINDS[label]}"
                 )
             if poll is None and result.returncode != 0:
                 failures.append(
@@ -5559,9 +5581,11 @@ def executed_await_failures(
                     f"kind's healthy condition: {stderr!r}"
                 )
             if poll is not None:
+                answered = poll[2] != NO_ANSWER_POLL[2]
                 if result.returncode == 0:
-                    failures.append(f"{where}: `await` RETURNED 0 on polls that got no answer")
-                elif NO_ANSWER not in result.stderr:
+                    served = "answers whose conditions are all unset" if answered else "polls that got no answer"
+                    failures.append(f"{where}: `await` RETURNED 0 on {served}")
+                elif not answered and NO_ANSWER not in result.stderr:
                     failures.append(f"{where}: failed without saying the poll got no answer: {stderr!r}")
                 polled = [p for n, method, p in calls if method == "GET" and n > awaits[0][0]]
                 if len(polled) < 2:
@@ -5590,6 +5614,39 @@ def test_each_await_whose_polls_get_no_answer_fails_naming_it(tmp_path):
         "labels driven": EXPECTED_AWAITS_REACHED,
         "awaits reached": EXPECTED_AWAITS_REACHED,
     }, census
+
+
+def test_each_await_reading_unset_conditions_does_not_pass(tmp_path):
+    """The unset-condition row: a 200 whose awaited types are all `Unknown`."""
+    failures, census = executed_await_failures(CHART, tmp_path, UNSET_POLL)
+    assert failures == [], "\n".join(failures)
+    assert census == {
+        "labels driven": EXPECTED_AWAITS_REACHED,
+        "awaits reached": EXPECTED_AWAITS_REACHED,
+    }, census
+
+
+# An `await` that ignores its condition's status, and one that ignores its type.
+AWAIT_IGNORING_ITS_STATUS = (
+    "preflight.yaml",
+    'condition_matches "$kind" "$wanted"; then',
+    'condition_matches "$kind" ".*"; then',
+)
+AWAIT_IGNORING_ITS_TYPE = (
+    "preflight.yaml",
+    'condition_matches "$kind" "$wanted"; then',
+    'condition_matches "[A-Za-z]*" "$wanted"; then',
+)
+
+
+def test_an_await_ignoring_its_condition_reddens_the_unset_row(tmp_path):
+    for index, mutation in enumerate((AWAIT_IGNORING_ITS_STATUS, AWAIT_IGNORING_ITS_TYPE)):
+        case = tmp_path / f"case-{index}"
+        failures, _ = executed_await_failures(mutated_chart(case, *mutation), case / "run", UNSET_POLL)
+        message = "\n".join(failures)
+        assert "RETURNED 0 on answers whose conditions are all unset" in message, (
+            f"{mutation[2]!r} left the unset row green:\n{message}"
+        )
 
 
 # M1 and M2, as (template, old, new) like the three shipped cases above.
