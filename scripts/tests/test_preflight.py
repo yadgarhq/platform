@@ -66,6 +66,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import textwrap
 from pathlib import Path
@@ -782,13 +783,30 @@ def test_each_probe_label_awaits_the_condition_its_operator_writes():
     assert failures == [], "\n".join(failures)
 
 
+# THE THREE SHIPPED MUTATIONS, as (template, old, new). Constants rather than
+# literals in each case, because the executed gate at the end of this file sweeps
+# the same three (ADR-0645, ADR-0839) and a copy retyped there could drift from
+# the one the static gate is measured on.
+KEDA_AWAIT_ON_THE_DEPLOYMENT = (
+    "preflight.yaml",
+    'await "$scaledobjects/$PROBE_NAME" Ready "True|False" KEDA',
+    'await "$deployments/$PROBE_NAME" Available True KEDA',
+)
+CERTIFICATE_AWAIT_ON_ISSUING = (
+    "preflight.yaml",
+    "await \"$certificates/$PROBE_NAME\" Ready True cert-manager",
+    "await \"$certificates/$PROBE_NAME\" Issuing True cert-manager",
+)
+GATEWAY_AWAIT_ON_EDGE = (
+    "envoy-gateway-probe.yaml",
+    'await "$gateways/$PROBE_NAME" Programmed',
+    'await "$gateways/edge" Programmed',
+)
+
+
 def test_a_keda_await_on_the_deployment_reddens_the_await_gate(tmp_path):
     """The measured fail-open: the KEDA probe waiting on its own Deployment."""
-    chart = mutated_chart(
-        tmp_path, "preflight.yaml",
-        'await "$scaledobjects/$PROBE_NAME" Ready "True|False" KEDA',
-        'await "$deployments/$PROBE_NAME" Available True KEDA',
-    )
+    chart = mutated_chart(tmp_path, *KEDA_AWAIT_ON_THE_DEPLOYMENT)
     message = "\n".join(all_probe_await_failures(chart))
     assert (
         "the label 'keda' runs probe_keda, which awaits "
@@ -797,21 +815,13 @@ def test_a_keda_await_on_the_deployment_reddens_the_await_gate(tmp_path):
 
 
 def test_a_certificate_await_on_another_condition_reddens_the_await_gate(tmp_path):
-    chart = mutated_chart(
-        tmp_path, "preflight.yaml",
-        "await \"$certificates/$PROBE_NAME\" Ready True cert-manager",
-        "await \"$certificates/$PROBE_NAME\" Issuing True cert-manager",
-    )
+    chart = mutated_chart(tmp_path, *CERTIFICATE_AWAIT_ON_ISSUING)
     message = "\n".join(all_probe_await_failures(chart))
     assert "'Certificate', 'Issuing', 'True', 'cert-manager'" in message, message
 
 
 def test_an_await_on_an_object_this_run_did_not_create_reddens_the_await_gate(tmp_path):
-    chart = mutated_chart(
-        tmp_path, "envoy-gateway-probe.yaml",
-        'await "$gateways/$PROBE_NAME" Programmed',
-        'await "$gateways/edge" Programmed',
-    )
+    chart = mutated_chart(tmp_path, *GATEWAY_AWAIT_ON_EDGE)
     message = "\n".join(all_probe_await_failures(chart))
     assert "the label 'envoy-gateway' awaits $gateways/edge, which probe_envoy_gateway did not create" in message, message
 
@@ -5289,3 +5299,371 @@ def test_a_no_answer_arm_that_falls_through_reddens_the_mariadb_gate(tmp_path):
     )
     failures = mariadb_no_answer_failures(mutated_scripts(chart, tmp_path)["preflight"], tmp_path / "run")
     assert any("after the no-answer line" in failure for failure in failures), "\n".join(failures)
+
+
+# ── THE AWAIT GATE, EXECUTED (ledger 1264) ───────────────────────────────────
+# `probe_await_failures` READS the probe functions: it finds each `await` line and
+# resolves its path to the `create` that names it. Reading is not running, and two
+# mutations walked through it with the whole suite green (347 passed at c334393):
+#
+#   M1  `return 0` on the line before the KEDA `await`. The line is still there to
+#       read, so the static gate passes; the probe never waits on anything and
+#       reports KEDA healthy on a cluster with no KEDA.
+#   M2  `scaledobjects="$deployments"`. The `create` and the `await` still name
+#       `$scaledobjects/$PROBE_NAME`, so the static gate resolves the path to the
+#       ScaledObject body; at run time that body is POSTed to the Deployments
+#       collection, which a real API server refuses, and the `await` is never
+#       reached.
+#
+# So this gate DRIVES each probe function over `run_over_fake_api` with a STATEFUL
+# fake API server that refuses what a real one refuses:
+#
+#   POST    to a collection: 400 when the body's apiVersion or kind is not the
+#           collection's, 409 when the name exists, else 201 and the object is
+#           stored under `<collection>/<metadata.name>` with the body's kind.
+#   DELETE  of a stored object: 200 and it is gone. Of anything else: 404.
+#   GET     of a stored object: the condition body for ITS KIND (from
+#           `KIND_CONDITION_BODIES`, a restatement independent of `PROBE_AWAITS`).
+#           Of anything else: 404. A GET row in `responses` overrides the condition
+#           body for a stored object only, so the `STATUS=000` row reaches `await`
+#           rather than ending in `remove`.
+#
+# `await` is wrapped: the wrapper records the call number it started at and its
+# arguments, then runs the rendered `await` verbatim under another name. What the
+# gate asserts comes from the FAKE'S records, not from the wrapper's arguments:
+# every GET after the `await` started polls one path, that path was answered 201 to
+# a POST earlier in this run, and (apiVersion, kind) is what that POST stored.
+
+# `<apiVersion> <resource>` -> the kind a real API server serves there. The fake
+# answers 404 to any collection not listed.
+RESOURCE_KINDS = {
+    "cert-manager.io/v1 issuers": "Issuer",
+    "cert-manager.io/v1 certificates": "Certificate",
+    "v1 secrets": "Secret",
+    "apps/v1 deployments": "Deployment",
+    "keda.sh/v1alpha1 scaledobjects": "ScaledObject",
+    "k8s.mariadb.com/v1alpha1 mariadbs": "MariaDB",
+    "gateway.networking.k8s.io/v1 gateways": "Gateway",
+    "gateway.envoyproxy.io/v1alpha1 envoyproxies": "EnvoyProxy",
+}
+
+
+def kind_condition_body(api_version: str, kind: str, condition: str, status: str) -> str:
+    body = condition_body(condition, status, BODY_SENTINEL)
+    return compact({**body, "apiVersion": api_version, "kind": kind})
+
+
+# WHAT EACH KIND CARRIES ON A HEALTHY CLUSTER, written by the controller that owns
+# it. A Deployment is `Available` with no KEDA anywhere, which is why the shipped
+# KEDA-on-the-Deployment case passes its probe here and only the tuple catches it.
+KIND_CONDITION_BODIES = {
+    "Issuer": kind_condition_body("cert-manager.io/v1", "Issuer", "Ready", "True"),
+    "Certificate": kind_condition_body("cert-manager.io/v1", "Certificate", "Ready", "True"),
+    "Deployment": kind_condition_body("apps/v1", "Deployment", "Available", "True"),
+    "ScaledObject": kind_condition_body("keda.sh/v1alpha1", "ScaledObject", "Ready", "True"),
+    "Gateway": gateway_body("True", ADDRESS_ASSIGNED, "True", LISTENER_TRANSLATED),
+}
+
+FAKE_API_SERVER = r'''
+import fnmatch
+import json
+import sys
+from pathlib import Path
+
+scratch = Path(sys.argv[1])
+method, path, number = sys.argv[2], sys.argv[3], int(sys.argv[4])
+resources = json.loads((scratch / "resources.json").read_text())
+conditions = json.loads((scratch / "conditions.json").read_text())
+store = scratch / "objects.json"
+objects = json.loads(store.read_text()) if store.exists() else {}
+
+
+def answer(status, body=None, rc=0):
+    source = "-"
+    if body is not None:
+        source = str(scratch / f"served.{number}")
+        Path(source).write_text(body)
+    print(f"RESP_STATUS={status}; RESP_RC={rc}; RESP_BODY='{source}'")
+    sys.exit(0)
+
+
+def refusal(code, reason, message):
+    return json.dumps(
+        {"kind": "Status", "apiVersion": "v1", "status": "Failure",
+         "message": message, "reason": reason, "code": code},
+        separators=(",", ":"),
+    )
+
+
+parts = path.strip("/").split("/")
+if parts[:1] == ["api"] and len(parts) in (5, 6):
+    group_version, rest = parts[1], parts[2:]
+elif parts[:1] == ["apis"] and len(parts) in (6, 7):
+    group_version, rest = f"{parts[1]}/{parts[2]}", parts[3:]
+else:
+    answer(404)
+if rest[0] != "namespaces" or f"{group_version} {rest[2]}" not in resources:
+    answer(404, refusal(404, "NotFound", f"the server could not find the requested resource ({path})"))
+kind = resources[f"{group_version} {rest[2]}"]
+name = rest[3] if len(rest) == 4 else None
+
+if method == "POST" and name is None:
+    sent = json.loads((scratch / f"payload.{number}").read_text())
+    if sent.get("apiVersion") != group_version:
+        answer(400, refusal(400, "BadRequest",
+            f"the API version in the data ({sent.get('apiVersion')}) does not match "
+            f"the expected API version ({group_version})"))
+    if sent.get("kind") != kind:
+        answer(400, refusal(400, "BadRequest",
+            f"the kind in the data ({sent.get('kind')}) does not match the expected kind ({kind})"))
+    made = f"{path}/{sent['metadata']['name']}"
+    if made in objects:
+        answer(409, refusal(409, "AlreadyExists", f"{made} already exists"))
+    objects[made] = kind
+    store.write_text(json.dumps(objects))
+    with (scratch / "created").open("a") as log:
+        log.write(json.dumps([number, made, group_version, kind]) + "\n")
+    answer(201, json.dumps(sent, separators=(",", ":")))
+
+if name is None or path not in objects:
+    answer(404, refusal(404, "NotFound", f"{path} not found"))
+
+if method == "DELETE":
+    del objects[path]
+    store.write_text(json.dumps(objects))
+    answer(200, "{}")
+
+if method == "GET":
+    for line in (scratch / "responses").read_text().splitlines():
+        row = line.split(" ")
+        if len(row) == 5 and row[0] in ("GET", "*") and fnmatch.fnmatchcase(path, row[1]):
+            print(f"RESP_STATUS={row[2]}; RESP_RC={row[3]}; RESP_BODY='{row[4]}'")
+            sys.exit(0)
+    stored = objects[path]
+    answer(200, conditions.get(stored, json.dumps(
+        {"apiVersion": group_version, "kind": stored, "status": {}}, separators=(",", ":"))))
+
+answer(405, refusal(405, "MethodNotAllowed", f"{method} {path}"))
+'''
+
+# The `respond` this gate puts in place of the table-driven default. It runs in
+# curl's subshell, as the default does, and only sets `RESP_*`.
+STATEFUL_RESPOND = """
+respond() {{
+  eval "$("{python}" "$SCRATCH/api.py" "$SCRATCH" "$1" "$2" "$3")"
+}}
+"""
+
+# The wrapper: the call number `await` started at, a tab, its arguments
+# tab-separated, then the rendered `await` itself under another name.
+AWAIT_WRAPPER = r"""
+await() {
+  { printf '%s' "$(cat "$SCRATCH/count")"; for a in "$@"; do printf '\t%s' "$a"; done; printf '\n'; } >>"$SCRATCH/awaits"
+  real_await "$@"
+}
+: >"$SCRATCH/awaits"
+"""
+
+# The `STATUS=000` row, the first of `FAILED_REQUESTS`: no answer, curl exit 28.
+NO_ANSWER_POLL = ("GET", "*", FAILED_REQUESTS[0][1], FAILED_REQUESTS[0][2], None)
+
+# With every probe on, the labels whose probe `await`s: cert-manager, keda and
+# envoy-gateway. mariadb-operator and prometheus are driven and reach none.
+EXPECTED_AWAITS_REACHED = 3
+
+
+def driven_probe(script: str, function: str, scratch: Path, poll: tuple | None):
+    """Run the rendered probe `function` over the stateful fake. Returns the run's records."""
+    real = lifted_function(script, "await")
+    assert real is not None, "the rendered script defines no `await` to drive"
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "api.py").write_text(FAKE_API_SERVER)
+    (scratch / "resources.json").write_text(json.dumps(RESOURCE_KINDS))
+    (scratch / "conditions.json").write_text(json.dumps(KIND_CONDITION_BODIES))
+    (scratch / "created").write_text("")
+    result, calls, _ = run_over_fake_api(
+        script,
+        real.replace("await() {", "real_await() {", 1) + AWAIT_WRAPPER + function,
+        [poll] if poll else [],
+        scratch,
+        extra_shell=STATEFUL_RESPOND.format(python=sys.executable),
+    )
+    created = [json.loads(line) for line in (scratch / "created").read_text().splitlines()]
+    awaits = []
+    if (scratch / "awaits").exists():
+        for line in (scratch / "awaits").read_text().splitlines():
+            start, *arguments = line.split("\t")
+            awaits.append((int(start), arguments))
+    return result, calls, created, awaits
+
+
+def executed_await_failures(
+    chart: Path, scratch: Path, poll: tuple | None = None
+) -> tuple[list[str], dict[str, int]]:
+    """Each label's probe, RUN: whether it reaches `await` on what it POSTed, and on what.
+
+    `poll` is a `responses` row for GETs of stored objects; None serves each kind's
+    condition. Returns the failures and the census (labels driven, awaits reached).
+    """
+    failures = []
+    driven = reached = 0
+    for job, script in every_probe_on_scripts(chart).items():
+        arms = {m.group("label"): m.group("function") for m in PROBE_CASE_ARM.finditer(script)}
+        for label in probe_list(script):
+            function = arms.get(label)
+            if function is None or label not in PROBE_AWAITS:
+                failures.append(f"{job}: cannot follow the label {label!r} to a probe function with recorded awaits")
+                continue
+            expected = PROBE_AWAITS[label]
+            if poll is not None and not expected:
+                continue
+            result, calls, created, awaits = driven_probe(script, function, scratch / job / label, poll)
+            driven += 1
+            reached += len(awaits)
+            where = f"{job}: the label {label!r} ran {function}"
+            stderr = result.stderr.strip()
+            if expected and not awaits:
+                failures.append(
+                    f"{where}, which never reached `await` (exit {result.returncode}); a {label} "
+                    f"probe awaits {expected}. Its stderr: {stderr!r}"
+                )
+                continue
+            found = []
+            ends = [start for start, _ in awaits[1:]] + [max([n for n, _, _ in calls], default=0) + 1]
+            for (start, arguments), end in zip(awaits, ends):
+                path = arguments[0]
+                polls = [p for n, method, p in calls if method == "GET" and start < n < end]
+                posted = [entry for entry in created if entry[1] == path and entry[0] <= start]
+                if not posted:
+                    failures.append(
+                        f"{where}, which awaited {path}, which this run did not POST, so the "
+                        f"condition it read was not written for this run"
+                    )
+                    continue
+                if not polls or set(polls) != {path}:
+                    failures.append(f"{where}, whose `await` on {path} polled {polls}")
+                _, _, api_version, kind = posted[-1]
+                found.append((api_version, kind, arguments[1], arguments[2], arguments[-1]))
+            if found != expected:
+                failures.append(f"{where}, which awaited {found}; a {label} probe awaits {expected}")
+            if not expected:
+                continue
+            if len(created) != len(PROBE_BODY_KINDS[label]):
+                failures.append(
+                    f"{where}, which had {len(created)} object(s) created; a {label} probe "
+                    f"creates {PROBE_BODY_KINDS[label]}"
+                )
+            if poll is None and result.returncode != 0:
+                failures.append(
+                    f"{where}, which exited {result.returncode} over an API serving each "
+                    f"kind's healthy condition: {stderr!r}"
+                )
+            if poll is not None:
+                if result.returncode == 0:
+                    failures.append(f"{where}: `await` RETURNED 0 on polls that got no answer")
+                elif NO_ANSWER not in result.stderr:
+                    failures.append(f"{where}: failed without saying the poll got no answer: {stderr!r}")
+                polled = [p for n, method, p in calls if method == "GET" and n > awaits[0][0]]
+                if len(polled) < 2:
+                    failures.append(f"{where}: `await` polled {len(polled)} time(s); a failed poll is polled again")
+    if poll is None and driven != EXPECTED_LABELS_FOLLOWED:
+        failures.append(
+            f"drove {driven} probe labels; with every probe on the two Jobs carry {EXPECTED_LABELS_FOLLOWED}"
+        )
+    return failures, {"labels driven": driven, "awaits reached": reached}
+
+
+def test_each_probe_reaches_its_await_on_what_it_posted(tmp_path):
+    failures, census = executed_await_failures(CHART, tmp_path)
+    assert failures == [], "\n".join(failures)
+    assert census == {
+        "labels driven": EXPECTED_LABELS_FOLLOWED,
+        "awaits reached": EXPECTED_AWAITS_REACHED,
+    }, census
+
+
+def test_each_await_whose_polls_get_no_answer_fails_naming_it(tmp_path):
+    """The `STATUS=000` row: every GET of a POSTed object gets no answer, curl exit 28."""
+    failures, census = executed_await_failures(CHART, tmp_path, NO_ANSWER_POLL)
+    assert failures == [], "\n".join(failures)
+    assert census == {
+        "labels driven": EXPECTED_AWAITS_REACHED,
+        "awaits reached": EXPECTED_AWAITS_REACHED,
+    }, census
+
+
+# M1 and M2, as (template, old, new) like the three shipped cases above.
+RETURN_BEFORE_THE_KEDA_AWAIT = (
+    "preflight.yaml",
+    '                await "$scaledobjects/$PROBE_NAME" Ready "True|False" KEDA\n',
+    '                return 0\n                await "$scaledobjects/$PROBE_NAME" Ready "True|False" KEDA\n',
+)
+SCALEDOBJECTS_POSTED_TO_THE_DEPLOYMENTS = (
+    "preflight.yaml",
+    'scaledobjects="/apis/{{ $preflight.keda.apiVersion }}/namespaces/$ns/scaledobjects"',
+    'scaledobjects="$deployments"',
+)
+
+# (name, mutation, what the executed gate's refusal says). ADR-0645 and ADR-0839:
+# a gate change is proved by refusing everything the shipped gate refuses.
+AWAIT_GATE_MUTATIONS = (
+    (
+        "keda awaits its Deployment",
+        KEDA_AWAIT_ON_THE_DEPLOYMENT,
+        "which awaited [('apps/v1', 'Deployment', 'Available', 'True', 'KEDA')]",
+    ),
+    (
+        "certificate awaits Issuing",
+        CERTIFICATE_AWAIT_ON_ISSUING,
+        "('cert-manager.io/v1', 'Certificate', 'Issuing', 'True', 'cert-manager')",
+    ),
+    (
+        "gateway awaits edge",
+        GATEWAY_AWAIT_ON_EDGE,
+        f"awaited /apis/gateway.networking.k8s.io/v1/namespaces/{RELEASE_NAMESPACE}/gateways/edge, "
+        "which this run did not POST",
+    ),
+    (
+        "M1 return 0 before the keda await",
+        RETURN_BEFORE_THE_KEDA_AWAIT,
+        "the label 'keda' ran probe_keda, which never reached `await` (exit 0)",
+    ),
+    (
+        "M2 scaledobjects posted to deployments",
+        SCALEDOBJECTS_POSTED_TO_THE_DEPLOYMENTS,
+        "the API version in the data (keda.sh/v1alpha1) does not match the expected API version (apps/v1)",
+    ),
+)
+
+
+def test_the_executed_await_gate_refuses_every_recorded_mutation(tmp_path, capsys):
+    """The sweep: the three shipped cases plus M1 and M2, each refused by name.
+
+    THE COUNTS ARE PRINTED, per ADR-0645: how many labels each run drove, how many
+    awaits it reached, and how many refusals each gate gave. The static column is
+    printed, not asserted, for M1 and M2: it reads 0 on both, which is the gap this
+    gate closes.
+    """
+    rows = {}
+    failures, census = executed_await_failures(CHART, tmp_path / "unmutated")
+    rows["unmutated"] = (len(all_probe_await_failures(CHART)), len(failures), census)
+    assert failures == [], "\n".join(failures)
+    shipped = {KEDA_AWAIT_ON_THE_DEPLOYMENT, CERTIFICATE_AWAIT_ON_ISSUING, GATEWAY_AWAIT_ON_EDGE}
+    for index, (name, mutation, refusal) in enumerate(AWAIT_GATE_MUTATIONS):
+        case = tmp_path / f"case-{index}"
+        chart = mutated_chart(case, *mutation)
+        static = all_probe_await_failures(chart)
+        executed, census = executed_await_failures(chart, case / "run")
+        rows[name] = (len(static), len(executed), census)
+        message = "\n".join(executed)
+        assert refusal in message, f"{name}: the executed gate did not refuse it by name:\n{message}"
+        if mutation in shipped:
+            assert static, f"{name}: the static gate stopped refusing a shipped case"
+    with capsys.disabled():
+        print("\n  await gate sweep (static refusals / executed refusals / labels driven / awaits reached)")
+        for name, (static_count, executed_count, census) in rows.items():
+            print(
+                f"    {name}: {static_count} / {executed_count} / "
+                f"{census['labels driven']} / {census['awaits reached']}"
+            )
+    assert len(rows) == 1 + len(AWAIT_GATE_MUTATIONS) == 6
