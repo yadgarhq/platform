@@ -229,6 +229,15 @@ spec:
               # The status lands in `STATUS` and the answer in `$body`. NOTHING
               # HERE EXITS: a caller decides what a status means, because a 404 is
               # a failure to a probe and a success to the cleanup.
+              #
+              # A FAILED REQUEST IS `000` AND AN EMPTY BODY (ledger 1263). curl
+              # prints a status even when it fails: `000` with no answer, `200`
+              # when the headers came and the body did not. Under `set -e` the
+              # assignment carries curl's exit, so a caller with no `|| true`
+              # ended the script with only curl's `(28)`; and `$body` kept a
+              # partial answer, or the previous request's, which a poll could
+              # match. So every curl failure is `STATUS=000`, `$body` is emptied,
+              # and this returns 0: `000` is one more status a caller reads.
               STATUS=""
               request() {
                 method="$1"
@@ -260,7 +269,7 @@ spec:
                     --header "Content-Type: application/json" \
                     --request "$method" --data-binary @- \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path$query")"
+                    "$api$path$query")" || STATUS=000
                 else
                   STATUS="$(curl --silent --show-error \
                     --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
@@ -269,8 +278,12 @@ spec:
                     --header "Authorization: Bearer $token" \
                     --request "$method" \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path$query")"
+                    "$api$path$query")" || STATUS=000
                 fi
+                if [ "$STATUS" = "000" ]; then
+                  : >"$body"
+                fi
+                return 0
               }
 
               # ── CLEANUP ON EVERY EXIT PATH, SUCCESS AND FAILURE ALIKE ─────
@@ -342,7 +355,7 @@ spec:
                   sleep "$POLL_SECONDS"
                 done
                 if [ "$STATUS" = "000" ]; then
-                  echo "preflight: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                  echo "preflight: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above)." >&2
                 else
                   echo "preflight: $1 was still present $((now - started))s after a delete" >&2
                 fi
@@ -356,6 +369,10 @@ spec:
                 remove "$1"
                 # A timed-out POST answers `000` and is named by the check below.
                 request POST "$2" "$3" || true
+                # A POST WITH NO FINISHED ANSWER MAY STILL HAVE CREATED THE OBJECT
+                # (ledger 1263): the answer was lost, not necessarily the request.
+                # So its path is recorded for the cleanup before this fails.
+                [ "$STATUS" = "000" ] && CREATED="$CREATED $1"
                 if [ "$STATUS" != "201" ]; then
                   echo "preflight: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -403,7 +420,7 @@ spec:
                 if clamped; then
                   echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the probes before this one were slow, so $operator is not shown to be down." >&2
                 elif [ "$STATUS" = "000" ]; then
-                  echo "preflight: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
+                  echo "preflight: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above), so $operator is not shown to be down." >&2
                 else
                   echo "preflight: its API is registered or this probe could not have created the object, so $operator's CONTROLLER is not running." >&2
                 fi
@@ -572,6 +589,16 @@ spec:
               JSON
               )
                 request POST "$mariadbs" "$mariadb_body"
+
+                # NO ANSWER IS ITS OWN ARM, AND IT COMES FIRST (ledger 1263). A
+                # POST whose answer curl did not finish carries no body this probe
+                # can read, so it says nothing about the operator either way. It is
+                # NOT retried: this probe is one request, and its deadline shape
+                # in the dict above counts no loop for it.
+                if [ "$STATUS" = "000" ]; then
+                  echo "preflight: mariadb-operator could not be probed: its dry-run POST got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above), so this run shows nothing about mariadb-operator either way." >&2
+                  return 1
+                fi
 
                 if [ "$STATUS" = "201" ]; then
                   echo "preflight: mariadb-operator ADMITTED a MariaDB with no storage." >&2
