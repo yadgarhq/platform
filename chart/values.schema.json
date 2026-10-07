@@ -1,0 +1,268 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "yadgar/platform",
+  "$comment": "CLOSURE IS PER CHART (ADR-0850): this file closes only the keys this chart's OWN `values.yaml` and templates read. It says nothing about any other chart's keys \u2014 the parent and every module chart each own their own closure, and this chart's root is closed exactly as far as this chart's own knowledge of itself goes.\n\nSEVEN UPSTREAM SECTIONS STAY OPEN, bare `{}`, because each is a Helm dependency this chart adopts rather than re-types: `nats`, `cert-manager`, `keda`, `mariadb-operator`, `gateway-helm`, `argo-cd` and `prometheus`. `global` stays open too (Helm's own reserved key, shared with every subchart). THREE NESTED PATHS ALSO STAY OPEN: `edgeTLS.issuerRef` (a raw cert-manager `ObjectReference`, re-typed nowhere here), `gatewayListener.envoyProxy.pod.nodeSelector` (a raw node-selector map) and `valkey.resources` (a raw `corev1.ResourceRequirements`).\n\nFOURTEEN EXTRAS ARE DECLARED AS LEAVES because `values.yaml` never states them, though a template or the parent's own resolution reads every one. `enabled` is read nowhere inside this chart's own templates: it exists so the parent's `condition: platform.enabled` (its dependency on this chart) resolves against a key this schema does not refuse as unknown \u2014 closing this root WITHOUT it refuses the parent's own default render at ''. `gateway-helm` and `argo-cd` are the two upstream sections `values.yaml` never mentions at all (unlike the other five, which at least carry a `crds`/`create` line); they are declared here as open maps for the same reason the five are. The six `operators.<op>.create` keys (`certManager`, `keda`, `mariadbOperator`, `envoyGateway`, `argoCd`, `prometheus`) are each read off `chart/Chart.yaml`'s own `condition:` path for that dependency and resolved by `templates/_operators.tpl`; `values.yaml` ships only the register key, `operators.create`, by design (ADR-0787, ADR-0792) \u2014 no per-operator key, so an unset one correctly defers to the register. The five `preflight.probes.<name>` keys (`certManager`, `keda`, `mariadb`, `prometheus`, `envoyGateway`) are each read by `templates/_preflight.tpl`'s `platform.preflight.probe`, which tests `hasKey` against `preflight.probes` rather than `default` \u2014 PRECISELY so that an explicit `false` there is always honoured rather than read as absent \u2014 and `values.yaml` ships `preflight.probes: {}`, stating none of the five itself.\n\nTYPES, TOGGLE SHAPES AND `required` LIVE IN `render-checks.yaml` (ADR-0847), NOT HERE: a block written as a scalar PASSES this schema and reaches the render check's own named refusal instead. This chart declares no typed leaf of its own \u2014 unlike gateway's `toolsPoll` or the twins' `database.migrationLockTimeoutSeconds` \u2014 because `gatewayListener.envoyProxy.httpsNodePort` ships `null` in this chart's own `values.yaml`, and a typed leaf there would refuse this chart's own default render.\n\nPLATFORM-ONLY RESIDUALS, UNREFUSABLE BY THIS FILE because each sits inside an open upstream section: `nats.create` (inside the open `nats` section; a typo there renders clean and is not a key this schema can see) and `prometheus.forceNamespace` (inside the open `prometheus` section; read directly by `render-checks.yaml`'s mixed-release guard). Neither is refusable here without closing its whole upstream section, which would also refuse every key the upstream chart itself accepts.",
+  "properties": {
+    "internalCA": {
+      "properties": {
+        "create": {},
+        "selfSignedIssuerName": {},
+        "name": {},
+        "commonName": {},
+        "duration": {},
+        "renewBefore": {},
+        "privateKey": {
+          "properties": {
+            "algorithm": {},
+            "size": {},
+            "rotationPolicy": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "certificates": {
+      "properties": {
+        "create": {},
+        "issuerRef": {
+          "properties": {
+            "name": {},
+            "kind": {}
+          },
+          "additionalProperties": false
+        },
+        "duration": {},
+        "privateKey": {
+          "properties": {
+            "algorithm": {},
+            "size": {},
+            "rotationPolicy": {}
+          },
+          "additionalProperties": false
+        },
+        "leaves": {
+          "additionalProperties": {
+            "properties": {
+              "commonName": {},
+              "clusterLocalNames": {},
+              "usages": {},
+              "renewBefore": {}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "edgeTLS": {
+      "properties": {
+        "create": {},
+        "name": {},
+        "issuerRef": {},
+        "commonName": {},
+        "dnsNames": {},
+        "duration": {},
+        "renewBefore": {},
+        "usages": {},
+        "privateKey": {
+          "properties": {
+            "algorithm": {},
+            "size": {},
+            "rotationPolicy": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "gatewayListener": {
+      "properties": {
+        "create": {},
+        "envoyGateway": {
+          "properties": {
+            "apiVersion": {},
+            "operatorImage": {}
+          },
+          "additionalProperties": false
+        },
+        "className": {},
+        "controllerName": {},
+        "gatewayName": {},
+        "hostname": {},
+        "certificateSecretName": {},
+        "envoyProxy": {
+          "properties": {
+            "name": {},
+            "serviceType": {},
+            "httpsNodePort": {},
+            "pod": {
+              "properties": {
+                "nodeSelector": {},
+                "tolerations": {}
+              },
+              "additionalProperties": false
+            },
+            "replicas": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "valkey": {
+      "properties": {
+        "create": {},
+        "name": {},
+        "image": {},
+        "port": {},
+        "passwordSecret": {
+          "properties": {
+            "name": {},
+            "key": {}
+          },
+          "additionalProperties": false
+        },
+        "maxmemory": {},
+        "maxmemoryPolicy": {},
+        "resources": {}
+      },
+      "additionalProperties": false
+    },
+    "nats": {},
+    "operators": {
+      "properties": {
+        "create": {},
+        "certManager": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        },
+        "keda": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        },
+        "mariadbOperator": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        },
+        "envoyGateway": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        },
+        "argoCd": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        },
+        "prometheus": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "cert-manager": {},
+    "keda": {},
+    "mariadb-operator": {},
+    "prometheus": {},
+    "bootstrap": {
+      "properties": {
+        "create": {},
+        "iamKeys": {
+          "properties": {
+            "create": {}
+          },
+          "additionalProperties": false
+        },
+        "serviceAccountName": {},
+        "image": {},
+        "backoffLimit": {},
+        "adminToken": {
+          "properties": {
+            "secretName": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "preflight": {
+      "properties": {
+        "enabled": {},
+        "serviceAccountName": {},
+        "image": {},
+        "backoffLimit": {},
+        "timeoutSeconds": {},
+        "pollSeconds": {},
+        "probeName": {},
+        "probes": {
+          "properties": {
+            "certManager": {},
+            "keda": {},
+            "mariadb": {},
+            "prometheus": {},
+            "envoyGateway": {}
+          },
+          "additionalProperties": false
+        },
+        "certManager": {
+          "properties": {
+            "apiVersion": {}
+          },
+          "additionalProperties": false
+        },
+        "envoyGateway": {
+          "properties": {
+            "apiVersion": {},
+            "operatorImage": {},
+            "programmedMessage": {},
+            "serviceAccountName": {},
+            "probeName": {},
+            "timeoutSeconds": {}
+          },
+          "additionalProperties": false
+        },
+        "keda": {
+          "properties": {
+            "apiVersion": {}
+          },
+          "additionalProperties": false
+        },
+        "mariadb": {
+          "properties": {
+            "apiVersion": {},
+            "operatorImage": {},
+            "deniedBy": {},
+            "validationMessage": {},
+            "unreachableWebhook": {}
+          },
+          "additionalProperties": false
+        },
+        "prometheus": {
+          "properties": {
+            "address": {},
+            "readyMessage": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "global": {},
+    "enabled": {},
+    "gateway-helm": {},
+    "argo-cd": {}
+  },
+  "additionalProperties": false
+}

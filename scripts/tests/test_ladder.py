@@ -50,6 +50,7 @@ Run: python3 -m pytest scripts/tests/ -q
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -204,6 +205,14 @@ def chart_with_the_leaves_key_renamed(destination: Path) -> Path:
     CA root and the edge leaf still render, because each sits behind its own toggle
     and neither is reached by that range — which is what puts a number other than
     zero in the failure message.
+
+    THE SCHEMA IS RENAMED TOO (ledger 990), and this is load-bearing since
+    `values.schema.json` closed `certificates` to exactly its five known
+    keys: without this second rename, the copy's schema still declares
+    `leaves` and refuses the renamed `leafs` as an unknown key BEFORE the
+    range in `templates/certificates.yaml` ever runs, which would make this
+    a schema-refusal case rather than the silent-range-walks-nothing case
+    this fixture exists to produce.
     """
     copy = destination / "chart"
     shutil.copytree(CHART, copy)
@@ -211,6 +220,13 @@ def chart_with_the_leaves_key_renamed(destination: Path) -> Path:
     text = values.read_text()
     assert "\n  leaves:\n" in text, "the leaves key moved; this red case is now testing nothing"
     values.write_text(text.replace("\n  leaves:\n", "\n  leafs:\n"))
+
+    schema_path = copy / "values.schema.json"
+    schema = json.loads(schema_path.read_text())
+    certificates_properties = schema["properties"]["certificates"]["properties"]
+    assert "leaves" in certificates_properties, "the schema's `leaves` key moved too"
+    certificates_properties["leafs"] = certificates_properties.pop("leaves")
+    schema_path.write_text(json.dumps(schema))
     return copy
 
 
