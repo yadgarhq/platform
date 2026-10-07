@@ -1160,6 +1160,42 @@ def test_a_register_key_that_is_not_a_bool_is_refused_at_the_root_by_name(tmp_pa
     )
 
 
+def test_under_a_bare_parent_the_register_key_resolves_exactly_as_helm_does(tmp_path):
+    """RED (ledger 1291): the register-key branch read `operators.create` by
+    truthiness, so a FALSY non-bool value disagreed with helm's own resolution.
+
+    `yadgarhq/chart`, and the throwaway stand-in built with `with_refusal=True`,
+    both refuse every one of these seven shapes at the parent — which is why
+    `test_a_register_key_that_is_not_a_bool_is_refused_at_the_root_by_name` and
+    `test_the_parent_is_the_one_that_names_a_non_bool_register_key` only ever
+    measure a REFUSAL for them. Under a BARE parent that carries none, nothing
+    refuses, and helm's own `condition: operators.<op>.create,operators.create`
+    resolution is the only thing deciding whether KEDA installs: no path of it
+    holds a bool, so helm leaves the dependency ENABLED regardless of which of
+    the seven shapes was written — a present `0` and a present `"yes"` install
+    KEDA exactly alike.
+
+    THE OLD HELPER DISAGREED FOR THE FOUR FALSY ONES. `else if $operators.create`
+    read `0`, `""`, `{}` and `[]` as OFF by Go's own truthiness, so KEDA installed
+    with none of its six vendored CRDs — the ledger-1252 defect reopened one
+    level down, in the one key that defect's own fix still read by truthiness.
+    `"yes"` and `"no"` were already right, by the same accident ledger 1252's
+    sub-key table records: a non-empty string is truthy either way.
+    """
+    parent = parent_around(tmp_path, with_refusal=False)
+    for name, scalar, _kind in THE_REGISTER_KEY_IS_NOT_A_BOOL:
+        body = f"operators:\n  create: {scalar}\n"
+        result = render_under_parent_body(tmp_path, parent, name, body)
+        assert result.returncode == 0, f"`{name}`: {result.stderr}"
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in result.stderr, f"`{name}`: {result.stderr}"
+        assert_crds_follow_the_operator(name, result.stdout, installed=True)
+    print(
+        f"operators-shape: {len(THE_REGISTER_KEY_IS_NOT_A_BOOL)} non-bool register "
+        f"keys leave KEDA's CRDs following the operator under a bare parent"
+    )
+
+
 def test_a_deleted_register_key_is_refused_wherever_this_chart_runs(tmp_path):
     """THE DEFECT THIS ARM WAS BUILT FOR, and it refuses as a subchart too.
 
@@ -1565,15 +1601,35 @@ def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_pat
     """RED CASE 5 — the measurement that makes the register-key arm necessary.
 
     Cut the `operators` register arm out and render `operators: {create: }`. The
-    five dependencies go in, the eighteen vendored CRDs do not, and nothing says
-    so. That is KEDA and mariadb-operator installed with none of their own
-    CustomResourceDefinitions, at exit 0.
+    five dependencies go in, silently, at exit 0 — nothing names the deleted key.
 
-    THE COUNT IS ASSERTED AS AN INEQUALITY. 165 is what the five operator charts
-    render at the versions `Chart.yaml` pins today; a version bump moves it for a
-    reason that has nothing to do with this guard, and a row that reddens for the
-    wrong reason is worse than one that does not redden at all. What must stay
-    true is that a LOT of subchart objects arrive where the baseline renders NONE.
+    RE-BASELINED FOR LEDGER 1291. Before that fix, the vendored CRDs did NOT
+    follow: the helper's register-key branch read `$operators.create` by
+    truthiness, and a deleted key resolves to Go's zero value for an
+    `interface{}` — `nil`, which is falsy — so all eighteen vendored CRDs stayed
+    off while the five operators installed. That was asserted here as
+    `vendored_crd_names(result.stdout) == []`.
+
+    Ledger 1291 made the register-key branch agree with helm for every non-bool
+    shape, `nil` included: `or (not (kindIs "bool" $operators.create))
+    $operators.create` now reads an absent key as "on", the same as `0`, `""`,
+    `{}` and `[]`. So this same render now ALSO renders all eighteen vendored
+    CRDs beside the five operators — the CRD/operator mismatch ledger 1252 and
+    1291 both exist to prevent no longer happens here. What is left for this red
+    case to measure is narrower than its name now says: not a MISMATCH, but the
+    missing NAMED REFUSAL — the adopter still gets five operators installed out
+    of a key they do not know they deleted, with no message saying so, which is
+    the one thing only this arm (removed here) can see (`render-checks.yaml`'s
+    own prose above this arm). The new assertions say so: `vendored_crd_names`
+    is now asserted NON-EMPTY, at the chart's own fixed count of eighteen, and
+    `assert_crds_follow_the_operator` confirms KEDA's six are among them.
+
+    THE SUBCHART COUNT IS STILL ASSERTED AS AN INEQUALITY. 171 is what the five
+    operator charts plus their CRDs render at the versions `Chart.yaml` pins
+    today; a version bump moves it for a reason that has nothing to do with this
+    guard, and a row that reddens for the wrong reason is worse than one that
+    does not redden at all. What must stay true is that a LOT of subchart
+    objects arrive where the baseline renders NONE.
     """
     copy = chart_copy(tmp_path, "no-register-arm")
     template = copy / "templates" / "render-checks.yaml"
@@ -1598,9 +1654,13 @@ def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_pat
         f"the chart without the register arm still refused, so this case does not "
         f"measure what that arm buys: {result.stderr}"
     )
-    assert vendored_crd_names(result.stdout) == [], (
-        "the vendored CRDs rendered, so the harm this case records is not the one "
-        "described"
+    names = vendored_crd_names(result.stdout)
+    assert len(names) == EXPECTED_VENDORED_FILES, (
+        f"expected all {EXPECTED_VENDORED_FILES} vendored CRDs to follow the "
+        f"silently-installed operators (ledger 1291), got {len(names)}: {names}"
+    )
+    assert_crds_follow_the_operator(
+        "no-register-arm, a deleted operators.create", result.stdout, installed=True
     )
     arrived = subchart_documents(result.stdout)
     assert arrived > 100, (
@@ -1617,8 +1677,8 @@ def test_deleting_the_register_arm_lets_the_165_object_fail_open_through(tmp_pat
     )
     print(
         f"operators-shape: red case 5 — without the register arm, a deleted "
-        f"`operators.create` renders {arrived} subchart documents and 0 vendored "
-        f"CRDs at exit 0"
+        f"`operators.create` renders {arrived} subchart documents and "
+        f"{len(names)} vendored CRDs at exit 0, with no named refusal"
     )
 
 
@@ -1823,3 +1883,39 @@ def test_deleting_the_sub_key_arm_lets_a_non_bool_sub_key_through(tmp_path):
         f"measure what that arm buys: {result.stderr}"
     )
     print("operators-shape: red case 9 — without the sub-key arm, the typo renders at exit 0")
+
+
+def test_reverting_the_register_branch_to_truthiness_puts_crds_beside_an_operator_helm_left_out(
+    tmp_path,
+):
+    """RED CASE 10 — revert ONLY the register-key branch, and the mismatch returns.
+
+    `{{- else if $operators.create -}}` is the pre-ledger-1291 line: it read the
+    register key by truthiness rather than `kindIs "bool"`, the same shape of
+    defect RED CASE 8 reverts for the sub-key, one branch narrower. Under a bare
+    parent with `operators.create: 0` and no per-operator override, helm leaves
+    KEDA enabled because no path of its condition resolves to a bool — and the
+    reverted branch reads `0` as falsy, so none of KEDA's six vendored CRDs
+    follow it.
+    """
+    copy = chart_copy(tmp_path, "truthy-register-branch")
+    partial = copy / "templates" / "_operators.tpl"
+    original = partial.read_text()
+    fixed = '{{- else if or (not (kindIs "bool" $operators.create)) $operators.create -}}'
+    assert fixed in original, f"the register branch no longer reads {fixed!r}"
+    partial.write_text(original.replace(fixed, "{{- else if $operators.create -}}"))
+    assert partial.read_text() != original
+
+    parent = build_parent(tmp_path / "parent-truthy-register-branch", copy)
+    result = render_under_parent_body(
+        tmp_path, parent, "truthy-register-branch", "operators:\n  create: 0\n"
+    )
+    assert result.returncode == 0, result.stderr
+    assert keda_crds(result.stdout) == 0 and keda_documents(result.stdout) > 0, (
+        "reverting the register branch to truthiness no longer installs KEDA "
+        "with none of its CRDs, so this case does not record what the fix buys"
+    )
+    print(
+        "operators-shape: red case 10 — a truthy-only register branch installs "
+        "KEDA with 0 of its CRDs when `operators.create` is a falsy non-bool"
+    )
