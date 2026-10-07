@@ -1,5 +1,5 @@
 {{/*
-THE ONE EXPRESSION THAT READS `operators`, AND THE NINETEEN SITES THAT CALL IT.
+THE ONE EXPRESSION THAT READS `operators`, AND THE TWENTY SITES THAT CALL IT.
 
 `plans/the-operators-toggle.md` asked for one shared helper between the
 mixed-release guard of its step 3 and the vendored-CRD guards of its step 2, and
@@ -40,6 +40,21 @@ A PRESENT NON-BOOL SUB-KEY IS REFUSED BY NAME, AT THE ROOT ONLY, in
 this helper stays quiet and resolves it exactly as helm does, so the CRDs follow
 the operator either way.
 
+THE REGISTER KEY ITSELF NEEDS THE SAME `kindIs "bool"` GUARD, AND UNTIL LEDGER
+1291 IT DID NOT HAVE ONE. `{{- else if $operators.create -}}` read the register
+key by TRUTHINESS, so `operators.create: 0`, `""`, `{}` or `[]` — none of which
+helm's own `condition:` resolution can read as a bool either — resolved to OFF
+here while helm, finding no bool on ANY path, leaves the dependency ENABLED.
+Under a parent with no refusal of its own (`render-checks.yaml`'s register arm
+is root-only, same as the sub-key arm above) that is KEDA and mariadb-operator
+installed with none of their vendored CRDs — the ledger-1252 defect reopened one
+level down, in the one key its own fix still read by truthiness. A truthy
+non-bool such as `"yes"` already agreed with helm by accident, since a non-empty
+string is truthy either way; `or (not (kindIs "bool" $operators.create))
+$operators.create` makes the agreement hold for the falsy ones too, by counting
+ANY non-bool register key as the "on" that helm's fail-open gives it, rather than
+reading it for truth.
+
 ── THE TYPE ARM, WHICH IS THE WHOLE REASON THIS FILE EXISTS ────────────────────
 
 `kindIs "map"` ON THE RAW VALUE, BEFORE ANYTHING ELSE TOUCHES IT (ADR-0794).
@@ -79,7 +94,7 @@ CALL IT WITH A DICT:
 {{- if $own -}}
 operators.{{ .operator }}.create
 {{- end -}}
-{{- else if $operators.create -}}
+{{- else if or (not (kindIs "bool" $operators.create)) $operators.create -}}
 operators.create
 {{- end -}}
 {{- end -}}
