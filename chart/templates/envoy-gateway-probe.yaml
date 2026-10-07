@@ -285,6 +285,14 @@ spec:
               # The status lands in `STATUS` and the answer in `$body`. NOTHING
               # HERE EXITS: a caller decides what a status means, because a 404 is
               # a failure to a probe and a success to the cleanup.
+              #
+              # A FAILED REQUEST IS `000` AND AN EMPTY BODY (ledger 1263). curl
+              # prints a status even when it fails: `000` with no answer, `200`
+              # when the headers came and the body did not. Under `set -e` the
+              # assignment carries curl's exit; and `$body` kept a partial
+              # answer, or the previous request's, which a poll could match. So
+              # every curl failure is `STATUS=000`, `$body` is emptied, and this
+              # returns 0: `000` is one more status a caller reads.
               STATUS=""
               request() {
                 method="$1"
@@ -316,7 +324,7 @@ spec:
                     --header "Content-Type: application/json" \
                     --request "$method" --data-binary @- \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path$query")"
+                    "$api$path$query")" || STATUS=000
                 else
                   STATUS="$(curl --silent --show-error \
                     --connect-timeout "$CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
@@ -325,8 +333,12 @@ spec:
                     --header "Authorization: Bearer $token" \
                     --request "$method" \
                     --output "$body" --write-out '%{http_code}' \
-                    "$api$path$query")"
+                    "$api$path$query")" || STATUS=000
                 fi
+                if [ "$STATUS" = "000" ]; then
+                  : >"$body"
+                fi
+                return 0
               }
 
               # ── CLEANUP ON EVERY EXIT PATH, SUCCESS AND FAILURE ALIKE ─────
@@ -396,7 +408,7 @@ spec:
                   sleep "$POLL_SECONDS"
                 done
                 if [ "$STATUS" = "000" ]; then
-                  echo "envoy-gateway-probe: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                  echo "envoy-gateway-probe: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above)." >&2
                 else
                   echo "envoy-gateway-probe: $1 was still present $((now - started))s after a delete" >&2
                 fi
@@ -410,6 +422,10 @@ spec:
                 remove "$1"
                 # A timed-out POST answers `000` and is named by the check below.
                 request POST "$2" "$3" || true
+                # A POST WITH NO FINISHED ANSWER MAY STILL HAVE CREATED THE OBJECT
+                # (ledger 1263): the answer was lost, not necessarily the request.
+                # So its path is recorded for the cleanup before this fails.
+                [ "$STATUS" = "000" ] && CREATED="$1 $CREATED"
                 if [ "$STATUS" != "201" ]; then
                   echo "envoy-gateway-probe: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -481,7 +497,7 @@ spec:
                 if clamped; then
                   echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the removals before it were slow, so $operator is not shown to be down." >&2
                 elif [ "$STATUS" = "000" ]; then
-                  echo "envoy-gateway-probe: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
+                  echo "envoy-gateway-probe: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above), so $operator is not shown to be down." >&2
                 else
                   echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running, or it is running and could not program this Gateway." >&2
                 fi
