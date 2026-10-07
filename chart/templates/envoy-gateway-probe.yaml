@@ -408,7 +408,7 @@ spec:
                   sleep "$POLL_SECONDS"
                 done
                 if [ "$STATUS" = "000" ]; then
-                  echo "envoy-gateway-probe: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                  echo "envoy-gateway-probe: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above)." >&2
                 else
                   echo "envoy-gateway-probe: $1 was still present $((now - started))s after a delete" >&2
                 fi
@@ -422,6 +422,10 @@ spec:
                 remove "$1"
                 # A timed-out POST answers `000` and is named by the check below.
                 request POST "$2" "$3" || true
+                # A POST WITH NO FINISHED ANSWER MAY STILL HAVE CREATED THE OBJECT
+                # (ledger 1263): the answer was lost, not necessarily the request.
+                # So its path is recorded for the cleanup before this fails.
+                [ "$STATUS" = "000" ] && CREATED="$1 $CREATED"
                 if [ "$STATUS" != "201" ]; then
                   echo "envoy-gateway-probe: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -493,7 +497,7 @@ spec:
                 if clamped; then
                   echo "envoy-gateway-probe: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the removals before it were slow, so $operator is not shown to be down." >&2
                 elif [ "$STATUS" = "000" ]; then
-                  echo "envoy-gateway-probe: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
+                  echo "envoy-gateway-probe: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above), so $operator is not shown to be down." >&2
                 else
                   echo "envoy-gateway-probe: this Gateway was created by this run, so it carried no condition any earlier reconcile could have written — $operator's CONTROLLER is not running, or it is running and could not program this Gateway." >&2
                 fi

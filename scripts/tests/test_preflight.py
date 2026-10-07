@@ -2436,7 +2436,9 @@ def cleanup_failures(script: str) -> list[str]:
         failures.append(
             "the probe's cleanup issues no DELETE, so the trap fires and removes nothing"
         )
-    if 'CREATED="$1 $CREATED"' not in script:
+    # A WHOLE LINE: the `000` record (ledger 1263) carries the same assignment after
+    # `&& `, and it alone records nothing on a create that succeeds.
+    if not re.search(r'^[ ]*CREATED="\$1 \$CREATED"[ ]*$', script, re.MULTILINE):
         failures.append(
             "the probe does not record what it created NEWEST FIRST, so the cleanup "
             "either walks an empty list and deletes nothing, or deletes the probe's "
@@ -3077,7 +3079,14 @@ def test_pointing_the_probe_back_at_edge_reddens_the_infrastructure_gate(tmp_pat
 
 
 def test_a_cleanup_walked_oldest_first_reddens_both_cleanup_gates(tmp_path):
-    chart = mutated_chart(tmp_path, PROBE_TEMPLATE, 'CREATED="$1 $CREATED"', 'CREATED="$CREATED $1"')
+    # The success-path record, whole line: the `000` record above it carries the same
+    # assignment after `&& ` (ledger 1263).
+    chart = mutated_chart(
+        tmp_path,
+        PROBE_TEMPLATE,
+        '\n                CREATED="$1 $CREATED"\n',
+        '\n                CREATED="$CREATED $1"\n',
+    )
     script = post_install_probe_script(nodeport_render(chart, tmp_path))
     assert any("NEWEST FIRST" in failure for failure in cleanup_failures(script))
     message = "\n".join(envoy_probe_cleanup_failures(script, tmp_path / "run"))
@@ -5114,6 +5123,19 @@ def mariadb_no_answer_failures(script: str, scratch: Path) -> list[str]:
                 f"{where}: exited {result.returncode} without a `preflight:` line naming "
                 f"mariadb-operator and the missing answer: {result.stderr.strip()!r}"
             )
+        # THE NO-ANSWER LINE IS THE LAST DIAGNOSIS. An arm that printed it and fell
+        # through would let the arms below diagnose an empty body as well.
+        lines = result.stderr.splitlines()
+        if named:
+            after = [
+                line
+                for line in lines[lines.index(named[0]) + 1 :]
+                if line.startswith("preflight:")
+            ]
+            if after:
+                failures.append(
+                    f"{where}: another diagnosis follows after the no-answer line: {after}"
+                )
         if "CONTROLLER is not running" in result.stderr:
             failures.append(f"{where}: the probe read a stale body as the operator being down")
         if [method for _, method, _ in calls] != ["POST"]:
@@ -5195,3 +5217,75 @@ def test_dropping_the_mariadb_no_answer_arm_reddens_the_mariadb_gate(tmp_path):
     script = mutated_scripts(chart, tmp_path)["preflight"]
     failures = mariadb_no_answer_failures(script, tmp_path / "run")
     assert len(failures) >= len(FAILED_REQUESTS), "\n".join(failures)
+
+
+# ── A CREATE THAT GOT NO ANSWER MAY STILL HAVE CREATED, SO IT IS CLEANED UP ──
+# A POST curl did not finish can have reached the API server and persisted the
+# object: the answer is what was lost, not the request. So `create` records the
+# path on `000` BEFORE it fails, and the cleanup deletes what may exist. A DELETE
+# of an object that was never made answers 404, which the cleanup ignores.
+
+PROBE_OBJECT_PATH = f"/apis/probe.invalid/v1/namespaces/{RELEASE_NAMESPACE}/probes/{PROBE_NAME}"
+PROBE_COLLECTION_PATH = f"/apis/probe.invalid/v1/namespaces/{RELEASE_NAMESPACE}/probes"
+
+
+def create_leak_failures(name: str, script: str, scratch: Path) -> list[str]:
+    """`create` whose POST curl did not finish fails AND leaves its path for the cleanup."""
+    failures = []
+    driver = f"create \"{PROBE_OBJECT_PATH}\" \"{PROBE_COLLECTION_PATH}\" '{{\"kind\":\"Probe\"}}'"
+    for row, status, code in (("201 then timeout", "201", 28), ("no answer", "000", 28)):
+        run = scratch / row.replace(" ", "-")
+        result, calls, _ = run_over_fake_api(
+            script,
+            driver,
+            [("POST", "*", status, code, None), ("DELETE", "*", "200", 0, None)],
+            run,
+        )
+        where = f"{name}: create, POST {row} (status {status}, curl exit {code})"
+        if result.returncode == 0:
+            failures.append(f"{where}: `create` succeeded on a POST curl did not finish")
+            continue
+        posts = [index for index, (_, method, _) in enumerate(calls) if method == "POST"]
+        if len(posts) != 1:
+            failures.append(f"{where}: expected one POST, the probe made {calls}")
+            continue
+        deleted = [path for _, method, path in calls[posts[0] + 1 :] if method == "DELETE"]
+        if PROBE_OBJECT_PATH not in deleted:
+            failures.append(
+                f"{where}: the cleanup deleted {deleted} and never {PROBE_OBJECT_PATH}, which "
+                f"the POST may have created — the object leaks under the probe's fixed name"
+            )
+    return failures
+
+
+def test_a_create_that_got_no_answer_is_still_cleaned_up(tmp_path):
+    failures = []
+    for name, script in matching_scripts(r3_documents(tmp_path)).items():
+        failures += create_leak_failures(name, script, tmp_path / name)
+    assert failures == [], "\n".join(failures)
+
+
+CREATE_RECORDS_ON_NO_ANSWER = {
+    PREFLIGHT_TEMPLATE: '[ "$STATUS" = "000" ] && CREATED="$CREATED $1"\n',
+    PROBE_TEMPLATE: '[ "$STATUS" = "000" ] && CREATED="$1 $CREATED"\n',
+}
+
+
+def test_dropping_the_no_answer_record_from_create_reddens_the_leak_gate(tmp_path):
+    for template, name in ((PREFLIGHT_TEMPLATE, "preflight"), (PROBE_TEMPLATE, "envoy-gateway-probe")):
+        case = tmp_path / name
+        chart = chart_with_every(case, template, CREATE_RECORDS_ON_NO_ANSWER[template], ":\n", count=1)
+        failures = create_leak_failures(name, mutated_scripts(chart, case)[name], case / "run")
+        assert any("leaks" in failure for failure in failures), "\n".join(failures) or name
+
+
+MARIADB_NO_ANSWER_RETURN = 'either way." >&2\n                  return 1\n'
+
+
+def test_a_no_answer_arm_that_falls_through_reddens_the_mariadb_gate(tmp_path):
+    """Without its `return 1` the arm prints, then the arms below diagnose an empty body."""
+    chart = chart_with_every(
+        tmp_path, PREFLIGHT_TEMPLATE, MARIADB_NO_ANSWER_RETURN, 'either way." >&2\n', count=1
+    )
+    failures = mariadb_no_answer_failures(mutated_scripts(chart, tmp_path)["preflight"], tmp_path / "run")
+    assert any("after the no-answer line" in failure for failure in failures), "\n".join(failures)

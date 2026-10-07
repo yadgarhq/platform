@@ -355,7 +355,7 @@ spec:
                   sleep "$POLL_SECONDS"
                 done
                 if [ "$STATUS" = "000" ]; then
-                  echo "preflight: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part." >&2
+                  echo "preflight: $1 could not be read for $((now - started))s after a delete: the last request got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above)." >&2
                 else
                   echo "preflight: $1 was still present $((now - started))s after a delete" >&2
                 fi
@@ -369,6 +369,10 @@ spec:
                 remove "$1"
                 # A timed-out POST answers `000` and is named by the check below.
                 request POST "$2" "$3" || true
+                # A POST WITH NO FINISHED ANSWER MAY STILL HAVE CREATED THE OBJECT
+                # (ledger 1263): the answer was lost, not necessarily the request.
+                # So its path is recorded for the cleanup before this fails.
+                [ "$STATUS" = "000" ] && CREATED="$CREATED $1"
                 if [ "$STATUS" != "201" ]; then
                   echo "preflight: creating $1 answered HTTP $STATUS" >&2
                   cat "$body" >&2
@@ -416,7 +420,7 @@ spec:
                 if clamped; then
                   echo "preflight: the script's ${SCRIPT_BUDGET_SECONDS}s budget ended this wait before its own ${TIMEOUT_SECONDS}s bound; the probes before this one were slow, so $operator is not shown to be down." >&2
                 elif [ "$STATUS" = "000" ]; then
-                  echo "preflight: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and $operator is not shown to be down." >&2
+                  echo "preflight: the last poll of $path got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above), so $operator is not shown to be down." >&2
                 else
                   echo "preflight: its API is registered or this probe could not have created the object, so $operator's CONTROLLER is not running." >&2
                 fi
@@ -587,12 +591,12 @@ spec:
                 request POST "$mariadbs" "$mariadb_body"
 
                 # NO ANSWER IS ITS OWN ARM, AND IT COMES FIRST (ledger 1263). A
-                # POST curl gave up on reached no webhook and carries no body to
-                # read, so it says nothing about the operator either way. It is
+                # POST whose answer curl did not finish carries no body this probe
+                # can read, so it says nothing about the operator either way. It is
                 # NOT retried: this probe is one request, and its deadline shape
                 # in the dict above counts no loop for it.
                 if [ "$STATUS" = "000" ]; then
-                  echo "preflight: mariadb-operator could not be probed: its dry-run POST got no answer within ${REQUEST_MAX_TIME}s, so the API server is the slow part and mariadb-operator is not shown to be down." >&2
+                  echo "preflight: mariadb-operator could not be probed: its dry-run POST got no answer within ${REQUEST_MAX_TIME}s, or its connection to the API server failed (curl's error is above), so this run shows nothing about mariadb-operator either way." >&2
                   return 1
                 fi
 
