@@ -13,7 +13,7 @@ The certificate half of the layer, and the Jobs that mint the credentials nothin
 | object set                                                                                                           | toggle                   | default |
 | -------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------- |
 | Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca` | `internalCA.create`      | `false` |
-| The ten internal leaf Certificates, each carrying its own `renewBefore`                                              | `certificates.create`    | `false` |
+| The twelve internal leaf Certificates, each carrying its own `renewBefore`                                           | `certificates.create`    | `false` |
 | The edge Certificate, whose issuer is an authority this chart does not own                                           | `edgeTLS.create`         | `false` |
 | Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share        | `bootstrap.create`       | `false` |
 | GatewayClass `eg`, Gateway `edge` and the EnvoyProxy that places its data plane                                      | `gatewayListener.create` | `false` |
@@ -36,6 +36,8 @@ The two probe Jobs are here too, on one toggle between them — the pre-install 
 
 The broker's own values — the two accounts, their subject permissions and the `<< >>` escape that emits `$NATS_PASSWORD` unquoted — live under `nats:` in `chart/values.yaml`, moved from this organisation's Argo Application unchanged. The `nats-ingress` NetworkPolicy is NOT the upstream chart's: it is this estate's object and this chart renders it.
 
+**The broker and the cache have serving leaves, and no TLS listener yet.** `nats-tls` and `valkey-tls` are issued with the other leaves (ADR-0852). This version also declares the platform-owned switches the TLS listeners will read — `nats.tls.enabled`, `nats.tls.clientAuth` (`off` or `required`), `valkey.tls.enabled`, `valkey.tls.clientAuth` (`off`, `optional` or `required`) and `valkey.tls.plaintext` — but renders none of them. A render check refuses every value that would turn TLS on, so a values file cannot look encrypted while both still serve plaintext. The off posture (`enabled: false`, `clientAuth: "off"`, `plaintext: true`) renders exactly what the absent keys render. A later release renders the listeners and lifts the refusal.
+
 ## The bootstrap Jobs, and the Secrets nothing owns
 
 Four credentials have **no source outside the installation**: `valkey-password`, `nats-auth`, `nats-auth-gateway`, and the administrative bootstrap token that lets the first administrator exist before any administrator exists to create one. Their value is not a credential to some external system — it is created once, and everything derives from it. There is nobody to transcribe them from, so ADR-0750 rules that the chart mints them itself, with an **idempotent Job**, into a Secret that **neither Helm nor Argo tracks**.
@@ -57,7 +59,7 @@ Set `bootstrap.iamKeys.create: true` and the Job mints `iam-keys` as a fourth `c
 
 ## The ladder, which is the reason these objects live together
 
-`chart/values.yaml` carries the ten internal leaves as a **map keyed by name**, each entry with its own `renewBefore`. Those values are **one invariant, not ten settings**: they are distinct and six hours apart, so at most one service restarts per renewal instant. The edge leaf's 720h belongs to the same ladder and is held out of the map, because a different toggle renders it.
+`chart/values.yaml` carries the twelve internal leaves as a **map keyed by name**, each entry with its own `renewBefore`. Those values are **one invariant, not twelve settings**: they are distinct and six hours apart, so at most one service restarts per renewal instant. The edge leaf's 720h belongs to the same ladder and is held out of the map, because a different toggle renders it.
 
 Every leaf has exactly one consuming module, so ADR-0752's rule that a single-consumer object stays with its module would put each of them in a different repository. ADR-0754 is the amendment that does not: **an object whose correctness depends on an invariant spanning its siblings belongs with the invariant, not with its consumer.** An invariant is checkable only where every one of its terms is visible at once. In one values file the ladder is a map with one gate over it; spread over seven repositories it is seven numbers nobody compares.
 
@@ -81,7 +83,7 @@ chart/values.yaml                          every toggle, every leaf and the ladd
 chart/templates/_require_api.tpl           the render check's definition — a partial, which helm never renders
 chart/templates/render-checks.yaml         where it is CALLED, which is what makes the refusal happen
 chart/templates/internal-ca.yaml           the self-signed Issuer, the CA Certificate and the CA Issuer
-chart/templates/certificates.yaml          the ten internal leaves, from the map in values.yaml
+chart/templates/certificates.yaml          the twelve internal leaves, from the map in values.yaml
 chart/templates/edge-certificate.yaml      the edge leaf; issuerRef falls back to the internal CA if left empty, else required
 chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
 chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook

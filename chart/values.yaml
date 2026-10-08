@@ -47,9 +47,9 @@ internalCA:
     size: 256
     rotationPolicy: Never
 
-# ── THE TEN INTERNAL LEAVES, AND THE LADDER ACROSS THEM ──────────────────────
+# ── THE TWELVE INTERNAL LEAVES, AND THE LADDER ACROSS THEM ───────────────────
 # READ THIS BEFORE ADDING OR MOVING A LEAF. The `renewBefore` values below are one
-# invariant, not ten settings. They are distinct and six hours apart so that AT
+# invariant, not twelve settings. They are distinct and six hours apart so that AT
 # MOST ONE SERVICE RESTARTS PER RENEWAL INSTANT, and a leaf renews every
 # `duration - renewBefore`, so a distinct `renewBefore` is a distinct period as
 # well as a distinct instant and the separations grow rather than drifting back
@@ -60,11 +60,11 @@ internalCA:
 # 720h IS DELIBERATELY ABSENT FROM THIS MAP. It belongs to the EDGE leaf under
 # `edgeTLS` below, which a different authority issues and a different toggle
 # renders. The ladder is shared across both: a step is free only if NEITHER uses
-# it. THE NEXT FREE STEP IS 786h, then 792h. Never a value already in use.
+# it. THE NEXT FREE STEP IS 798h, then 804h. Never a value already in use.
 #
 # THE LEAVES ARE A MAP KEYED BY NAME, CARRYING THE `renewBefore` EXPLICITLY, and
 # no template derives one. A range over a list of modules that computed the step
-# from an index would render the same ten objects today and destroy the invariant
+# from an index would render the same twelve objects today and destroy the invariant
 # the moment the list was reordered — the value would follow the position instead
 # of the leaf. The template ranges over THIS map, and every rung is a line
 # somebody wrote down.
@@ -130,6 +130,22 @@ certificates:
       clusterLocalNames: true
       usages: [server auth, digital signature]
       renewBefore: 774h
+    # THE BROKER'S AND THE CACHE'S SERVING LEAVES (ADR-0852, B-L1). Issued now and
+    # mounted by nothing until B-N2 and B-V2 render the listeners: `nats.tls.*`
+    # and `valkey.tls.*` are declared but refuse every value that would turn TLS
+    # on (`templates/render-checks.yaml`). Renewal: the nats reloader re-reads the
+    # files on SIGHUP; valkey loads them only at boot, so B-V2's cert-hash
+    # liveness restarts it on a new leaf.
+    nats-tls:
+      commonName: nats
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 786h
+    valkey-tls:
+      commonName: valkey
+      clusterLocalNames: true
+      usages: [server auth, digital signature]
+      renewBefore: 792h
 
     # ── CLIENT LEAVES ────────────────────────────────────────────────────────
     # A SEPARATE LEAF FOR THE CALLING DIRECTION, with a separate key and a

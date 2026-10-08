@@ -18,8 +18,8 @@ THE NUMBER IS PER RENDER, NOT ONE NUMBER FOR ALL OF THEM. Three renders, three
 pairs of numbers:
 
   R1  the chart's own defaults          0 Certificates
-  R2  `example/values.yaml`            12 Certificates, 11 ladder values
-  R3  R2 with `edgeTLS.create` false   11 Certificates, 10 ladder values
+  R2  `example/values.yaml`            14 Certificates, 13 ladder values
+  R3  R2 with `edgeTLS.create` false   13 Certificates, 12 ladder values
 
 A single expected number across all three would be vacuous at the defaults, where
 every `create` toggle is false and nothing renders. R1's zero is asserted as an
@@ -27,11 +27,11 @@ EQUALITY against zero and carries its own red case, because a pass that expects
 zero and would also report a pass on one is not a gate.
 
 THE LADDER SET IS SCOPED TO THE CERTIFICATES THAT ARE NOT `isCA`, and that is the
-difference between 12 objects and 11 values rather than an omission. The CA root
+difference between 14 objects and 13 values rather than an omission. The CA root
 carries a `renewBefore` of its own — one year against a ten-year duration — and it
 is not a rung: nothing mounts it as a serving or client credential, and its renewal
-re-signs with the same key rather than restarting a service. Twelve objects
-contributing eleven rungs is exactly one object contributing none, and that object
+re-signs with the same key rather than restarting a service. Fourteen objects
+contributing thirteen rungs is exactly one object contributing none, and that object
 is the CA root.
 
 EVERY RENDER HERE PASSES `--api-versions cert-manager.io/v1`. `helm template` does
@@ -89,14 +89,14 @@ API_VERSIONS = tuple(
 # R1 — the chart's own `values.yaml`, every `create` toggle false.
 CERTIFICATES_AT_THE_DEFAULTS = 0
 
-# R2 — `example/values.yaml`: the ten internal leaves, the CA root, the edge leaf.
-CERTIFICATES_WITH_THE_EDGE_LEAF = 12
+# R2 — `example/values.yaml`: the twelve internal leaves, the CA root, the edge leaf.
+CERTIFICATES_WITH_THE_EDGE_LEAF = 14
 
 # R3 — R2 with `edgeTLS.create` false: the same, less the edge leaf.
-CERTIFICATES_WITHOUT_THE_EDGE_LEAF = 11
+CERTIFICATES_WITHOUT_THE_EDGE_LEAF = 13
 
 # THE LADDER ITSELF, as the set of values and not as a count of leaves. Stated this
-# way on purpose: "eleven leaf values, pairwise distinct" leaves the literal eleven
+# way on purpose: "thirteen leaf values, pairwise distinct" leaves the literal thirteen
 # unmoved when two leaves share one value, and a number a red case cannot move is
 # not an assertion. 720h is the EDGE leaf's rung, held out of the internal map and
 # part of the same ladder — a step is free only if neither uses it.
@@ -112,6 +112,10 @@ LADDER = {
     "768h",
     "774h",
     "780h",
+    # nats-tls and valkey-tls, the two serving leaves B-L1 adds (ADR-0588: the next
+    # two free steps after 780h).
+    "786h",
+    "792h",
 }
 LADDER_WITHOUT_THE_EDGE_LEAF = LADDER - {"720h"}
 
@@ -200,7 +204,7 @@ def chart_with_the_leaves_key_renamed(destination: Path) -> Path:
     """A copy of the chart whose values file no longer holds `certificates.leaves`.
 
     THE RED CASE THE WHOLE GATE EXISTS FOR. The range in
-    `templates/certificates.yaml` then walks nothing, the ten leaves vanish, and
+    `templates/certificates.yaml` then walks nothing, the twelve leaves vanish, and
     "every `renewBefore` is distinct" becomes vacuously true over what is left. The
     CA root and the edge leaf still render, because each sits behind its own toggle
     and neither is reached by that range — which is what puts a number other than
@@ -245,7 +249,7 @@ COLLISION = "certificates:\n  leaves:\n    task-tls:\n      renewBefore: 726h\n"
 def assert_the_collision_has_something_to_collide_with(documents: list[dict]) -> None:
     """The duplicate red case's own tripwire, and the rename case's has a twin.
 
-    An override naming a leaf the chart no longer carries ADDS an eleventh leaf
+    An override naming a leaf the chart no longer carries ADDS a thirteenth leaf
     rather than moving an existing one onto an occupied rung. The set would then
     grow instead of shrinking, the red case would still fail the equality, and it
     would be failing for a reason that has nothing to do with a duplicate — the
@@ -282,7 +286,7 @@ def test_turning_the_leaves_on_reddens_the_defaults_zero(tmp_path):
 
 
 def test_the_adopter_render_carries_the_whole_ladder():
-    """Twelve Certificate objects; eleven of them on distinct rungs."""
+    """Fourteen Certificate objects; thirteen of them on distinct rungs."""
     documents = render(CHART, "-f", str(ADOPTER_VALUES))
     assert (
         ladder_failures(documents, CERTIFICATES_WITH_THE_EDGE_LEAF, LADDER) == []
@@ -292,7 +296,7 @@ def test_the_adopter_render_carries_the_whole_ladder():
 def test_two_leaves_on_one_rung_are_refused(tmp_path):
     """R2's first red case, and the failure has to name both leaves.
 
-    A duplicate moves the SIZE of the set — eleven values become ten — which is why
+    A duplicate moves the SIZE of the set — thirteen values become twelve — which is why
     the expectation is stated as a set rather than as a count of leaves.
     """
     assert_the_collision_has_something_to_collide_with(render(CHART, "-f", str(ADOPTER_VALUES)))
@@ -304,7 +308,7 @@ def test_two_leaves_on_one_rung_are_refused(tmp_path):
     )
     message = "\n".join(failures)
     assert failures, "two leaves shared one rung and the ladder gate passed"
-    assert "expected 11 distinct renewBefore values, found 10" in message
+    assert "expected 13 distinct renewBefore values, found 12" in message
     assert "iam-tls" in message and "task-tls" in message
 
 
@@ -316,8 +320,8 @@ def test_renaming_the_leaves_key_is_refused(tmp_path):
         LADDER,
     )
     message = "\n".join(failures)
-    assert failures, "the ten leaves vanished and the ladder gate passed"
-    assert "expected 12 Certificate objects, found 2" in message
+    assert failures, "the twelve leaves vanished and the ladder gate passed"
+    assert "expected 14 Certificate objects, found 2" in message
 
 
 # ── R3: R2 with the edge leaf off ────────────────────────────────────────────
@@ -362,7 +366,7 @@ def test_two_leaves_on_one_rung_are_refused_without_the_edge_leaf(tmp_path):
     )
     message = "\n".join(failures)
     assert failures, "two leaves shared one rung and the ladder gate passed"
-    assert "expected 10 distinct renewBefore values, found 9" in message
+    assert "expected 12 distinct renewBefore values, found 11" in message
     assert "iam-tls" in message and "task-tls" in message
 
 
@@ -370,7 +374,7 @@ def test_renaming_the_leaves_key_without_the_edge_leaf_leaves_the_ca_root_alone(
     """The same rename, with ONE arithmetic difference the register names.
 
     `edgeTLS.create` is already false here, so the rename leaves the CA root
-    standing alone and the failure names eleven and the one it found.
+    standing alone and the failure names thirteen and the one it found.
     """
     chart = chart_with_the_leaves_key_renamed(tmp_path)
     failures = ladder_failures(
@@ -379,8 +383,8 @@ def test_renaming_the_leaves_key_without_the_edge_leaf_leaves_the_ca_root_alone(
         LADDER_WITHOUT_THE_EDGE_LEAF,
     )
     message = "\n".join(failures)
-    assert failures, "the ten leaves vanished and the ladder gate passed"
-    assert "expected 11 Certificate objects, found 1" in message
+    assert failures, "the twelve leaves vanished and the ladder gate passed"
+    assert "expected 13 Certificate objects, found 1" in message
 
 
 # ── THE EDGE LEAF'S ISSUER FALLS BACK TO THE INTERNAL CA ─────────────────────
