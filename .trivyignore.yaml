@@ -23,8 +23,11 @@
 # `TRIVY_CACHE_DIR` (forcing the embedded-checks fallback CI also hits):
 #   trivy config --skip-check-update --skip-version-check --config /dev/null \
 #     --ignorefile /dev/null --format json --severity HIGH,CRITICAL \
-#     --helm-values chart/ci/values.yaml \
-#     --helm-api-versions "$(paste -sd, chart/ci/api-versions.txt)" .
+#     --helm-values chart/ci/values.yaml .
+# (no `--helm-api-versions`: `chart/ci/api-versions.txt` is comment-only —
+# see that file for why — and the real gate's own reader,
+# `api_versions.py`'s `declared_api_versions()`, returns `[]` for it, so
+# `scripts/trivy_gate.py` passes none either; confirmed by running it, below)
 # reports exactly 45 findings (8 unique IDs, 32 unique ID+path pairs), every
 # one under `chart/charts/**` — this repo's upstream glob (ADR-0847; upstream
 # glob per plan D-A1) — and none in `chart/templates/vendored-crds/` or any
@@ -50,11 +53,12 @@ misconfigurations:
       - "chart/charts/mariadb-operator/templates/webhook/deployment.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) ships no
-      `securityContext.readOnlyRootFilesystem: true` on the
-      cert-controller, controller or webhook container. The chart exposes a
-      top-level `securityContext: {}` value per component; platform has not
-      yet set it. Not an estate-authored template (ADR-0847; upstream glob
-      per plan D-A1).
+      `readOnlyRootFilesystem: true` on the cert-controller, controller or
+      webhook container; neither sets any container `securityContext` at
+      all. Closable per component through the chart's own `securityContext`
+      (operator), `webhook.securityContext` and `certController.securityContext`
+      values; not yet done. Not an estate-authored template (ADR-0847;
+      upstream glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0014
     paths:
@@ -62,8 +66,11 @@ misconfigurations:
     statement: >-
       Upstream prometheus-community `prometheus` chart (29.27.0) ships no
       `readOnlyRootFilesystem: true` on the prometheus-server or
-      configmap-reload containers of its `Deployment`. Not an
-      estate-authored template (ADR-0847; upstream glob per plan D-A1).
+      configmap-reload containers of its `Deployment`. Closable through the
+      chart's `server.containerSecurityContext` and
+      `configmapReload.prometheus.containerSecurityContext` values; not yet
+      done. Not an estate-authored template (ADR-0847; upstream glob per
+      plan D-A1).
     expired_at: 2027-01-08
 
   # ── KSV-0041: ClusterRole manages secrets ────────────────────────────────
@@ -82,28 +89,36 @@ misconfigurations:
       - "chart/charts/cert-manager/templates/cainjector-rbac.yaml"
       - "chart/charts/cert-manager/templates/rbac.yaml"
     statement: >-
-      Upstream cert-manager (chart v1.21.1) grants its cainjector and
-      controller ClusterRoles access to manage `secrets`, which cert-manager
-      needs to write the Certificate/CA/ACME key material it issues. Not an
-      estate-authored template (ADR-0847; upstream glob per plan D-A1).
+      Upstream cert-manager (chart v1.21.1) grants its issuer,
+      cluster-issuer and certificate controller ClusterRoles
+      get/list/watch/create/update/delete (certificates also `patch`) on
+      cluster-wide `secrets`, to write the TLS/ACME key material each
+      issues. Its order and challenge controller ClusterRoles, and its
+      cainjector ClusterRole, only get/list/watch cluster-wide `secrets` —
+      the orders/challenges roles during ACME validation, cainjector to
+      read the CA secrets it injects. Not an estate-authored template
+      (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0041
     paths:
       - "chart/charts/gateway-helm/templates/envoy-gateway-rbac.yaml"
     statement: >-
       Upstream Envoy Gateway (chart v1.9.1) grants ClusterRole
-      `envoy-gateway-role` access to manage `secrets`, which it reads to
-      serve TLS certificates referenced by Gateway listeners. Not an
-      estate-authored template (ADR-0847; upstream glob per plan D-A1).
+      `envoy-gateway-role` get/list/watch (read-only) on cluster-wide
+      `secrets`, which it reads to serve TLS certificates referenced by
+      Gateway listeners. Not an estate-authored template (ADR-0847;
+      upstream glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0041
     paths:
       - "chart/charts/keda/templates/manager/clusterrole.yaml"
     statement: >-
-      Upstream KEDA (chart 2.20.2) grants ClusterRole `keda-operator` access
-      to manage `secrets`, which it reads to resolve TriggerAuthentication
-      secret references. Not an estate-authored template (ADR-0847;
-      upstream glob per plan D-A1).
+      Upstream KEDA (chart 2.20.2) grants ClusterRole `keda-operator`
+      list/watch (read-only) on cluster-wide `secrets`, which it reads to
+      resolve TriggerAuthentication secret references. Closable by setting
+      `permissions.operator.restrict.secret: true`, which restricts the
+      operator to its own release namespace; not yet done. Not an
+      estate-authored template (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0041
     paths:
@@ -111,9 +126,10 @@ misconfigurations:
       - "chart/charts/mariadb-operator/templates/operator/rbac.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) grants its cert-controller
-      and operator ClusterRoles access to manage `secrets`, which it writes
-      TLS and database credential secrets into. Not an estate-authored
-      template (ADR-0847; upstream glob per plan D-A1).
+      and operator ClusterRoles create/patch (also list/watch) on
+      cluster-wide `secrets`, which each writes TLS and database credential
+      secrets into. Not an estate-authored template (ADR-0847; upstream
+      glob per plan D-A1).
     expired_at: 2027-01-08
 
   # ── KSV-0044: wildcard verb on wildcard resource ─────────────────────────
@@ -134,11 +150,12 @@ misconfigurations:
       - "chart/charts/argo-cd/templates/argocd-application-controller/clusterrole.yaml"
       - "chart/charts/argo-cd/templates/argocd-server/clusterrole.yaml"
     statement: >-
-      Upstream argo-cd (chart 8.6.1) grants the application-controller and
-      server ClusterRoles access to all resources, which is the same
-      cluster-wide reconciliation surface KSV-0044 names for the
-      application-controller. Not an estate-authored template (ADR-0847;
-      upstream glob per plan D-A1).
+      Upstream argo-cd (chart 8.6.1) grants the application-controller
+      ClusterRole `*` verbs on `*` resources (the same rule KSV-0044 names)
+      and the server ClusterRole delete/get/patch on `*` resources, which
+      is how the server deletes and patches arbitrary application-managed
+      objects of a kind it does not otherwise need a rule for. Not an
+      estate-authored template (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0046
     paths:
@@ -154,10 +171,12 @@ misconfigurations:
       - "chart/charts/mariadb-operator/templates/operator/rbac-user.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) ships `edit` and `view`
-      aggregated ClusterRoles that grant access to all resources, for
-      cluster administrators to aggregate into their own RBAC rather than
-      for the operator's own service account. Not an estate-authored
-      template (ADR-0847; upstream glob per plan D-A1).
+      aggregated ClusterRoles (`rbac.aggregation.enabled: true` by default)
+      that grant create/update/patch/delete and get/list/watch respectively
+      on all resources in the `k8s.mariadb.com` API group — not cluster-wide
+      — for cluster administrators to aggregate into their own `edit`/`view`
+      RBAC rather than for the operator's own service account. Not an
+      estate-authored template (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
 
   # ── KSV-0056: ClusterRole manages Kubernetes networking ──────────────────
@@ -166,31 +185,31 @@ misconfigurations:
       - "chart/charts/cert-manager/templates/rbac.yaml"
     statement: >-
       Upstream cert-manager (chart v1.21.1) grants ClusterRole
-      `cert-manager-controller-challenges` create/update/patch/delete on
-      services, endpoints, endpointslices, networkpolicies and ingresses,
-      which its ACME HTTP-01 solver needs to stand up and tear down its own
-      temporary routing objects. Not an estate-authored template
-      (ADR-0847; upstream glob per plan D-A1).
+      `cert-manager-controller-challenges` create/delete on `services` and
+      create/update/delete on `ingresses`, which its ACME HTTP-01 solver
+      uses to stand up and tear down its own temporary solver routing
+      objects. Not an estate-authored template (ADR-0847; upstream glob per
+      plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0056
     paths:
       - "chart/charts/gateway-helm/templates/infra-manager-rbac.yaml"
     statement: >-
       Upstream Envoy Gateway (chart v1.9.1) grants Role
-      `gateway-helm-infra-manager` the same networking-object verbs, which
-      it needs to manage the Services and endpoints it provisions for each
-      Gateway listener. Not an estate-authored template (ADR-0847; upstream
-      glob per plan D-A1).
+      `gateway-helm-infra-manager` create/patch/delete/deletecollection on
+      `services`, which it uses for the Service it provisions for each
+      Gateway. Not an estate-authored template (ADR-0847; upstream glob
+      per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0056
     paths:
       - "chart/charts/mariadb-operator/templates/operator/rbac.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) grants ClusterRole
-      `mariadb-operator` the same networking-object verbs, which it needs to
-      manage the Services it creates in front of each MariaDB and MaxScale
-      instance. Not an estate-authored template (ADR-0847; upstream glob
-      per plan D-A1).
+      `mariadb-operator` create/patch (also list/watch) on `services`,
+      which it needs to manage the Service it creates in front of each
+      MariaDB and MaxScale instance. Not an estate-authored template
+      (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
 
   # ── KSV-0050: ClusterRole manages Kubernetes RBAC resources ──────────────
@@ -199,10 +218,11 @@ misconfigurations:
       - "chart/charts/mariadb-operator/templates/operator/rbac.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) grants ClusterRole
-      `mariadb-operator` create/update/delete/deletecollection/impersonate/*
-      on `roles` and `rolebindings`, which it needs to create the
-      per-MariaDB RBAC objects some of its own CRDs reference. Not an
-      estate-authored template (ADR-0847; upstream glob per plan D-A1).
+      `mariadb-operator` create/list/patch/watch on `roles`, `rolebindings`
+      and `clusterrolebindings`, which it uses to create the per-instance
+      RBAC its CRs need. No chart value closes it; inherent to the
+      operator's own reconciliation. Not an estate-authored template
+      (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
 
   # ── KSV-0114: ClusterRole manages webhookconfigurations ──────────────────
@@ -211,18 +231,20 @@ misconfigurations:
       - "chart/charts/cert-manager/templates/cainjector-rbac.yaml"
     statement: >-
       Upstream cert-manager (chart v1.21.1) grants ClusterRole
-      `cert-manager-cainjector` create/update/patch/delete on
-      mutating/validatingwebhookconfigurations, which it needs to inject its
-      own CA bundle into cert-manager's webhook registrations. Not an
-      estate-authored template (ADR-0847; upstream glob per plan D-A1).
+      `cert-manager-cainjector` get/list/watch/update/patch — no
+      create/delete — on both mutating- and validatingwebhookconfigurations,
+      which it needs to inject its own CA bundle into cert-manager's webhook
+      registrations. Not an estate-authored template (ADR-0847; upstream
+      glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0114
     paths:
       - "chart/charts/keda/templates/manager/minimal-rbac.yaml"
     statement: >-
       Upstream KEDA (chart 2.20.2) grants ClusterRole
-      `keda-operator-minimal-cluster-role` the same webhookconfiguration
-      verbs, which it needs to manage its own validating webhook
+      `keda-operator-minimal-cluster-role` get/list/patch/update/watch — no
+      create/delete — on validatingwebhookconfigurations only (it carries no
+      mutating webhook), which it needs to manage its own validating webhook
       registration. Not an estate-authored template (ADR-0847; upstream
       glob per plan D-A1).
     expired_at: 2027-01-08
@@ -231,8 +253,9 @@ misconfigurations:
       - "chart/charts/mariadb-operator/templates/cert-controller/rbac.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) grants ClusterRole
-      `mariadb-operator-cert-controller` the same webhookconfiguration
-      verbs, which it needs to keep its webhook's CA bundle current. Not an
+      `mariadb-operator-cert-controller` get/list/update/patch/watch — no
+      create/delete — on both mutating- and validatingwebhookconfigurations,
+      which it needs to keep its webhook's CA bundle current. Not an
       estate-authored template (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
 
@@ -246,11 +269,14 @@ misconfigurations:
       - "chart/charts/argo-cd/templates/argocd-server/deployment.yaml"
       - "chart/charts/argo-cd/templates/dex/deployment.yaml"
     statement: >-
-      Upstream argo-cd (chart 8.6.1) sets no pod or container
-      `securityContext` on its application-controller, applicationset,
-      notifications, repo-server, server or dex workloads, so each runs with
-      the Kubernetes default, which allows root. Settable through argo-cd's
-      per-component `containerSecurityContext` values; not yet done. Not an
+      Upstream argo-cd (chart 8.6.1) sets no pod-level `securityContext` on
+      its application-controller, applicationset, notifications,
+      repo-server, server or dex workloads (`global.securityContext: {}`).
+      Each container already sets runAsNonRoot, readOnlyRootFilesystem, drop
+      ALL and RuntimeDefault through the chart's default
+      `containerSecurityContext`. Closable by setting
+      `argo-cd.global.securityContext` (for example `runAsNonRoot: true`,
+      `seccompProfile.type: RuntimeDefault`); not yet done. Not an
       estate-authored template (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
   - id: KSV-0118
@@ -260,9 +286,12 @@ misconfigurations:
       - "chart/charts/mariadb-operator/templates/webhook/deployment.yaml"
     statement: >-
       Upstream mariadb-operator (chart 26.6.0) sets no pod or container
-      `securityContext` on its cert-controller, operator or webhook
+      `securityContext` at all on its cert-controller, operator or webhook
       Deployments, so each runs with the Kubernetes default, which allows
-      root. Settable through the chart's top-level `securityContext` value;
-      not yet done. Not an estate-authored template (ADR-0847; upstream glob
-      per plan D-A1).
+      root. Closable per component through the chart's own
+      `podSecurityContext`/`securityContext` (operator),
+      `webhook.podSecurityContext`/`webhook.securityContext` and
+      `certController.podSecurityContext`/`certController.securityContext`
+      values; not yet done. Not an estate-authored template (ADR-0847;
+      upstream glob per plan D-A1).
     expired_at: 2027-01-08

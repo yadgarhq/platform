@@ -1,2 +1,6 @@
-monitoring.coreos.com/v1
-autoscaling.k8s.io/v1
+# No operator API version is needed: the default render (operators.create:
+# true) is byte-identical with and without --api-versions on helm 4.3.0 and
+# 3.18.4. argo-cd's own ServiceMonitor/PrometheusRule templates
+# (monitoring.coreos.com/v1) and prometheus's kube-state-metrics/node-exporter
+# VerticalPodAutoscaler templates (autoscaling.k8s.io/v1) are each off by
+# default, and this release installs neither CRD itself.

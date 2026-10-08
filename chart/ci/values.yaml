@@ -1,5 +1,5 @@
 # THE CI RENDER VALUES FOR THIS CHART (ADR-0806's one-file pattern; ledger 1150,
-# D-A1). This is what the shared trivy step (once it lands, D-A1) and
+# D-A1). This is what the shared trivy gate (D-A1, actions#111) and
 # `helm lint --strict -f` pass so this chart's own CI scans the operator
 # subcharts it vendors rather than silently skipping them.
 #
