@@ -12,7 +12,9 @@ string where a block belongs, a non-bool on a toggle — PASSES this schema and
 is the other file's refusal to make; the green cases below prove that rather
 than assert it from the two files' names alone.
 
-TEN PATHS STAY OPEN (`OPEN` below), asserted bare `{}`, never typed.
+NINE PATHS STAY OPEN (`OPEN` below), asserted bare `{}`, never typed, and ONE
+IS PARTLY OPEN (`PARTLY_OPEN`): `nats`, open at its own level with the
+platform-owned `nats.tls` closed beneath it (B-L1).
 `global` is Helm's own reserved key (ADR-0722). The SEVEN upstream sections
 are each a Helm dependency this chart adopts rather than re-types: `nats`,
 `cert-manager`, `keda`, `mariadb-operator`, `gateway-helm`, `argo-cd` and
@@ -25,7 +27,7 @@ it and hardcodes `group: cert-manager.io` itself, so an open map there would
 silently DROP a key like `group: awspca.cert-manager.io` rather than refuse
 it — closed to exactly `{name, kind}` instead, same shape as a keyed block.
 
-SIXTEEN EXTRAS (`EXTRAS` below) are declared though `chart/values.yaml` never
+THE EXTRAS (`EXTRAS` below) are declared though `chart/values.yaml` never
 states them, because a template, or the parent's own condition resolution,
 reads every one anyway:
 
@@ -58,6 +60,10 @@ reads every one anyway:
     `issuerRef: {}`, empty; `templates/edge-certificate.yaml` `required`s
     both, so both are declared here rather than left for an open map to
     swallow a typo of either silently.
+  - `nats.tls` and `valkey.tls` with their keys (`enabled`, `clientAuth`,
+    and `plaintext` for valkey) — the platform-owned TLS switches B-L1
+    declares and B-N2 / B-V2 render. Absent from `values.yaml` by design:
+    the contracts make them required with no default (ADR-0845, ADR-0854).
 
 TWO RESIDUALS ARE NOT, AND CANNOT BE, REFUSABLE HERE: `nats.create` (inside
 the open `nats` section; `render-checks.yaml`'s own mixed-release guard only
@@ -102,7 +108,6 @@ VALUES = CHART / "values.yaml"
 # module docstring and the schema's own `$comment` for why each is open.
 OPEN = (
     "global",
-    "nats",
     "cert-manager",
     "keda",
     "mariadb-operator",
@@ -112,6 +117,15 @@ OPEN = (
     "gatewayListener.envoyProxy.pod.nodeSelector",
     "valkey.resources",
 )
+
+# PARTLY OPEN: an upstream section that ALSO carries one platform-owned block
+# (B-L1, the folded B-N2 expand). `nats` is the nats subchart's own values, so
+# it stays open to every key upstream accepts — no `additionalProperties` at
+# that level — while `nats.tls` is THIS chart's key (the platform-owned switch
+# ADR-0845 needs, because the parent always sees the subchart's own default for
+# `nats.config.nats.tls.enabled`) and is closed like any other block. The
+# upstream chart reads no top-level `tls`, so declaring it shadows nothing.
+PARTLY_OPEN = {"nats": {"tls"}}
 
 # Leaves a template (or the parent's own condition resolution) reads that
 # `values.yaml` never states (§2 step 2's "read-but-undeclared keys"),
@@ -147,6 +161,18 @@ EXTRAS = (
     # template `required`s are declared here rather than left open.
     "edgeTLS.issuerRef.name",
     "edgeTLS.issuerRef.kind",
+    # THE NATS AND VALKEY TLS KEYS (B-L1, the folded B-N2 / B-V2 expand). Absent
+    # from `values.yaml` BY DESIGN: the contracts make them required with no
+    # chart default (ADR-0845, ADR-0854), and an expand that shipped a default
+    # would have to delete it again. `render-checks.yaml` validates each one
+    # when present and refuses every value the contracts have not rendered yet.
+    "nats.tls",
+    "nats.tls.enabled",
+    "nats.tls.clientAuth",
+    "valkey.tls",
+    "valkey.tls.enabled",
+    "valkey.tls.clientAuth",
+    "valkey.tls.plaintext",
 )
 
 # `certificates.leaves` is a KEYED MAP (§3.5): any leaf NAME is accepted, so
@@ -193,11 +219,14 @@ def schema_paths(schema: dict, prefix: str = "") -> set[str]:
     return paths
 
 
-def values_paths(values: dict, prefix: str = "", open_paths: tuple[str, ...] = OPEN) -> set[str]:
+def values_paths(
+    values: dict, prefix: str = "", open_paths: tuple[str, ...] = OPEN + tuple(PARTLY_OPEN)
+) -> set[str]:
     """Every dotted path `values.yaml` itself states, PURE.
 
     MIRRORS `gen_schema.py`'s OWN RECURSION: an open path's children are never
-    visited, because the schema does not declare them either.
+    visited, because the schema does not declare them either. A PARTLY open path
+    is not walked either: `values.yaml` states only upstream keys under it.
     """
     paths: set[str] = set()
     for key, value in values.items():
@@ -228,6 +257,32 @@ def open_paths_failures(schema: dict) -> list[str]:
     return failures
 
 
+def partly_open_failures(schema: dict) -> list[str]:
+    """Every `PARTLY_OPEN` path that is not open at its own level with exactly
+    the platform-owned blocks declared. PURE.
+
+    TWO WAYS TO GET IT WRONG, both checked: `additionalProperties: false` at the
+    section's own level refuses every key the upstream chart accepts, and a
+    declared block beyond the platform-owned set is a key this chart claims
+    from upstream without reading it.
+    """
+    failures = []
+    for path, owned in PARTLY_OPEN.items():
+        node = schema_node(schema, path)
+        if node is None:
+            failures.append(f"{path} is not declared at all")
+            continue
+        if "additionalProperties" in node:
+            failures.append(
+                f"{path} carries `additionalProperties`, so it is no longer open to "
+                f"the upstream chart's own keys"
+            )
+        declared = set(node.get("properties", {}))
+        if declared != owned:
+            failures.append(f"{path} declares {sorted(declared)}, expected {sorted(owned)}")
+    return failures
+
+
 def nodes_with_properties(schema: dict, prefix: str = ""):
     """Yield (path, node) for every node in the tree carrying `properties`.
 
@@ -242,10 +297,12 @@ def nodes_with_properties(schema: dict, prefix: str = ""):
 
 
 def closure_offenders(schema: dict) -> list[str]:
+    """`PARTLY_OPEN` paths are the one exemption, and `partly_open_failures`
+    is their own check: open at their level, closed below it."""
     return [
         path or "(root)"
         for path, node in nodes_with_properties(schema)
-        if node.get("additionalProperties") is not False
+        if node.get("additionalProperties") is not False and path not in PARTLY_OPEN
     ]
 
 
@@ -293,7 +350,7 @@ def extras_found(schema: dict, values: dict) -> set[str]:
     which is exactly why both are in `EXTRAS` too, open-shaped extras rather
     than closed ones.
     """
-    stated = values_paths(values, open_paths=OPEN + KEYED_MAPS)
+    stated = values_paths(values, open_paths=OPEN + tuple(PARTLY_OPEN) + KEYED_MAPS)
     return schema_paths(schema) - stated - {"global"} - set(RETAINED)
 
 
@@ -367,14 +424,60 @@ def test_every_node_with_properties_is_closed():
 
 
 def test_the_open_paths_are_exactly_bare():
-    """The ten `OPEN` paths are `{}` — open, untyped, unchecked.
+    """The nine `OPEN` paths are `{}` — open, untyped, unchecked.
 
     NOT merely "has no `additionalProperties`": a node like `{"type": "object"}`
     would pass a laxer check and still be a TYPED open map, which is not what
-    this chart ships for any of the ten.
+    this chart ships for any of the nine.
     """
     failures = open_paths_failures(load_schema())
     assert failures == [], "\n".join(failures)
+
+
+def test_the_partly_open_paths_are_open_above_the_platform_owned_block():
+    """`nats` stays open to upstream's keys; `nats.tls` alone is declared."""
+    failures = partly_open_failures(load_schema())
+    assert failures == [], "\n".join(failures)
+
+
+def test_the_nats_and_valkey_tls_blocks_are_closed_to_their_keys():
+    """B-L1: the platform-owned TLS keys, by name, each block closed.
+
+    NATS has no `plaintext`: the transport step there is the upstream
+    `nats.config.merge.allow_non_tls` (B-N2), not a platform key.
+    """
+    schema = load_schema()
+    expected = {
+        "nats.tls": {"enabled", "clientAuth"},
+        "valkey.tls": {"enabled", "clientAuth", "plaintext"},
+    }
+    for path, keys in expected.items():
+        node = schema_node(schema, path)
+        assert node is not None, f"{path} is not declared"
+        assert node.get("additionalProperties") is False, f"{path} is not closed"
+        assert set(node["properties"]) == keys, (path, sorted(node["properties"]))
+        for key in keys:
+            assert node["properties"][key] == {}, (path, key)
+
+
+def test_mutation_closing_nats_at_its_own_level_reddens_the_partly_open_check():
+    schema = load_schema()
+    schema["properties"]["nats"]["additionalProperties"] = False
+    failures = partly_open_failures(schema)
+    assert any("carries `additionalProperties`" in failure for failure in failures), failures
+
+
+def test_mutation_opening_nats_tls_reddens_the_closure_check():
+    schema = load_schema()
+    del schema["properties"]["nats"]["properties"]["tls"]["additionalProperties"]
+    assert closure_offenders(schema) == ["nats.tls"]
+
+
+def test_mutation_claiming_an_upstream_nats_key_reddens_the_partly_open_check():
+    schema = load_schema()
+    schema["properties"]["nats"]["properties"]["config"] = {}
+    failures = partly_open_failures(schema)
+    assert any("expected ['tls']" in failure for failure in failures), failures
 
 
 def test_every_values_yaml_leaf_is_declared():
@@ -385,7 +488,7 @@ def test_every_values_yaml_leaf_is_declared():
     somebody rewrites it, which is a worse failure than a typo ever is.
     """
     declared = schema_paths(load_schema())
-    stated = values_paths(load_values(), open_paths=OPEN + KEYED_MAPS)
+    stated = values_paths(load_values(), open_paths=OPEN + tuple(PARTLY_OPEN) + KEYED_MAPS)
     missing = sorted(stated - declared)
     assert missing == [], (
         f"chart/values.yaml states {missing} and the schema declares none of "
@@ -394,7 +497,7 @@ def test_every_values_yaml_leaf_is_declared():
 
 
 def test_every_schema_extra_is_exactly_the_declared_set():
-    """Schema paths beyond values.yaml and the ten open paths == EXTRAS.
+    """Schema paths beyond values.yaml and the open paths == EXTRAS.
 
     BOTH DIRECTIONS AT ONCE: a path missing from EXTRAS that the schema still
     declares is undocumented (and untested below); a path in EXTRAS the
@@ -716,6 +819,19 @@ def test_preflight_probes_keda_true_is_accepted(tmp_path):
 
 
 # ── GREEN: THE RESIDUALS, UNREFUSABLE BY THIS SCHEMA ───────────────────────
+
+
+def test_a_typo_under_nats_tls_is_refused_by_name(tmp_path):
+    """`nats` is partly open, and `nats.tls` is the closed part."""
+    result = render_with_overlay(CHART, {"nats": {"tls": {"enabeld": False}}}, tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert_schema_refusal(result.stderr, "enabeld", "nats.tls")
+
+
+def test_a_typo_under_valkey_tls_is_refused_by_name(tmp_path):
+    result = render_with_overlay(CHART, {"valkey": {"tls": {"plaintxt": True}}}, tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert_schema_refusal(result.stderr, "plaintxt", "valkey.tls")
 
 
 def test_nats_create_typo_passes_this_schema_silently(tmp_path):

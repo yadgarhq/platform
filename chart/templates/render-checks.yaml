@@ -4,18 +4,19 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. NINE of the second kind live below — the
+release's own values and nothing else. ELEVEN of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
-arms, the per-operator create arm, and then the mixed-release refusal and the type
-arm of its toggle list — and everything that makes a capability
+arms, the per-operator create arm, then the mixed-release refusal and the type
+arm of its toggle list, and last the two NATS/valkey TLS arms — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all nine;
-`scripts/tests/test_operators_shape.py` owns what the shape and register arms do.
+the mixed-release pair and the count of all eleven;
+`scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
+`scripts/tests/test_nats_valkey_tls.py` owns what the two TLS arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
-Certificate, the CA Issuer, the ten internal leaves and the edge leaf all come from
+Certificate, the CA Issuer, the twelve internal leaves and the edge leaf all come from
 `cert-manager.io/v1`, and one operator provides that whole group — so they share a
 check. The Gateway listener is the same shape one level along: it renders three
 kinds from TWO groups behind ONE toggle, and carries ONE check.
@@ -493,6 +494,92 @@ not name the key itself (ledger 1121 review). Skipping it here let
       "%s "
       "Install the operators in a release of their own, with every other create toggle false, then install the estate against the cluster that release leaves behind."))
       (join ", " (uniq $operatorKeysOn)) (join ", " $otherKeysOn) (join " " $reasons)) }}
+{{- end }}
+
+{{/*
+THE NATS AND VALKEY TLS KEYS: DECLARED BY THIS VERSION, RENDERED BY NONE (B-L1,
+THE FOLDED B-N2 / B-V2 EXPAND, plan K-8 step 1).
+
+`nats.tls.enabled`, `nats.tls.clientAuth`, `valkey.tls.enabled`,
+`valkey.tls.clientAuth` and `valkey.tls.plaintext` are platform-owned. B-N2 and
+B-V2 render them and then make them required with no default (ADR-0845,
+ADR-0854). This version only DECLARES them, so a parent can state them before a
+contract pin needs them. Two arms, each refusing wherever this chart runs: no
+parent names these keys yet, so nothing a subchart `fail` could shadow exists.
+
+ARM ONE, THE SHAPE. The schema closes the key set and nothing else (ADR-0847), so
+the types are checked here: each block a mapping, `enabled` and `plaintext`
+booleans, `clientAuth` a QUOTED STRING tested with `kindIs` BEFORE any `eq` (YAML
+reads a bare `off` as false, and Go then dies on incompatible types — B-U5E
+convention item 1), and one of the values its server has. NATS has no optional
+client-certificate mode (`verify` is require-and-verify only; ADR-0854), so its
+set is `off | required`; valkey's is `off | optional | required`.
+
+ARM TWO, THE EXPAND REFUSAL. `enabled: true`, `plaintext: false` and any
+`clientAuth` other than "off" each describe a listener no template here renders.
+Accepting one would let a values file look encrypted while the broker and the
+cache still serve plaintext only, so each is refused with ONE sentence naming
+the contract that renders it, and that contract lifts this arm. The off posture
+— `enabled: false`, `clientAuth: "off"`, `plaintext: true` — renders exactly
+what the absent keys render.
+
+THE LOOP VARIABLE IS NOT `$operator` OR `$toggle`, so the mixed-release guard's
+two lists above stay the first `range` of each name in this file, which
+`test_render_checks.py` reads.
+*/}}
+{{- $tlsShape := list }}
+{{- $tlsUnrendered := list }}
+{{- range $tlsServer := (list "nats" "valkey") }}
+{{- $server := index $.Values $tlsServer }}
+{{- if and (kindIs "map" $server) (hasKey $server "tls") }}
+{{- $tls := index $server "tls" }}
+{{- if not (kindIs "map" $tls) }}
+{{- $kind := kindOf $tls }}
+{{- if eq $kind "invalid" }}{{ $kind = "null" }}{{ end }}
+{{- $tlsShape = append $tlsShape (printf "`%s.tls` is a %s rather than a mapping: write `enabled`, `clientAuth`%s under it" $tlsServer $kind (ternary " and `plaintext`" "" (eq $tlsServer "valkey"))) }}
+{{- else }}
+{{- range $switch := (ternary (list "enabled" "plaintext") (list "enabled") (eq $tlsServer "valkey")) }}
+{{- if hasKey $tls $switch }}
+{{- $value := index $tls $switch }}
+{{- if not (kindIs "bool" $value) }}
+{{- $kind := kindOf $value }}
+{{- if eq $kind "invalid" }}{{ $kind = "null" }}{{ end }}
+{{- $tlsShape = append $tlsShape (printf "`%s.tls.%s` is a %s rather than true or false: write it unquoted" $tlsServer $switch $kind) }}
+{{- else if and (eq $switch "enabled") $value }}
+{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.enabled: true`" $tlsServer) }}
+{{- else if and (eq $switch "plaintext") (not $value) }}
+{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.plaintext: false`" $tlsServer) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if hasKey $tls "clientAuth" }}
+{{- $mode := index $tls "clientAuth" }}
+{{- if not (kindIs "string" $mode) }}
+{{- $tlsShape = append $tlsShape (printf "`%s.tls.clientAuth` must be a quoted string, and it is a %s. YAML reads a bare off as false: write `clientAuth: \"off\"`" $tlsServer (ternary "null" (kindOf $mode) (eq (kindOf $mode) "invalid"))) }}
+{{- else if eq $tlsServer "nats" }}
+{{- if not (has $mode (list "off" "required")) }}
+{{- $tlsShape = append $tlsShape (printf "`nats.tls.clientAuth` must be `off` or `required`, and it is %q. NATS has no optional client-certificate mode: its `verify` requires and verifies (ADR-0854)" $mode) }}
+{{- else if ne $mode "off" }}
+{{- $tlsUnrendered = append $tlsUnrendered (printf "`nats.tls.clientAuth: %q`" $mode) }}
+{{- end }}
+{{- else if not (has $mode (list "off" "optional" "required")) }}
+{{- $tlsShape = append $tlsShape (printf "`%s.tls.clientAuth` must be `off`, `optional` or `required`, and it is %q" $tlsServer $mode) }}
+{{- else if ne $mode "off" }}
+{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.clientAuth: %q`" $tlsServer $mode) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $tlsShape }}
+{{- fail (printf "platform: %s." (join "; " $tlsShape)) }}
+{{- end }}
+{{- if $tlsUnrendered }}
+{{- fail (printf (join "" (list
+      "platform: %s %s TLS that no template in this chart renders: this chart version declares the key; B-N2 / B-V2 renders it. "
+      "Until that release, a values file stating it would look encrypted while the broker and the cache still serve plaintext only. "
+      "Write the off posture — `enabled: false`, `clientAuth: \"off\"` and, for valkey, `plaintext: true` — or pin the release that renders it."))
+      (join ", " $tlsUnrendered) (ternary "asks for" "ask for" (eq (len $tlsUnrendered) 1))) }}
 {{- end }}
 
 {{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}

@@ -1,13 +1,13 @@
 {{/*
-THE TEN INTERNAL LEAVES, RENDERED FROM THE MAP IN `values.yaml` AND FROM NOTHING
+THE TWELVE INTERNAL LEAVES, RENDERED FROM THE MAP IN `values.yaml` AND FROM NOTHING
 ELSE.
 
 WHAT THIS RANGE IS OVER, AND WHAT IT IS NOT. It ranges over a MAP KEYED BY LEAF
 NAME in which every entry carries its own `renewBefore`. It does NOT range over a
-list of modules deriving the step from a position: that renders the same ten
+list of modules deriving the step from a position: that renders the same twelve
 objects today and destroys the ladder the first time somebody reorders the list,
 because the rung would follow the index instead of the leaf. The invariant lives
-in the values file, where all eleven rungs are visible at once, and
+in the values file, where all thirteen rungs are visible at once, and
 `scripts/tests/test_ladder.py` is what reads them together.
 
 THE MAP KEY IS THE OBJECT NAME AND THE SECRET NAME, which is how the source

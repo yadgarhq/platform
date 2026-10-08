@@ -45,8 +45,8 @@ FLOORS, BUT NOT THE HOOK'S FLOORS. The hook's `MINIMUM_CERTIFICATES = 2` and
 low enough that any real estate clears them by a wide margin, because the hook's job
 is to notice "a glob matched nothing" rather than "this exact chart's count moved".
 This suite renders one exact chart with one exact values file, and the numbers below
-are MEASURED against it: 12 Certificates (the CA root, ten internal leaves, the edge
-leaf) and 11 leaves (every one of the twelve except the CA root). `>=` rather than
+are MEASURED against it: 14 Certificates (the CA root, twelve internal leaves, the
+edge leaf) and 13 leaves (every one of the fourteen except the CA root). `>=` rather than
 `==`, following `MINIMUM_CERTIFICATES`/`MINIMUM_LEAVES`'s own reasoning restated at
 this chart's own count: adding a twelfth leaf is a legitimate change and must not
 redden this suite, but a render that silently drops one below what is measured today
@@ -83,13 +83,13 @@ API_VERSIONS = tuple(
 SERVER = "server auth"
 CLIENT = "client auth"
 
-# MEASURED against `helm template chart -f example/values.yaml`: 12 Certificate
-# objects (the CA root, the ten internal leaves, the edge leaf) and 11 leaves (every
-# one of the twelve except the CA root, which the wall exempts by `isCA` rather than
+# MEASURED against `helm template chart -f example/values.yaml`: 14 Certificate
+# objects (the CA root, the twelve internal leaves, the edge leaf) and 13 leaves (every
+# one of the fourteen except the CA root, which the wall exempts by `isCA` rather than
 # judging). Literals, not derived from the render they gate — the whole point of a
 # floor is that it does not move with the thing it is measuring.
-CERTIFICATE_FLOOR = 12
-LEAF_FLOOR = 11
+CERTIFICATE_FLOOR = 14
+LEAF_FLOOR = 13
 
 
 def helm(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -191,7 +191,7 @@ def test_the_adopter_render_examines_the_measured_count_and_the_wall_holds():
 
     assert len(found) >= CERTIFICATE_FLOOR, (
         f"expected at least {CERTIFICATE_FLOOR} Certificate objects (measured "
-        f"{CERTIFICATE_FLOOR} today: the CA root, the ten internal leaves and the "
+        f"{CERTIFICATE_FLOOR} today: the CA root, the twelve internal leaves and the "
         f"edge leaf), found {len(found)}: {sorted(str((d.get('metadata') or {}).get('name')) for d in found)}. "
         f"A render that silently drops a certificate must redden here rather than "
         f"pass having examined less than it used to."
@@ -210,9 +210,9 @@ def test_the_adopter_render_examines_the_measured_count_and_the_wall_holds():
 
 
 def test_disabling_the_internal_leaves_reddens_the_certificate_floor(tmp_path):
-    """`certificates.create: false` drops ten of twelve Certificates. The floor catches it.
+    """`certificates.create: false` drops twelve of fourteen Certificates. The floor catches it.
 
-    THE CONSTRUCTED RED CASE FOR THE FLOOR ITSELF: with the ten internal leaves off,
+    THE CONSTRUCTED RED CASE FOR THE FLOOR ITSELF: with the twelve internal leaves off,
     only the CA root and the edge leaf remain — 2 Certificates, 1 leaf — both well
     under `CERTIFICATE_FLOOR` and `LEAF_FLOOR`. A suite whose floor never moves is
     not a floor; this is what proves it can.
