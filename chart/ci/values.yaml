@@ -1,0 +1,29 @@
+# THE CI RENDER VALUES FOR THIS CHART (ADR-0806's one-file pattern; ledger 1150,
+# D-A1). This is what the shared trivy step (once it lands, D-A1) and
+# `helm lint --strict -f` pass so this chart's own CI scans the operator
+# subcharts it vendors rather than silently skipping them.
+#
+# `operators.create: true` AND NOTHING ELSE, deliberately. `operators.create`
+# is this chart's one register-facing key (`chart/templates/_operators.tpl`);
+# setting it alone installs all five operators — cert-manager, KEDA,
+# mariadb-operator, Envoy Gateway and Argo CD — plus Prometheus, which rides
+# with them under the same condition (ADR-0820). Every other `create` toggle
+# this chart carries stays at the chart's own default of `false`.
+#
+# THAT IS NOT A CHOICE OF CONVENIENCE, IT IS THE MIXED-RELEASE GUARD
+# (`chart/templates/render-checks.yaml`, ADR-0787). A release that turns on
+# an operator AND renders one of this chart's own objects refuses at render
+# time: a CustomResourceDefinition this same release is installing cannot
+# already be registered for the object that needs it, so a mixed release
+# would fail part-way through an apply. Adding any other toggle here —
+# `internalCA.create`, `certificates.create`, `edgeTLS.create`,
+# `gatewayListener.create`, `bootstrap.create`, `nats.create` or
+# `valkey.create` — would make this file render nothing at all (the guard
+# fails first, `fail` aborting the whole template), which is the opposite of
+# what a CI scan of the operator subcharts needs.
+#
+# Measured 2026-10-08 against this chart's own `origin/main`, `helm template
+# platform chart --set operators.create=true` after `helm dependency update
+# chart`: rc 0, 190 objects, on both helm v4.3.0 and v3.18.4.
+operators:
+  create: true

@@ -1,0 +1,2 @@
+monitoring.coreos.com/v1
+autoscaling.k8s.io/v1
