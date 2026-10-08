@@ -8,25 +8,33 @@
 # upstream glob per plan D-A1), an entry matching no finding, an entry with
 # no `paths`, or an expired entry all fail the gate as stale.
 #
-# D-A1's own gate (`scripts/trivy_gate.py`, actions) does not exist yet
-# (actions#111 is not merged), so this PR's ignore list cannot be exercised
-# by that gate before D-A1 merges. It is proved instead with trivy's own
-# `--ignorefile`, used here as a stand-in for the gate's matcher.
+# D-A1's own gate (`scripts/trivy_gate.py`, `yadgarhq/actions`#111) merged to
+# `actions@main` while this PR was in flight, and it already runs on this PR
+# as `ci / vulnerabilities`. Checks DB state changes what trivy reports: with
+# no cached checks bundle (this measurement; CI runners start the same way)
+# `--skip-check-update` falls back to trivy's EMBEDDED checks, one ID richer
+# than a primed cache's downloaded bundle at the same trivy version — this
+# repo's actual CI run surfaced `KSV-0050` that a cache-primed local run did
+# not. Everything below is measured against the embedded fallback, the state
+# that matters.
 #
 # Measured 2026-10-08 on this repo's `origin/main`, after
-# `helm dependency update chart`, trivy 0.74.0:
-#   trivy config --skip-check-update --config /dev/null --ignorefile /dev/null \
-#     --format json --severity HIGH,CRITICAL \
+# `helm dependency update chart`, trivy 0.74.0, with an empty
+# `TRIVY_CACHE_DIR` (forcing the embedded-checks fallback CI also hits):
+#   trivy config --skip-check-update --skip-version-check --config /dev/null \
+#     --ignorefile /dev/null --format json --severity HIGH,CRITICAL \
 #     --helm-values chart/ci/values.yaml \
 #     --helm-api-versions "$(paste -sd, chart/ci/api-versions.txt)" .
-# reports exactly 44 findings (7 unique IDs, 31 unique ID+path pairs), every
+# reports exactly 45 findings (8 unique IDs, 32 unique ID+path pairs), every
 # one under `chart/charts/**` — this repo's upstream glob (ADR-0847; upstream
 # glob per plan D-A1) — and none in `chart/templates/vendored-crds/` or any
 # other estate-authored template. Re-running the same scan with
-# `--ignorefile .trivyignore.yaml` (trivy's own matcher, the stand-in above):
-# 0 findings remain. Re-running again with every `expired_at` moved to the
-# past: all 44 findings reappear, confirming trivy does not apply expired
-# entries.
+# `--ignorefile .trivyignore.yaml`: 0 findings remain. Re-running again with
+# every `expired_at` moved to the past: all 45 findings reappear, confirming
+# trivy does not apply expired entries. Running `scripts/trivy_gate.py`
+# itself (copied from `actions@main` 14d9b83, the merged D-A1 gate) against
+# this worktree, same empty cache: `clean: every upstream finding is
+# covered, no stale entries.`
 #
 # Each entry is scoped to the exact template file(s) of the one upstream
 # chart it covers, not to `chart/charts/**` as a whole, so a future finding
@@ -183,6 +191,18 @@ misconfigurations:
       manage the Services it creates in front of each MariaDB and MaxScale
       instance. Not an estate-authored template (ADR-0847; upstream glob
       per plan D-A1).
+    expired_at: 2027-01-08
+
+  # ── KSV-0050: ClusterRole manages Kubernetes RBAC resources ──────────────
+  - id: KSV-0050
+    paths:
+      - "chart/charts/mariadb-operator/templates/operator/rbac.yaml"
+    statement: >-
+      Upstream mariadb-operator (chart 26.6.0) grants ClusterRole
+      `mariadb-operator` create/update/delete/deletecollection/impersonate/*
+      on `roles` and `rolebindings`, which it needs to create the
+      per-MariaDB RBAC objects some of its own CRDs reference. Not an
+      estate-authored template (ADR-0847; upstream glob per plan D-A1).
     expired_at: 2027-01-08
 
   # ── KSV-0114: ClusterRole manages webhookconfigurations ──────────────────
