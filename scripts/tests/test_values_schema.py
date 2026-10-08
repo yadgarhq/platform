@@ -68,9 +68,9 @@ reads every one anyway:
 TWO RESIDUALS ARE NOT, AND CANNOT BE, REFUSABLE HERE: `nats.create` (inside
 the open `nats` section; `render-checks.yaml`'s own mixed-release guard only
 ever sees the CORRECTLY SPELLED key) and `prometheus.forceNamespace` (inside
-the open `prometheus` section, read by `templates/prometheus-namespace.yaml`
-— no render check guards it yet; plan K-3 / brief §3.7e names this residual,
-follow-up ledger). Closing either key means closing its whole upstream
+the open `prometheus` section, read by `templates/prometheus-namespace.yaml`;
+`render-checks.yaml` refuses it empty or null while prometheus is on, ledger
+1340, but cannot see a typo'd sibling key). Closing either key means closing its whole upstream
 section, which would also refuse every key the upstream chart itself
 accepts. The green rows below assert they pass THIS schema at exit 0, each
 with a comment naming the render check (or the absence of one) that is the
@@ -852,9 +852,10 @@ def test_prometheus_force_namespace_typo_passes_this_schema_silently(tmp_path):
     """`prometheus` is an OPEN upstream section. `prometheus.forceNamespac`
     (typo'd) is read by NOTHING: `templates/prometheus-namespace.yaml:20` is
     the one place `.Values.prometheus.forceNamespace` is read at all, and it
-    reads the CORRECTLY SPELLED key — no render check guards this one yet
-    (plan K-3 / brief §3.7e residual, follow-up ledger), so a typo here is
-    not refused by this schema or by anything else.
+    reads the CORRECTLY SPELLED key. The render check that guards it (ledger
+    1340) refuses an empty or null `forceNamespace`, and a `-f` overlay merges
+    onto the shipped `forceNamespace: observability` rather than replacing it,
+    so a typo here is not refused by this schema or by anything else.
     """
     result = render_with_overlay(CHART, {"prometheus": {"forceNamespac": "x"}}, tmp_path)
     assert result.returncode == 0, result.stderr

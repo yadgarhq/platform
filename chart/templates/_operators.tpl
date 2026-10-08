@@ -6,8 +6,9 @@ mixed-release guard of its step 3 and the vendored-CRD guards of its step 2, and
 until now none existed: the same `dig` was pasted into `render-checks.yaml` and
 into all eighteen files under `templates/vendored-crds/`. This is that helper.
 
-WHAT IT RETURNS. The values key that turned this operator ON — either
-`operators.<name>.create` or `operators.create` — or the EMPTY STRING when the
+WHAT IT RETURNS. The values key that turned this operator ON —
+`operators.<name>.create`, `operators.create`, or `operators` itself when the
+block is not a mapping (ADR-0873) — or the EMPTY STRING when the
 operator is off, which every caller reads as false. A caller that only needs the
 boolean tests the result for truth; the mixed-release guard uses the string
 itself, so the key it names in its refusal is derived here rather than in a
@@ -73,10 +74,24 @@ permitted five of the eight shapes an adopter can write.
 
 AND THE SHAPES IT PERMITTED ARE EXACTLY THE DANGEROUS ONES. Helm LEAVES A
 DEPENDENCY ENABLED when no path of a multi-path `condition:` resolves, so a
-value this helper cannot read does not turn the operators off — it turns all
-five on. Coercing here would install five operators while skipping every CRD
-this chart owns. The refusal in `templates/render-checks.yaml` is what stops
-that, and this helper going quiet is only safe because that refusal exists.
+value this helper cannot read does not turn the operators off — it turns them
+all on.
+
+SO A PRESENT NON-MAP `operators` RESOLVES ON, FOR EVERY OPERATOR (ADR-0873,
+ledger 1337), and the key named is `operators`, the key that decided. This
+helper used to read that shape as OFF and lean on the refusal in
+`templates/render-checks.yaml` to stop it. That refusal runs at the root only,
+so under a parent with no refusal of its own the six operator subcharts went in
+with none of the eighteen vendored CRDs and no prometheus Namespace — measured on
+helm v4.3.0 against a bare parent, `operators: 5`: exit 0, 171 objects, 0
+vendored CRDs. The root refusals still name the wrong shape; the CRDs no longer
+depend on them. An ABSENT `operators` takes the same arm, and arm one of
+`render-checks.yaml` still refuses it wherever this chart runs.
+
+THE MIXED-RELEASE GUARD DOES NOT COUNT THIS ARM. It ranges over the helper only
+for a mapping `operators`, because a non-map block is arm two's diagnosis at the
+root and the parent's under one, and a mixed-release `fail` here would shadow
+the parent's refusal.
 
 CALL IT WITH A DICT:
 
@@ -84,7 +99,9 @@ CALL IT WITH A DICT:
 */}}
 {{- define "platform.operator-create" -}}
 {{- $operators := .context.Values.operators -}}
-{{- if kindIs "map" $operators -}}
+{{- if not (kindIs "map" $operators) -}}
+operators
+{{- else -}}
 {{- $block := index $operators .operator -}}
 {{- $own := "" -}}
 {{- if kindIs "map" $block -}}

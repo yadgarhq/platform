@@ -126,14 +126,14 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and eleven values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and twelve values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted.
-EXPECTED_RENDER_CHECKS = 13
+EXPECTED_RENDER_CHECKS = 14
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
-# ELEVEN: the mixed-release refusal, the type arm of its toggle list (ledger
+# TWELVE: the mixed-release refusal, the type arm of its toggle list (ledger
 # 1121, root only for the register arms' reason), the TWO ARMS of the `operators` shape refusal
 # — a deleted key, refused wherever this chart runs, and a present non-map,
 # refused only when it is the root — and TWO BRANCHES EACH for the two
@@ -143,6 +143,9 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # PRESENT non-bool `create`, refused only at the root because `yadgarhq/chart`
 # already names it. And the per-operator create arm (ledger 1252): a present
 # non-bool `operators.<op>.create`, refused only at the root, for the same reason.
+# And the `prometheus.forceNamespace` arm (ledger 1340): an empty or null
+# namespace while the prometheus operator is on, refused wherever this chart runs;
+# `scripts/tests/test_force_namespace.py` owns what it does.
 # And the TWO NATS/valkey TLS arms (B-L1): a key of the wrong shape, and a value
 # B-N2 / B-V2 render but this version does not — both refused wherever this
 # chart runs, because no parent names these keys yet;
@@ -152,7 +155,7 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 11
+EXPECTED_VALUES_CHECKS = 12
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves

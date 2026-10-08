@@ -4,15 +4,17 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. ELEVEN of the second kind live below — the
+release's own values and nothing else. TWELVE of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
-arms, the per-operator create arm, then the mixed-release refusal and the type
-arm of its toggle list, and last the two NATS/valkey TLS arms — and everything that makes a capability
+arms, the per-operator create arm, the `prometheus.forceNamespace` arm, then the
+mixed-release refusal and the type arm of its toggle list, and last the two NATS/valkey
+TLS arms — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all eleven;
+the mixed-release pair and the count of all twelve;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
+`scripts/tests/test_force_namespace.py` owns what the forceNamespace arm does;
 `scripts/tests/test_nats_valkey_tls.py` owns what the two TLS arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
@@ -51,10 +53,12 @@ one direction nobody expects. Each of the five operators is declared
 `condition: operators.<op>.create,operators.create`, and HELM LEAVES A DEPENDENCY
 ENABLED WHEN NO PATH OF A MULTI-PATH `condition:` RESOLVES — measured, not read.
 So a value in any of these shapes does NOT turn the operators off: it installs
-all five, while `templates/_operators.tpl` correctly skips every CRD this chart
-vendored for them and `keda.crds.install` is false. That is KEDA installed with
-none of its own CRDs, at exit 0. Going quiet here would convert a loud failure
-into the silent one ADR-0794 exists to forbid.
+all of them. Since ADR-0873 (ledger 1337) `templates/_operators.tpl` reads a
+present non-map block as ON too, so the CRDs this chart vendored follow the
+operators in; before it, the helper skipped them and KEDA went in with none of
+its own CRDs at exit 0. The CRDs no longer depend on these arms. The arms stay
+because an adopter who wrote `operators: false` still gets the operators, and
+going quiet would turn that loud failure into the silent one ADR-0794 forbids.
 
 THE TEST IS `kindIs "map"` ON THE RAW VALUE, NEVER ON THE RESULT OF A `default`.
 Sprig's `default` substitutes only on an EMPTY value, so `default dict false` is
@@ -120,6 +124,11 @@ THE RESIDUAL, STATED RATHER THAN HIDDEN: a parent that pins this chart and
 carries NO refusal of its own gets the silent fail-open for the six present
 non-map shapes — and, since the register arms below stand down as a subchart
 too, for every present non-bool `operators.create` and `nats.create` as well.
+For the `operators` shapes the operators go in WITH their vendored CRDs and the
+prometheus Namespace since ADR-0873; what stays silent is that they go in at all.
+Beside estate toggles, such a parent now installs the operators and the estate in
+one release, with the CRDs: the mixed-release guard counts only a mapping
+`operators`, so it does not refuse that case.
 `yadgarhq/chart` is the only parent this estate ships and it carries refusals for
 both ranges. `test_a_parent_with_no_refusal_is_the_residual_this_chart_documents`
 measures the whole hole rather than asserting it away, and it carries a row from
@@ -137,7 +146,7 @@ reaches the ones below them.
       "read it, and the chart's own `operators.create: false` goes with it. "
       "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
       "and helm leaves a dependency ENABLED when no path of a multi-path condition resolves — so this does not "
-      "turn the operators off, it installs all five while this chart skips every CustomResourceDefinition it "
+      "turn the operators off, it installs all of them, along with every CustomResourceDefinition this chart "
       "vendored for them. "
       "Write `operators:` as a mapping: `create: false` to leave the operators out, `create: true` to install them "
       "in a release of their own (ADR-0787). To accept the chart's default, omit the key entirely.")) }}
@@ -147,8 +156,8 @@ reaches the ones below them.
       "platform: operators is a %s rather than a mapping, so no operator key can be read out of it. "
       "Each of the five operators is a dependency declared `condition: operators.<name>.create,operators.create`, "
       "and helm leaves a dependency ENABLED when no path of a multi-path condition resolves — "
-      "so a value in this shape does not turn the operators off, it installs all five while this chart "
-      "skips every CustomResourceDefinition it vendored for them. "
+      "so a value in this shape does not turn the operators off, it installs all of them, along with every "
+      "CustomResourceDefinition this chart vendored for them. "
       "Write `operators:` as a mapping: `create: false` to leave the operators out, `create: true` to install them "
       "in a release of their own (ADR-0787)."))
       (kindOf .Values.operators)) }}
@@ -390,6 +399,14 @@ operator on rather than a bare boolean, so the name below is derived where the
 resolution is rather than beside it. It carries the type arm too, which is why
 nothing here dereferences `operators` before its shape is known.
 
+A NON-MAP `operators` IS NOT COUNTED HERE, although the helper resolves it ON
+(ADR-0873). At the root arm two refuses that shape by name before this guard
+matters; under a parent, `yadgarhq/chart` refuses it by the path the adopter
+typed, and a mixed-release `fail` here would run first and shadow that refusal,
+because `yadgarhq/chart` turns estate toggles on by default.
+`test_the_parent_still_names_a_non_map_block_beside_the_estates_toggles` is the
+gate.
+
 THE SECOND CONJUNCT IS EVERY OTHER `create` TOGGLE THIS CHART CARRIES, not only the
 ones that render a CRD-backed kind. The rule being enforced is the release SHAPE —
 operators alone, then everything else — and a rule stated over a subset is a rule an
@@ -406,7 +423,7 @@ these two gates keep the LISTS in step, which the helper says nothing about.
 {{- $operatorKeysOn := list }}
 {{- range $operator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator" "prometheus") }}
 {{- $key := (include "platform.operator-create" (dict "context" $ "operator" $operator)) }}
-{{- if $key }}
+{{- if and $key (kindIs "map" $.Values.operators) }}
 {{- $operatorKeysOn = append $operatorKeysOn $key }}
 {{- end }}
 {{- end }}
@@ -495,6 +512,59 @@ not name the key itself (ledger 1121 review). Skipping it here let
       "Install the operators in a release of their own, with every other create toggle false, then install the estate against the cluster that release leaves behind."))
       (join ", " (uniq $operatorKeysOn)) (join ", " $otherKeysOn) (join " " $reasons)) }}
 {{- end }}
+
+{{/*
+`prometheus.forceNamespace`, REFUSED WHEN IT NAMES NO NAMESPACE AND PROMETHEUS IS
+ON (plan K-3, ledger 1340).
+
+The key sits inside `prometheus`, an upstream section `values.schema.json` leaves
+open, so no schema can refuse it; this arm is its guard. It puts every namespaced
+Prometheus object in `observability`, where the seven module charts' default
+`autoscaling.prometheusAddress` points, and `templates/prometheus-namespace.yaml`
+renders that Namespace off it. MEASURED on helm v4.3.0 and v3.18.4, 2026-10-08,
+with the operator on: `forceNamespace: ""` or `null` rendered EXIT 0, as the root
+and under a bare parent alike, with the server in the release's own namespace and
+no `observability` Namespace.
+
+THE CONDITION IS THE HELPER, so the arm runs exactly when helm installs the
+prometheus subchart. A non-string never reaches it: the upstream chart's own
+schema types the key and refuses `5`, `[a]` and `{}` first, naming it. The kind
+branch stays for the day that schema drops the type.
+
+IT RUNS WHEREVER THIS CHART RUNS, FOR A MAPPING `operators`: no parent refuses
+this key, so it is not root-only. A non-map block is arm two's diagnosis at the
+root and the parent's under one, so the arm stands down for it. AND IT SITS AFTER
+THE MIXED-RELEASE GUARD: a release that asks for the operators and the estate's
+objects together cannot work whatever this key says, so that refusal arrives
+first. `scripts/tests/test_force_namespace.py` is the gate.
+*/}}
+{{- /* the prometheus.forceNamespace arm (ledger 1340) */}}
+{{- $prometheusKey := include "platform.operator-create" (dict "context" $ "operator" "prometheus") }}
+{{- if and $prometheusKey (kindIs "map" .Values.operators) }}
+{{- $problem := "" }}
+{{- $present := and (kindIs "map" .Values.prometheus) (hasKey .Values.prometheus "forceNamespace") }}
+{{- $forceNamespace := "" }}
+{{- if $present }}
+{{- $forceNamespace = index .Values.prometheus "forceNamespace" }}
+{{- end }}
+{{- if or (not $present) (kindIs "invalid" $forceNamespace) }}
+{{- $problem = "is null or has been deleted, so it names no namespace" }}
+{{- else if not (kindIs "string" $forceNamespace) }}
+{{- $problem = printf "is a %s rather than a namespace name" (kindOf $forceNamespace) }}
+{{- else if eq $forceNamespace "" }}
+{{- $problem = "is an empty string" }}
+{{- end }}
+{{- if $problem }}
+{{- fail (printf (join "" (list
+      "platform: prometheus.forceNamespace %s, and %s turns the bundled Prometheus on. "
+      "Every namespaced Prometheus object would land in the release's own namespace rather than the one the module "
+      "charts' autoscaling.prometheusAddress queries, and no later step refuses that. "
+      "Write prometheus.forceNamespace: observability, the namespace every module chart queries by default, or set "
+      "operators.prometheus.create: false and point each module's autoscaling.prometheusAddress at a Prometheus of "
+      "your own."))
+      $problem $prometheusKey) }}
+{{- end }}
+{{- end }}{{/* end of the prometheus.forceNamespace arm */}}
 
 {{/*
 THE NATS AND VALKEY TLS KEYS: DECLARED BY THIS VERSION, RENDERED BY NONE (B-L1,
