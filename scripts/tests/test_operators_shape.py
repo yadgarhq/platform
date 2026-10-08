@@ -26,11 +26,11 @@ answers were measured and both are wrong:
       reason is helm's own resolution rather than taste. Each operator is
       declared `condition: operators.<op>.create,operators.create`, and HELM
       LEAVES A DEPENDENCY ENABLED WHEN NO PATH OF A MULTI-PATH `condition:`
-      RESOLVES (ADR-0794). So `operators: true` standing alone installs all five
-      operators — while a silent guard skips every vendored CRD, and
-      `keda.crds.install` is false. That is KEDA installed with no CRDs at all,
-      at exit 0. Silence converts a loud failure into the quiet one, which is
-      the exact inversion ADR-0794 exists to forbid.
+      RESOLVES (ADR-0794). So `operators: true` standing alone installs every
+      operator, silently — with their vendored CRDs since ADR-0873, because the
+      helper now reads a non-map block as ON too. Nobody asked for those
+      operators, and silence would convert a loud failure into the quiet one,
+      which is the exact inversion ADR-0794 exists to forbid.
 
   (b) raise this chart's own named refusal unconditionally — REJECTED, measured:
       it shadows the parent's refusal, so `yadgarhq/chart`'s clause becomes dead
@@ -95,9 +95,10 @@ HELPER = "platform.operator-create"
 HELPER_CALL = re.compile(r'include\s+"platform\.operator-create"\s+\(dict')
 
 # Every site that reads the key, counted. Eighteen vendored CRDs, the one `range`
-# in `render-checks.yaml`, and the bundled Prometheus's Namespace (ADR-0820). A
+# in `render-checks.yaml`, the bundled Prometheus's Namespace (ADR-0820), and the
+# `prometheus.forceNamespace` arm in `render-checks.yaml` (ledger 1340). A
 # LITERAL, for the reason every expected count in this estate is a literal.
-EXPECTED_GUARD_SITES = 20
+EXPECTED_GUARD_SITES = 21
 EXPECTED_VENDORED_FILES = 18
 
 # The raw read no template may perform any more. `.Values.operators.create` is
@@ -769,6 +770,69 @@ def test_the_parent_is_the_one_that_names_the_key(tmp_path):
     )
 
 
+def test_the_parent_still_names_a_non_map_block_beside_the_estates_toggles(tmp_path):
+    """The parent's refusal survives an estate toggle being on (ledger 1337).
+
+    `yadgarhq/chart` turns `certificates`, `internalCA`, `nats` and `valkey` on by
+    default, so a non-map `platform.operators` there always arrives BESIDE an
+    estate toggle. Since ADR-0873 the helper reads that block as ON for every
+    operator, and if the mixed-release guard counted it, this chart's mixed-release
+    `fail` would run first — helm executes the subchart's templates first — and
+    shadow the parent's refusal, which names the shape the adopter typed. The
+    guard therefore counts operators only out of a MAPPING `operators`: at the
+    root arm two owns a non-map block, and under a parent the parent does.
+
+    `--api-versions cert-manager.io/v1` is passed so the capability check cannot
+    be the refusal that arrives.
+    """
+    parent = parent_around(tmp_path, with_refusal=True)
+    for name, scalar, kind in THE_SEVEN_PRESENT_NON_MAPS:
+        overlay = values_file(
+            tmp_path / f"beside-a-toggle-{name}.yaml",
+            f"platform:\n  operators: {scalar}\n  certificates:\n    create: true\n",
+        )
+        result = helm(
+            "template", "yadgar", str(parent), "-f", str(overlay),
+            "--api-versions", "cert-manager.io/v1",
+        )
+        assert result.returncode != 0, f"`{name}` was not refused: {result.stdout[:2000]}"
+        assert f"platform.operators is a {kind} rather than a mapping" in result.stderr, (
+            f"`{name}` beside `certificates.create: true`: the parent's refusal did "
+            f"not reach the adopter, so this chart shadowed it:\n{result.stderr}"
+        )
+        assert "asked for the operators" not in result.stderr, (
+            f"`{name}`: the mixed-release refusal fired for a non-map block: "
+            f"{result.stderr}"
+        )
+    print(
+        f"operators-shape: {len(THE_SEVEN_PRESENT_NON_MAPS)} non-map shapes beside an "
+        f"estate toggle still reach the parent's refusal"
+    )
+
+
+def test_the_parent_still_names_a_non_map_block_beside_an_empty_force_namespace(tmp_path):
+    """The `prometheus.forceNamespace` arm does not shadow the parent either.
+
+    A non-map `operators` resolves the prometheus operator ON (ADR-0873), so an
+    ungated forceNamespace arm would run inside the subchart — first — and its
+    sentence would reach the adopter instead of the parent's, which names the
+    shape actually typed. The arm runs only for a mapping `operators`.
+    """
+    parent = parent_around(tmp_path, with_refusal=True)
+    overlay = values_file(
+        tmp_path / "non-map-beside-an-empty-force-namespace.yaml",
+        'platform:\n  operators: 5\n  prometheus:\n    forceNamespace: ""\n',
+    )
+    result = helm("template", "yadgar", str(parent), "-f", str(overlay))
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "platform.operators is a float64 rather than a mapping" in result.stderr, (
+        f"the parent's shape refusal did not reach the adopter: {result.stderr}"
+    )
+    assert "prometheus.forceNamespace" not in result.stderr, (
+        f"the forceNamespace arm fired for a non-map block: {result.stderr}"
+    )
+
+
 def test_a_deleted_operators_key_is_refused_wherever_this_chart_runs(tmp_path):
     """ARM ONE, AND THE ONE SHAPE THE PARENT STRUCTURALLY CANNOT SEE.
 
@@ -826,17 +890,39 @@ def test_a_deleted_operators_key_is_refused_wherever_this_chart_runs(tmp_path):
     print("operators-shape: the deleted key is refused as root AND as a subchart")
 
 
-# THE TWO RANGES A THIRD-PARTY PARENT IS STILL EXPOSED TO, one row each. BOTH are
-# needed: arm two and the register arms stand down as a subchart for the same
-# reason and the residual is now the union of the two, so a test carrying only the
-# older row would go on reporting a pass while the newer half widened underneath
-# it. `create: "yes"` is the register row rather than `create: {}` because it is
-# the truthy one — the vendored CRDs DO render for it, which is a different
-# rendered state from arm two's and worth measuring as such.
+# THE TWO RANGES A THIRD-PARTY PARENT IS STILL EXPOSED TO. BOTH are needed: arm
+# two and the register arms stand down as a subchart for the same reason and the
+# residual is the union of the two, so a test carrying only the older row would go
+# on reporting a pass while the newer half widened underneath it. `create: "yes"`
+# is the register row rather than `create: {}` because it is the truthy one.
+#
+# EVERY ROW NOW EXPECTS ALL EIGHTEEN VENDORED CRDS AND THE PROMETHEUS NAMESPACE
+# (ledger 1337, ADR-0873). Before it, arm two's rows rendered NONE of either:
+# the helper read a non-map `operators` as off while helm, finding no bool on any
+# path, installed all six operator subcharts. Measured on helm v4.3.0 against a
+# bare parent at 8227302, `operators: 5`: exit 0, 171 objects, 0 vendored CRDs, no
+# `observability` Namespace. A FALSY scalar and a TRUTHY one are both carried,
+# so a fix that read the block by truthiness would still go red on one of them.
 THE_RESIDUAL_ROWS = (
-    ("arm two — a present non-map block", "operators: true\n", 0),
+    ("arm two — a present non-map block", "operators: true\n", 18),
+    ("arm two — a present non-map number", "operators: 5\n", 18),
+    ("arm two — a present falsy non-map", 'operators: ""\n', 18),
     ("the register arm — a present non-bool create", 'operators:\n  create: "yes"\n', 18),
 )
+
+# The Namespace `templates/prometheus-namespace.yaml` renders when the helper says
+# the prometheus operator is on. A literal (ADR-0599): it is the namespace the
+# seven module charts' `autoscaling.prometheusAddress` points at.
+THE_PROMETHEUS_NAMESPACE = "observability"
+
+
+def namespaces(stdout: str) -> list[str]:
+    """The `metadata.name` of every Namespace a render emits."""
+    return sorted(
+        document["metadata"]["name"]
+        for document in documents(stdout)
+        if document.get("kind") == "Namespace"
+    )
 
 
 def test_a_parent_with_no_refusal_is_the_residual_this_chart_documents(tmp_path):
@@ -848,12 +934,15 @@ def test_a_parent_with_no_refusal_is_the_residual_this_chart_documents(tmp_path)
     residual honest, and it reddens if a future change closes it, at which point
     delete this test and the paragraphs in `render-checks.yaml` together.
 
-    ONE ROW PER RANGE THAT STANDS DOWN AS A SUBCHART, and the vendored-CRD count
-    differs between them, which is the point of carrying both. Arm two's shapes
-    make the whole block unreadable, so the helper skips and NO vendored CRD
-    renders. The register arm's non-bool shapes, falsy ones included since
-    ledger 1291, leave the block readable, so all eighteen render — beside
-    five operators the adopter did not ask for.
+    ROWS FROM BOTH RANGES THAT STAND DOWN AS A SUBCHART, and since ledger 1337
+    they agree: the helper resolves every operator ON whenever no path of its
+    condition holds a bool, as helm does (ADR-0873). The register arm's non-bool
+    shapes, falsy ones included since ledger 1291, leave the block readable; arm
+    two's shapes make it unreadable, and the helper now reads that as ON too
+    rather than off. So all eighteen vendored CRDs and the `observability`
+    Namespace render beside the six operators the adopter did not ask for. The
+    operators still go in — that is helm's fail-open, and the residual — but
+    never without the CRDs and the Namespace they need.
     """
     parent = parent_around(tmp_path, with_refusal=False)
     for label, body, expected_crds in THE_RESIDUAL_ROWS:
@@ -867,6 +956,11 @@ def test_a_parent_with_no_refusal_is_the_residual_this_chart_documents(tmp_path)
         assert len(names) == expected_crds, (
             f"{label} rendered {len(names)} vendored CRDs, expected {expected_crds}: "
             f"{names}"
+        )
+        assert THE_PROMETHEUS_NAMESPACE in namespaces(result.stdout), (
+            f"{label}: helm installed the prometheus subchart but the "
+            f"`{THE_PROMETHEUS_NAMESPACE}` Namespace it lands in did not render: "
+            f"{namespaces(result.stdout)}"
         )
         rendered = len(documents(result.stdout))
         assert rendered > 0, (
@@ -1521,8 +1615,9 @@ def test_deleting_the_root_refusal_lets_the_fail_open_through(tmp_path):
 
     With the helper still guarding and the refusal removed, `operators: true`
     renders at exit 0: helm leaves every dependency enabled because no path of
-    its `condition:` resolves, and the vendored CRDs skip. That is the state the
-    refusal exists to prevent, and this is the measurement of it.
+    its `condition:` resolves. Since ADR-0873 (ledger 1337) the vendored CRDs
+    follow the operators in rather than skipping, so the harm left is the one
+    the refusal still names: an adopter who wrote a non-map gets every operator.
     """
     copy = chart_copy(tmp_path, "no-refusal")
     template = copy / "templates" / "render-checks.yaml"
@@ -1552,7 +1647,10 @@ def test_deleting_the_root_refusal_lets_the_fail_open_through(tmp_path):
         f"the chart without its refusal still refused, so this case does not "
         f"measure what the refusal buys: {result.stderr}"
     )
-    assert vendored_crd_names(result.stdout) == [], result.stdout[:500]
+    assert len(vendored_crd_names(result.stdout)) == EXPECTED_VENDORED_FILES, (
+        f"the operators went in without all {EXPECTED_VENDORED_FILES} vendored CRDs "
+        f"beside them, which ADR-0873 forbids: {vendored_crd_names(result.stdout)}"
+    )
     # AND THE HARM ITSELF: the operators went in anyway. `Deployment/keda-operator`
     # is the discriminator — it comes from the dependency chart helm left enabled.
     deployments = [
@@ -1566,7 +1664,7 @@ def test_deleting_the_root_refusal_lets_the_fail_open_through(tmp_path):
     )
     print(
         "operators-shape: red case 2 — without the refusal, `operators: true` "
-        "installs KEDA with 0 of its CRDs at exit 0"
+        "installs KEDA, with its CRDs since ADR-0873, at exit 0"
     )
 
 
@@ -1576,8 +1674,9 @@ def test_deleting_arm_one_lets_the_165_object_fail_open_through(tmp_path):
     Cut arm one out and render `operators: null` under a parent that carries the
     `yadgarhq/chart` clause. Nothing refuses: helm resolved every dependency's
     `condition:` against the raw user values before the key was deleted, so the
-    five operator subcharts render, and the CRDs this chart vendored for them do
-    not. A KEDA install with none of its own CustomResourceDefinitions, exit 0.
+    operator subcharts render at exit 0. Since ADR-0873 (ledger 1337) the helper
+    reads the absent block as ON too, so the vendored CRDs follow them in; the
+    harm arm one still prevents is every operator installed out of a null.
     """
     copy = chart_copy(tmp_path, "no-arm-one")
     template = copy / "templates" / "render-checks.yaml"
@@ -1606,9 +1705,9 @@ def test_deleting_arm_one_lets_the_165_object_fail_open_through(tmp_path):
         f"arm one prevents: {result.stderr}"
     )
     assert THE_PARENT_REFUSAL not in result.stderr
-    assert vendored_crd_names(result.stdout) == [], (
-        "the vendored CRDs rendered, so the harm this case records is not the "
-        "one described"
+    assert len(vendored_crd_names(result.stdout)) == EXPECTED_VENDORED_FILES, (
+        f"the operators went in without all {EXPECTED_VENDORED_FILES} vendored CRDs "
+        f"beside them, which ADR-0873 forbids: {vendored_crd_names(result.stdout)}"
     )
     operators_in = [
         (document.get("metadata") or {}).get("name")
@@ -1621,7 +1720,7 @@ def test_deleting_arm_one_lets_the_165_object_fail_open_through(tmp_path):
     )
     print(
         f"operators-shape: red case 4 — without arm one, a deleted key renders "
-        f"{len(documents(result.stdout))} objects and 0 vendored CRDs at exit 0"
+        f"{len(documents(result.stdout))} objects at exit 0"
     )
 
 

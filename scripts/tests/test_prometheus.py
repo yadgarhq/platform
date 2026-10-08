@@ -375,9 +375,22 @@ def test_moving_the_service_off_the_modules_address_reddens_placement(tmp_path):
 
 
 def test_dropping_the_forced_namespace_reddens_placement(tmp_path):
+    """Since ledger 1340 the drop is refused at render, naming the key.
+
+    Before the `prometheus.forceNamespace` arm the operators release rendered with
+    the server in its own namespace, and only `placement_failures` saw it. With
+    the line gone the upstream chart's own default, an empty string, is what
+    the arm reads.
+    """
     chart = mutated_chart(tmp_path, "values.yaml", "  forceNamespace: observability\n", "")
-    message = "\n".join(placement_failures(operators_render(chart=chart)))
-    assert "do not land in 'observability'" in message or "resolves as" in message, message
+    result = helm(
+        "template", "operators", str(chart), "--namespace", OPERATORS_NAMESPACE,
+        "--set", "operators.create=true", "--set", "operators.argoCd.create=false",
+    )
+    assert result.returncode != 0, "the operators release rendered with no forceNamespace"
+    assert "prometheus.forceNamespace is an empty string" in result.stderr, (
+        result.stderr
+    )
 
 
 # ── THE REVIEW'S FOUR: TIMING, THE NAMESPACE'S LIFE, THE SCRAPE INTERVAL ─────
