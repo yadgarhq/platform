@@ -319,11 +319,21 @@ THE_SUB_KEY_IS_NOT_A_BOOL = (
 )
 # Sub-blocks helm's condition CANNOT read a `create` out of, and so skips: the
 # register key decides. Each is rendered with the register key false and true.
+#
+# `keda-is-a-map-with-no-create` ("  keda:\n    foo: x\n") MOVED OUT (ledger
+# 990): `chart/values.schema.json` now closes `operators.keda` to exactly
+# `{create}`, so a map under it carrying any other key — "foo" included — is
+# a SCHEMA refusal naming that key, before this helper's own fallback logic
+# ever runs. `test_a_map_with_an_unknown_sub_key_is_a_schema_refusal` below
+# is that row's new home.
 THE_SUB_BLOCKS_THE_CONDITION_SKIPS = (
     ("keda-is-null", "  keda:\n"),
     ("keda-is-a-bool", "  keda: true\n"),
     ("keda-is-a-string", '  keda: "on"\n'),
-    ("keda-is-a-map-with-no-create", "  keda:\n    foo: x\n"),
+    # An empty map carries no `create` either, and is schema-valid (ledger
+    # 990): `additionalProperties: false` under `operators.keda` refuses a
+    # KEY it does not recognise, and an empty map states none at all.
+    ("keda-is-an-empty-map", "  keda: {}\n"),
 )
 # WHERE THE SUB-KEY ARM OPENS AND CLOSES, for its red case. The opener is NOT
 # `REGISTER_ARM_OPENS`, and it carries no `else if` pivot, so the cuts the red
@@ -1028,16 +1038,25 @@ def test_a_sub_block_the_condition_skips_falls_back_to_the_register_key(tmp_path
 
 
 def test_the_mixed_refusal_names_the_key_that_turned_the_operator_on(tmp_path):
-    """`keda: {foo: x}` under a true register key is `operators.create`'s doing.
+    """`keda: true` under a true register key is `operators.create`'s doing.
 
     The helper named `operators.keda.create` whenever a `keda` block EXISTED,
     whether or not it carried a usable `create`, so the mixed-release refusal
     told the adopter to change a key that decided nothing.
+
+    `keda: true` REPLACES `keda: {foo: x}` here (ledger 990): the latter is
+    now a SCHEMA refusal (`test_a_map_with_an_unknown_sub_key_is_a_schema_
+    refusal` below), refused before this helper's fallback ever runs, so it
+    can no longer reach the render-level assertion this test makes. `keda:
+    true` is a non-map `operators.keda`, which the schema does not
+    constrain at all (§3.2: `properties`/`additionalProperties` do not apply
+    to a non-object instance) — it reaches the SAME fallback-to-register
+    branch `keda: {foo: x}` used to.
     """
     result = render_root(
         tmp_path,
         "mixed-with-an-inert-sub-block",
-        "operators:\n  create: true\n  keda:\n    foo: x\ncertificates:\n  create: true\n",
+        "operators:\n  create: true\n  keda: true\ncertificates:\n  create: true\n",
     )
     assert result.returncode != 0, result.stdout[:2000]
     assert "operators.create asked for the operators" in result.stderr, result.stderr
@@ -1053,6 +1072,32 @@ def test_the_mixed_refusal_names_the_key_that_turned_the_operator_on(tmp_path):
     assert result.returncode != 0, result.stdout[:2000]
     assert "operators.keda.create asked for the operators" in result.stderr, result.stderr
     print("operators-shape: the mixed refusal names the key helm's condition used")
+
+
+def test_a_map_with_an_unknown_sub_key_is_a_schema_refusal(tmp_path):
+    """`keda: {foo: x}` MOVED HERE from `THE_SUB_BLOCKS_THE_CONDITION_SKIPS`
+    (ledger 990). `chart/values.schema.json` closes `operators.keda` to
+    exactly `{create}`, so a map carrying any other key is refused by name
+    at render, before this file's own fallback-to-register logic ever runs
+    — this is now the point at which `operators.<op>`'s key set is
+    enforced, replacing the SILENT fall-through this file's helper used to
+    give it.
+    """
+    for register in (False, True):
+        label = f"keda-is-a-map-with-no-create-register-{str(register).lower()}"
+        body = f"operators:\n  create: {str(register).lower()}\n  keda:\n    foo: x\n"
+        result = render_root(tmp_path, label, body)
+        assert result.returncode != 0, f"{label}: rendered clean, {result.stdout[:500]}"
+        assert "foo" in result.stderr, f"{label}: {result.stderr}"
+        # The path fragment, NEVER helm's sentence: helm 3.18.4 prints
+        # "operators.keda: Additional property foo is not allowed"; 3.20.2
+        # and 4.3.0 print "at '/operators/keda': additional properties
+        # 'foo' not allowed". Both name `operators.keda`; neither shares a
+        # word with the other beyond that.
+        assert "operators.keda" in result.stderr or "/operators/keda" in result.stderr, (
+            f"{label}: {result.stderr}"
+        )
+    print("operators-shape: a map with an unknown sub-key is now a schema refusal, not a silent fall-through")
 
 
 def test_under_a_parent_the_helper_resolves_a_sub_key_exactly_as_helm_does(tmp_path):
