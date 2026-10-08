@@ -330,6 +330,10 @@ THE_SUB_BLOCKS_THE_CONDITION_SKIPS = (
     ("keda-is-null", "  keda:\n"),
     ("keda-is-a-bool", "  keda: true\n"),
     ("keda-is-a-string", '  keda: "on"\n'),
+    # An empty map carries no `create` either, and is schema-valid (ledger
+    # 990): `additionalProperties: false` under `operators.keda` refuses a
+    # KEY it does not recognise, and an empty map states none at all.
+    ("keda-is-an-empty-map", "  keda: {}\n"),
 )
 # WHERE THE SUB-KEY ARM OPENS AND CLOSES, for its red case. The opener is NOT
 # `REGISTER_ARM_OPENS`, and it carries no `else if` pivot, so the cuts the red

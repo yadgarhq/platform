@@ -12,16 +12,20 @@ string where a block belongs, a non-bool on a toggle — PASSES this schema and
 is the other file's refusal to make; the green cases below prove that rather
 than assert it from the two files' names alone.
 
-ELEVEN PATHS STAY OPEN (`OPEN` below), asserted bare `{}`, never typed.
+TEN PATHS STAY OPEN (`OPEN` below), asserted bare `{}`, never typed.
 `global` is Helm's own reserved key (ADR-0722). The SEVEN upstream sections
 are each a Helm dependency this chart adopts rather than re-types: `nats`,
 `cert-manager`, `keda`, `mariadb-operator`, `gateway-helm`, `argo-cd` and
-`prometheus` (ADR-0787, ADR-0792, ADR-0820). THREE NESTED PATHS stay open for
-the same reason: `edgeTLS.issuerRef` (a raw cert-manager `ObjectReference`),
-`gatewayListener.envoyProxy.pod.nodeSelector` (a raw node-selector map) and
-`valkey.resources` (a raw `corev1.ResourceRequirements`).
+`prometheus` (ADR-0787, ADR-0792, ADR-0820). TWO NESTED PATHS stay open for
+the same reason: `gatewayListener.envoyProxy.pod.nodeSelector` (a raw
+node-selector map) and `valkey.resources` (a raw `corev1.
+ResourceRequirements`). `edgeTLS.issuerRef` is NOT one of these (coordinator
+ruling): `templates/edge-certificate.yaml` reads only `.name` and `.kind` off
+it and hardcodes `group: cert-manager.io` itself, so an open map there would
+silently DROP a key like `group: awspca.cert-manager.io` rather than refuse
+it — closed to exactly `{name, kind}` instead, same shape as a keyed block.
 
-FOURTEEN EXTRAS (`EXTRAS` below) are declared though `chart/values.yaml` never
+SIXTEEN EXTRAS (`EXTRAS` below) are declared though `chart/values.yaml` never
 states them, because a template, or the parent's own condition resolution,
 reads every one anyway:
 
@@ -50,15 +54,21 @@ reads every one anyway:
     `certManager`); `_preflight.tpl` reads `probes.certManager` too, so
     dropping it would refuse a legitimate override
     (`preflight.probes.certManager: false` beside `internalCA.create: true`).
+  - `edgeTLS.issuerRef.name`, `edgeTLS.issuerRef.kind` — `values.yaml` ships
+    `issuerRef: {}`, empty; `templates/edge-certificate.yaml` `required`s
+    both, so both are declared here rather than left for an open map to
+    swallow a typo of either silently.
 
 TWO RESIDUALS ARE NOT, AND CANNOT BE, REFUSABLE HERE: `nats.create` (inside
-the open `nats` section) and `prometheus.forceNamespace` (inside the open
-`prometheus` section, read directly by `render-checks.yaml`'s mixed-release
-guard). Closing either key means closing its whole upstream section, which
-would also refuse every key the upstream chart itself accepts. The green
-rows below assert they pass THIS schema at exit 0, each with a comment naming
-the render check (or the absence of one) that is the only place they are
-refusable.
+the open `nats` section; `render-checks.yaml`'s own mixed-release guard only
+ever sees the CORRECTLY SPELLED key) and `prometheus.forceNamespace` (inside
+the open `prometheus` section, read by `templates/prometheus-namespace.yaml`
+— no render check guards it yet; plan K-3 / brief §3.7e names this residual,
+follow-up ledger). Closing either key means closing its whole upstream
+section, which would also refuse every key the upstream chart itself
+accepts. The green rows below assert they pass THIS schema at exit 0, each
+with a comment naming the render check (or the absence of one) that is the
+only place they are refusable.
 
 THE STRUCTURAL TESTS BELOW ARE PURE — no helm, no subprocess — and are the
 ones the four required mutations are checked against: delete root
@@ -99,7 +109,6 @@ OPEN = (
     "gateway-helm",
     "argo-cd",
     "prometheus",
-    "edgeTLS.issuerRef",
     "gatewayListener.envoyProxy.pod.nodeSelector",
     "valkey.resources",
 )
@@ -134,6 +143,10 @@ EXTRAS = (
     "preflight.probes.mariadb",
     "preflight.probes.prometheus",
     "preflight.probes.envoyGateway",
+    # `values.yaml` ships `edgeTLS.issuerRef: {}`, empty — the two keys the
+    # template `required`s are declared here rather than left open.
+    "edgeTLS.issuerRef.name",
+    "edgeTLS.issuerRef.kind",
 )
 
 # `certificates.leaves` is a KEYED MAP (§3.5): any leaf NAME is accepted, so
@@ -236,16 +249,49 @@ def closure_offenders(schema: dict) -> list[str]:
     ]
 
 
+FORBIDDEN_KEYWORDS = ("type", "enum", "required", "default")
+
+
+def all_nodes(schema: dict, prefix: str = ""):
+    """Yield (path, node) for EVERY node in the tree, root included — unlike
+    `nodes_with_properties`, this also descends into a keyed map's VALUE
+    schema (`additionalProperties`, when it is itself a dict), because
+    `certificates.leaves`'s value schema is a node this check must reach too.
+    """
+    yield prefix, schema
+    for key, node in schema.get("properties", {}).items():
+        if isinstance(node, dict):
+            yield from all_nodes(node, f"{prefix}.{key}" if prefix else key)
+    additional = schema.get("additionalProperties")
+    if isinstance(additional, dict):
+        yield from all_nodes(additional, f"{prefix}[*]" if prefix else "[*]")
+
+
+def forbidden_keyword_offenders(schema: dict) -> list[str]:
+    """Every node outside `RETAINED` that carries `type`, `enum`, `required`
+    or `default` — ADR-0847's line, that this file closes KEY SETS only and
+    leaves TYPES, toggle SHAPES and `required` to `render-checks.yaml`. PURE.
+    """
+    offenders = []
+    for path, node in all_nodes(schema):
+        if path in RETAINED:
+            continue
+        for keyword in FORBIDDEN_KEYWORDS:
+            if keyword in node:
+                offenders.append(f"{path or '(root)'} carries `{keyword}`")
+    return offenders
+
+
 def extras_found(schema: dict, values: dict) -> set[str]:
     """Schema paths beyond what `values.yaml` itself states. PURE.
 
     Only `global` needs an explicit exemption beyond "stated in values.yaml":
     every other `OPEN` path (`nats`, `cert-manager`, `keda`, `mariadb-
-    operator`, `prometheus`, `edgeTLS.issuerRef`, `gatewayListener.envoyProxy.
-    pod.nodeSelector`, `valkey.resources`) IS a key `values.yaml` states, so
-    `values_paths` already carries it. `gateway-helm` and `argo-cd` are NOT
-    stated either, which is exactly why both are in `EXTRAS` too, open-shaped
-    extras rather than closed ones.
+    operator`, `prometheus`, `gatewayListener.envoyProxy.pod.nodeSelector`,
+    `valkey.resources`) IS a key `values.yaml` states, so `values_paths`
+    already carries it. `gateway-helm` and `argo-cd` are NOT stated either,
+    which is exactly why both are in `EXTRAS` too, open-shaped extras rather
+    than closed ones.
     """
     stated = values_paths(values, open_paths=OPEN + KEYED_MAPS)
     return schema_paths(schema) - stated - {"global"} - set(RETAINED)
@@ -272,6 +318,34 @@ def object_count(stdout: str) -> int:
     return stdout.count("\nkind: ")
 
 
+def assert_schema_refusal(stderr: str, key: str, dotted_path: str = "") -> None:
+    """Assert a schema refusal names BOTH the key and the path, tolerant of
+    EITHER helm message shape (never asserting the sentence itself).
+
+    helm 3.20.2 and 4.3.0 share one shape: `at '/a/b': additional properties
+    'key' not allowed` (root is `at ''`). helm 3.18.4 prints a different one:
+    `a.b: Additional property key is not allowed` (root is `(root):`). Both
+    name the key unquoted-as-a-substring and the path, in their own notation
+    — this checks both notations so the suite is not pinned to one helm.
+
+    `key` MUST NOT be a substring of any real key this schema declares (a
+    typo like `creat` is a substring of `create`, and `renewBefor` of
+    `renewBefore` — both would still match if the real key appeared anywhere
+    else in a longer, unrelated message). Choose a token like `crate` or
+    `kedaa` that collides with nothing.
+    """
+    assert key in stderr, f"{key!r} not named in {stderr!r}"
+    if dotted_path == "":
+        assert "at ''" in stderr or "(root):" in stderr, (
+            f"root path not named (either shape) in {stderr!r}"
+        )
+    else:
+        slash_path = "/" + dotted_path.replace(".", "/")
+        assert f"'{slash_path}'" in stderr or f"{dotted_path}:" in stderr, (
+            f"{dotted_path!r} not named (either shape) in {stderr!r}"
+        )
+
+
 # ── STRUCTURAL TESTS, PURE ───────────────────────────────────────────────
 
 
@@ -293,11 +367,11 @@ def test_every_node_with_properties_is_closed():
 
 
 def test_the_open_paths_are_exactly_bare():
-    """The eleven `OPEN` paths are `{}` — open, untyped, unchecked.
+    """The ten `OPEN` paths are `{}` — open, untyped, unchecked.
 
     NOT merely "has no `additionalProperties`": a node like `{"type": "object"}`
     would pass a laxer check and still be a TYPED open map, which is not what
-    this chart ships for any of the eleven.
+    this chart ships for any of the ten.
     """
     failures = open_paths_failures(load_schema())
     assert failures == [], "\n".join(failures)
@@ -320,7 +394,7 @@ def test_every_values_yaml_leaf_is_declared():
 
 
 def test_every_schema_extra_is_exactly_the_declared_set():
-    """Schema paths beyond values.yaml and the eleven open paths == EXTRAS.
+    """Schema paths beyond values.yaml and the ten open paths == EXTRAS.
 
     BOTH DIRECTIONS AT ONCE: a path missing from EXTRAS that the schema still
     declares is undocumented (and untested below); a path in EXTRAS the
@@ -366,6 +440,22 @@ def test_the_certificates_leaves_are_a_keyed_map_with_closed_values():
         "usages",
         "renewBefore",
     }
+
+
+def test_no_node_carries_a_type_enum_required_or_default_beyond_retained():
+    """ADR-0847's line, checked over the WHOLE tree rather than trusted from
+    the module docstring's claim alone: `RETAINED` is empty today (this
+    chart keeps no typed leaf of its own), so no node anywhere — root
+    included, and the `certificates.leaves` value schema included — may
+    carry `type`, `enum`, `required` or `default`. Red case: `test_mutation_
+    adding_type_integer_on_valkey_port_reddens_the_keyword_check` and
+    `test_mutation_adding_root_type_object_reddens_the_keyword_check` below.
+    """
+    offenders = forbidden_keyword_offenders(load_schema())
+    assert offenders == [], (
+        f"{offenders} — types, toggle shapes and `required` belong in "
+        f"render-checks.yaml (ADR-0847), not here"
+    )
 
 
 # ── THE FOUR MUTATIONS (preamble: "mutation-check the key assertion") ──────
@@ -415,11 +505,27 @@ def test_mutation_reopening_internal_ca_lets_the_root_level_typo_through(tmp_pat
     schema["properties"]["internalCA"]["additionalProperties"] = True
     (copy / "values.schema.json").write_text(json.dumps(schema))
 
-    result = render_with_overlay(copy, {"internalCA": {"creat": True}}, tmp_path / "reopened")
+    result = render_with_overlay(copy, {"internalCA": {"crate": True}}, tmp_path / "reopened")
     assert result.returncode == 0, (
         f"reopening `internalCA` and the red case below STILL refused, so "
         f"that case is not exercising this schema's closure: {result.stderr}"
     )
+
+
+def test_mutation_adding_type_integer_on_valkey_port_reddens_the_keyword_check():
+    schema = load_schema()
+    schema["properties"]["valkey"]["properties"]["port"] = {"type": "integer"}
+    offenders = forbidden_keyword_offenders(schema)
+    assert offenders != []
+    assert any("valkey.port" in offender for offender in offenders), offenders
+
+
+def test_mutation_adding_root_type_object_reddens_the_keyword_check():
+    schema = load_schema()
+    schema["type"] = "object"
+    offenders = forbidden_keyword_offenders(schema)
+    assert offenders != []
+    assert any("(root)" in offender for offender in offenders), offenders
 
 
 # ── RED: A TYPO UNDER A CLOSED BLOCK IS REFUSED BY NAME ────────────────────
@@ -428,25 +534,25 @@ def test_mutation_reopening_internal_ca_lets_the_root_level_typo_through(tmp_pat
 def test_a_root_typo_is_refused_by_name(tmp_path):
     result = render_with_overlay(CHART, {"interncalCA": {"create": True}}, tmp_path)
     assert result.returncode != 0, result.stdout
-    assert "interncalCA" in result.stderr, result.stderr
+    assert_schema_refusal(result.stderr, "interncalCA")
 
 
 def test_a_typo_under_internal_ca_is_refused_by_name(tmp_path):
-    result = render_with_overlay(CHART, {"internalCA": {"creat": True}}, tmp_path)
+    result = render_with_overlay(CHART, {"internalCA": {"crate": True}}, tmp_path)
     assert result.returncode != 0, result.stdout
-    assert "creat" in result.stderr, result.stderr
+    assert_schema_refusal(result.stderr, "crate", "internalCA")
 
 
 def test_a_typo_two_levels_down_under_operators_is_refused_by_name(tmp_path):
-    result = render_with_overlay(CHART, {"operators": {"certManager": {"creat": True}}}, tmp_path)
+    result = render_with_overlay(CHART, {"operators": {"certManager": {"crate": True}}}, tmp_path)
     assert result.returncode != 0, result.stdout
-    assert "creat" in result.stderr, result.stderr
+    assert_schema_refusal(result.stderr, "crate", "operators.certManager")
 
 
 def test_a_typo_under_preflight_probes_is_refused_by_name(tmp_path):
     result = render_with_overlay(CHART, {"preflight": {"probes": {"kedaa": True}}}, tmp_path)
     assert result.returncode != 0, result.stdout
-    assert "kedaa" in result.stderr, result.stderr
+    assert_schema_refusal(result.stderr, "kedaa", "preflight.probes")
 
 
 def test_a_typo_under_gateway_listener_envoy_proxy_is_refused_by_name(tmp_path):
@@ -454,17 +560,42 @@ def test_a_typo_under_gateway_listener_envoy_proxy_is_refused_by_name(tmp_path):
         CHART, {"gatewayListener": {"envoyProxy": {"httpsNodePrt": 1}}}, tmp_path
     )
     assert result.returncode != 0, result.stdout
-    assert "httpsNodePrt" in result.stderr, result.stderr
+    assert_schema_refusal(result.stderr, "httpsNodePrt", "gatewayListener.envoyProxy")
 
 
 def test_a_typo_in_a_certificates_leaf_is_refused_by_name(tmp_path):
     result = render_with_overlay(
         CHART,
-        {"certificates": {"leaves": {"new-tls": {"renewBefor": "1h"}}}},
+        {"certificates": {"leaves": {"new-tls": {"renewBeforX": "1h"}}}},
         tmp_path,
     )
     assert result.returncode != 0, result.stdout
-    assert "renewBefor" in result.stderr, result.stderr
+    assert_schema_refusal(result.stderr, "renewBeforX", "certificates.leaves.new-tls")
+
+
+def test_an_edge_tls_issuer_ref_group_is_refused_by_name(tmp_path):
+    """COORDINATOR RULING on `edgeTLS.issuerRef`: `templates/edge-certificate.
+    yaml` reads only `.name` and `.kind` off it and hardcodes `group: cert-
+    manager.io` itself — an open map there would silently DROP a stated
+    `group` (e.g. `awspca.cert-manager.io`, a real cert-manager external
+    issuer) rather than refuse it. Closed to exactly `{name, kind}`, `group`
+    is now refused by name instead.
+    """
+    result = render_with_overlay(
+        CHART,
+        {
+            "edgeTLS": {
+                "issuerRef": {
+                    "name": "x",
+                    "kind": "ClusterIssuer",
+                    "group": "awspca.cert-manager.io",
+                }
+            }
+        },
+        tmp_path,
+    )
+    assert result.returncode != 0, result.stdout
+    assert_schema_refusal(result.stderr, "group", "edgeTLS.issuerRef")
 
 
 def test_helm_lint_strict_also_refuses_the_root_typo(tmp_path):
@@ -518,10 +649,12 @@ def test_open_valkey_resources_takes_an_unknown_shape(tmp_path):
     assert object_count(result.stdout) == DEFAULT_OBJECT_COUNT
 
 
-def test_open_edge_tls_issuer_ref_takes_an_unknown_shape(tmp_path):
-    result = render_with_overlay(
-        CHART, {"edgeTLS": {"issuerRef": {"group": "x"}}}, tmp_path
-    )
+def test_an_untyped_leaf_takes_a_string(tmp_path):
+    """`valkey.port` carries no `type` in this schema (ADR-0847: types stay
+    in `render-checks.yaml`), so `--set-string` forcing it to arrive as a
+    string rather than a number is not this schema's refusal to make.
+    """
+    result = render(CHART, "--set-string", "valkey.port=6379")
     assert result.returncode == 0, result.stderr
     assert object_count(result.stdout) == DEFAULT_OBJECT_COUNT
 
@@ -601,9 +734,11 @@ def test_nats_create_typo_passes_this_schema_silently(tmp_path):
 
 def test_prometheus_force_namespace_typo_passes_this_schema_silently(tmp_path):
     """`prometheus` is an OPEN upstream section. `prometheus.forceNamespac`
-    (typo'd) is read by NOTHING — `render-checks.yaml`'s mixed-release guard
-    reads the CORRECTLY SPELLED `prometheus.forceNamespace` directly off
-    `.Values`, with no schema or render check naming the typo'd key either.
+    (typo'd) is read by NOTHING: `templates/prometheus-namespace.yaml:20` is
+    the one place `.Values.prometheus.forceNamespace` is read at all, and it
+    reads the CORRECTLY SPELLED key — no render check guards this one yet
+    (plan K-3 / brief §3.7e residual, follow-up ledger), so a typo here is
+    not refused by this schema or by anything else.
     """
     result = render_with_overlay(CHART, {"prometheus": {"forceNamespac": "x"}}, tmp_path)
     assert result.returncode == 0, result.stderr
