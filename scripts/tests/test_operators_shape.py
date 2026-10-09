@@ -1854,7 +1854,13 @@ def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
         "platform",
         str(copy),
         "-f",
-        str(values_file(tmp_path / "broker-asked.yaml", "nats:\n  create: true\n")),
+        str(
+            values_file(
+                tmp_path / "broker-asked.yaml",
+                # B-N2: the two TLS keys are required while `nats.create` is true.
+                'nats:\n  create: true\n  tls:\n    enabled: false\n    clientAuth: "off"\n',
+            )
+        ),
     )
     assert asked.returncode == 0, asked.stderr
     deleted = helm(

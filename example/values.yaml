@@ -89,8 +89,18 @@ valkey:
 # their subject permissions and the `<< >>` escape live in the chart's
 # `values.yaml` and this file inherits them, which is what keeps one source for
 # them. Both passwords are minted by the bootstrap Job below.
+#
+# `tls` IS REQUIRED WHILE `create` IS TRUE, with no default (ADR-0845, ADR-0854):
+# this is the plaintext broker. To serve TLS, set `tls.enabled: true` AND the
+# upstream keys beside it — `config.nats.tls.enabled: true`,
+# `config.nats.tls.secretName: nats-tls` — and the render check refuses the two
+# disagreeing. `clientAuth: "required"` adds `config.nats.tls.merge.verify: true`
+# and `config.nats.tls.merge.ca_file: /etc/nats-certs/nats/ca.crt`. Quote "off".
 nats:
   create: true
+  tls:
+    enabled: false
+    clientAuth: "off"
 
 # THE BOOTSTRAP JOBS. Two pre-install hooks mint the four credentials nothing
 # outside the installation can supply, and neither Helm nor Argo tracks the

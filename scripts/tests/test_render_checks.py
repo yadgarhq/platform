@@ -126,14 +126,14 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and twelve values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and fourteen values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted.
-EXPECTED_RENDER_CHECKS = 14
+EXPECTED_RENDER_CHECKS = 16
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
-# TWELVE: the mixed-release refusal, the type arm of its toggle list (ledger
+# FOURTEEN: the mixed-release refusal, the type arm of its toggle list (ledger
 # 1121, root only for the register arms' reason), the TWO ARMS of the `operators` shape refusal
 # — a deleted key, refused wherever this chart runs, and a present non-map,
 # refused only when it is the root — and TWO BRANCHES EACH for the two
@@ -146,16 +146,19 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # And the `prometheus.forceNamespace` arm (ledger 1340): an empty or null
 # namespace while the prometheus operator is on, refused wherever this chart runs;
 # `scripts/tests/test_force_namespace.py` owns what it does.
-# And the TWO NATS/valkey TLS arms (B-L1): a key of the wrong shape, and a value
-# B-N2 / B-V2 render but this version does not — both refused wherever this
-# chart runs, because no parent names these keys yet;
+# And the TWO NATS/valkey TLS arms (B-L1): a key of the wrong shape, and a valkey
+# value B-V2 renders but this version does not. And the TWO NATS contract arms
+# (B-N2): an absent `nats.tls` key while `nats.create` is true, and the platform
+# keys disagreeing with the upstream keys that render the listener. All four
+# refuse wherever this chart runs: the parent's NATS cross-checks compare
+# platform against its clients, never platform against itself;
 # `scripts/tests/test_nats_valkey_tls.py` owns what they do.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 12
+EXPECTED_VALUES_CHECKS = 14
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
@@ -1139,6 +1142,8 @@ CRD_APIS = ("--api-versions", "cert-manager.io/v1", "--api-versions", "gateway.e
 # What a toggle needs beside itself to render at all.
 TOGGLE_ALONE_EXTRA = {
     "edgeTLS": ("--set", "edgeTLS.issuerRef.name=edge-issuer,edgeTLS.issuerRef.kind=ClusterIssuer"),
+    # B-N2: the broker's two TLS keys are required while `nats.create` is true.
+    "nats": ("--set", "nats.tls.enabled=false", "--set-string", "nats.tls.clientAuth=off"),
 }
 GUARD_CRD_BACKED = re.compile(r"\$crdBacked := \(list (?P<names>[^)]*)\)")
 THE_CRD_REASON = "a CustomResourceDefinition this very release is installing is not registered"
