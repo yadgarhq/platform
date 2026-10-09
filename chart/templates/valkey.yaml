@@ -19,12 +19,14 @@ depend on the policy existing.
 
 THE SERVER TLS CONTRACT (B-V2, ADR-0852). `valkey.tls.enabled` adds a
 `--tls-port` listener beside (or, with `plaintext: false`, instead of) the plain
-one; `valkey.tls.clientAuth` maps to `--tls-auth-clients` (`off` -> `no`,
-`optional` -> `optional`, `required` -> `yes`). The serving cert is
-`valkey-tls`, the Secret `values.yaml`'s `certificates.leaves` issues (B-L1) —
-the SAME Secret is read for the certificate, the key and the CA bundle,
-because cert-manager writes `ca.crt` into every leaf Secret in this estate
-(measured 2026-10-08), so there is no separate CA Secret to name.
+one; `valkey.tls.clientAuth` maps to `VALKEY_TLS_AUTH_CLIENTS`, the env var
+`--tls-auth-clients` reads (`off` -> `no`, `optional` -> `optional`,
+`required` -> `yes`) — an env var rather than a literal baked into `args`, so
+it is the one break-glass an operator can move without a new release. The
+serving cert is `valkey-tls`, the Secret `values.yaml`'s `certificates.leaves`
+issues (B-L1) — the SAME Secret is read for the certificate, the key and the
+CA bundle, because cert-manager writes `ca.crt` into every leaf Secret in this
+estate (measured 2026-10-08), so there is no separate CA Secret to name.
 
 THE UNIX SOCKET AND ITS `emptyDir` RENDER AT EVERY VALUE OF `tls`, not only
 when TLS is on. The readiness and liveness probes read the socket regardless
@@ -38,16 +40,20 @@ liveness never answered whether TLS was serving, and once `plaintext: false`
 drops port 6379 a `tcpSocket` probe on it would fail the pod outright. The
 socket is the one listener every posture keeps.
 
-THE HASH CLAUSE, ONLY WHEN `tls.enabled`. `valkey-server` reads its TLS
-material once, at boot (unlike the nats reloader, which re-reads on SIGHUP) —
-measured against this image: a `kubectl cp`'d replacement certificate changes
-nothing a running process can see. So the startup script hashes the mounted
-cert and key once, into the same `emptyDir` the socket lives in, and the
-liveness probe re-hashes them on every check: cert-manager rotating the
-Secret changes the files on disk, the hash stops matching, and the restart
-that follows picks up the new leaf at its next boot. This is also the risk
-PB-3 states for the first roll: a `Recreate` strategy, so the cache is briefly
-unavailable, and it is empty on the far side either way.
+THE HASH CLAUSE, ONLY WHEN `tls.enabled`, OVER ALL THREE MOUNTED FILES —
+`tls.crt`, `tls.key` AND `ca.crt`. `valkey-server` reads its TLS material
+once, at boot (unlike the nats reloader, which re-reads on SIGHUP) — measured
+against this image: a `kubectl cp`'d replacement certificate changes nothing a
+running process can see. So the startup script hashes the mounted cert, key
+and CA bundle once, into the same `emptyDir` the socket lives in, and the
+liveness probe re-hashes them on every check: cert-manager rotating any of the
+three changes the files on disk, the hash stops matching, and the restart
+that follows picks up the new leaf (and, if it rotated, the new CA) at its
+next boot. `ca.crt` is included because a CA rotation is exactly as silent to
+a running process as a leaf rotation, and `clientAuth` other than `off`
+depends on it as much as on the leaf. This is also the risk PB-3 states for
+the first roll: a `Recreate` strategy, so the cache is briefly unavailable,
+and it is empty on the far side either way.
 */}}
 {{- if .Values.valkey.create }}
 {{- $valkey := .Values.valkey }}
@@ -176,13 +182,13 @@ spec:
               "--tls-cert-file /etc/valkey/tls/tls.crt"
               "--tls-key-file /etc/valkey/tls/tls.key"
               "--tls-ca-cert-file /etc/valkey/tls/ca.crt"
-              (printf "--tls-auth-clients %s" (index $authClients $tls.clientAuth))
+              "--tls-auth-clients \"$VALKEY_TLS_AUTH_CLIENTS\""
             ) }}
           {{- end }}
           args:
             - |
               {{- if $tls.enabled }}
-              sha256sum /etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key > /run/valkey/tls.sha256
+              sha256sum /etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key /etc/valkey/tls/ca.crt > /run/valkey/tls.sha256
               {{- end }}
               exec valkey-server \
                 {{ join " \\\n                " $args }}
@@ -208,6 +214,21 @@ spec:
                 secretKeyRef:
                   name: {{ $valkey.passwordSecret.name }}
                   key: {{ $valkey.passwordSecret.key }}
+            {{- if $tls.enabled }}
+            # THE BREAK-GLASS: an env var, not a literal baked into `args`
+            # above, so `kubectl set env` can move `--tls-auth-clients`
+            # between `no`/`optional`/`yes` without a new release while an
+            # incident is live. `templates/render-checks.yaml` still closes
+            # `valkey.tls.clientAuth` to `off`/`optional`/`required` at
+            # render time; this is the mapped runtime value the server reads.
+            - name: VALKEY_TLS_AUTH_CLIENTS
+              # QUOTED: `no` and `yes` are YAML 1.1 booleans unquoted (the
+              # same trap `clientAuth` itself is quoted against, B-U5E
+              # convention item 1) — an unquoted `no` here renders as the
+              # boolean `false`, which env values coerce to the STRING
+              # `"false"`, a value `valkey-server` does not recognise.
+              value: {{ index $authClients $tls.clientAuth | quote }}
+            {{- end }}
           ports:
             {{- if $tls.plaintext }}
             - name: valkey
@@ -236,15 +257,24 @@ spec:
             # ONE exec PROBE OVER THE UNIX SOCKET, at every posture — see the
             # file header for why a `tcpSocket` probe on port 6379 cannot be the
             # one liveness check once `plaintext: false` can close that port.
-            # The hash clause is appended only when `tls.enabled`; the socket
-            # ping alone is the whole check otherwise, unchanged from before
-            # this version's `tcpSocket` probe in every other respect.
+            #
+            # CREDENTIAL-INDEPENDENT, LIKE THE `tcpSocket` PROBE IT REPLACES:
+            # `ping >/dev/null` asks only whether the socket answers at all, the
+            # same question a TCP connect asked before this version — a
+            # liveness probe that could fail on a bad credential would restart
+            # a healthy server because a Secret rotated wrong (see the Service
+            # above; the readiness probe below is the one that checks the
+            # answer, deliberately, because readiness IS about whether a
+            # client can use the cache). The hash clause is appended only when
+            # `tls.enabled`; the socket check alone is the whole probe
+            # otherwise, identical in kind (not just in spirit) to the
+            # `tcpSocket` probe this version replaces.
             exec:
               command:
                 - sh
                 - -c
                 - >-
-                  valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG
+                  valkey-cli -s /run/valkey/valkey.sock ping >/dev/null
                   {{- if $tls.enabled }} && sha256sum -c --status /run/valkey/tls.sha256{{- end }}
             initialDelaySeconds: 5
           readinessProbe:

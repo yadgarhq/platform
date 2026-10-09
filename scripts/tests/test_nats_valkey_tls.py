@@ -158,9 +158,13 @@ def test_the_nats_and_valkey_serving_leaves_name_every_service_form():
 # ── THE OFF POSTURE CHANGES NOTHING ──────────────────────────────────────────
 
 
-def test_the_valkey_off_posture_renders_exactly_what_the_absent_keys_render(tmp_path):
-    absent = render(CHART, *API_VERSIONS, "-f", str(ADOPTER_VALUES))
-    stated = render(
+def test_restating_the_valkey_off_posture_changes_nothing(tmp_path):
+    """`example/values.yaml` already states the off posture explicitly — there
+    is no chart default to compare it against any more (ADR-0845, ADR-0854:
+    `valkey.tls.*` has none, mirroring `nats.tls`). Restating the SAME values
+    on top changes nothing."""
+    bare = render(CHART, *API_VERSIONS, "-f", str(ADOPTER_VALUES))
+    restated = render(
         CHART,
         *API_VERSIONS,
         "-f",
@@ -168,13 +172,16 @@ def test_the_valkey_off_posture_renders_exactly_what_the_absent_keys_render(tmp_
         "-f",
         str(overlay(tmp_path, VALKEY_OFF_POSTURE)),
     )
-    assert absent.returncode == 0, absent.stderr
-    assert stated.returncode == 0, stated.stderr
-    assert stated.stdout == absent.stdout, "the off posture changed the render"
+    assert bare.returncode == 0, bare.stderr
+    assert restated.returncode == 0, restated.stderr
+    assert restated.stdout == bare.stdout, "restating the off posture changed the render"
 
 
-def test_valkey_client_auth_off_is_accepted_without_the_other_keys(tmp_path):
-    """Each key is validated when present; none requires another yet."""
+def test_valkey_client_auth_off_is_accepted_without_the_other_keys_while_create_is_false(tmp_path):
+    """`valkey.create` stays the gate (mirroring `nats.create`): with it at the
+    chart's own default `false`, a stray `clientAuth` with neither `enabled`
+    nor `plaintext` stated is still just a validated-when-present key, not a
+    posture the absence arm below has any reason to ask about."""
     path = overlay(tmp_path, {"valkey": {"tls": {"clientAuth": "off"}}})
     result = render(CHART, "-f", str(path))
     assert result.returncode == 0, result.stderr
@@ -186,18 +193,21 @@ def test_valkey_client_auth_off_is_accepted_without_the_other_keys(tmp_path):
 @pytest.mark.parametrize(
     "valkey_tls",
     [
-        {"enabled": True},
-        {"enabled": True, "plaintext": False},
-        {"clientAuth": "optional"},
-        {"clientAuth": "required"},
+        {"enabled": True, "clientAuth": "off", "plaintext": True},
+        {"enabled": True, "clientAuth": "off", "plaintext": False},
+        {"enabled": True, "clientAuth": "optional", "plaintext": True},
+        {"enabled": True, "clientAuth": "required", "plaintext": True},
     ],
     ids=["valkey-enabled", "valkey-plaintext-false", "valkey-optional", "valkey-required"],
 )
 def test_valkey_values_are_no_longer_refused_as_unrendered(tmp_path, valkey_tls):
-    """B-V2 LIFTS THE EXPAND REFUSAL FOR VALKEY: nothing names it in a bare
-    render. `valkey.create: true` so the guard added alongside this lift
-    (a stated `tls` posture required once the cache is in) does not itself
-    refuse first; `test_valkey_server_tls.py` owns what each value renders."""
+    """B-V2 LIFTS THE EXPAND REFUSAL FOR VALKEY: nothing names any of these
+    as "not rendered yet" in a bare render. ALL THREE KEYS ARE STATED,
+    because the absence arm (ADR-0845, ADR-0854) would otherwise refuse
+    first for an unrelated reason — that arm is
+    `test_valkey_server_tls.py::test_create_true_with_tls_absent_refuses`'s
+    job, not this one's; `test_valkey_server_tls.py` owns what each value
+    actually renders."""
     path = overlay(tmp_path, {"valkey": {"create": True, "tls": valkey_tls}})
     result = render(CHART, "-f", str(path))
     assert result.returncode == 0, result.stderr

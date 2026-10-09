@@ -1156,6 +1156,16 @@ TOGGLE_ALONE_EXTRA = {
     "edgeTLS": ("--set", "edgeTLS.issuerRef.name=edge-issuer,edgeTLS.issuerRef.kind=ClusterIssuer"),
     # B-N2: the broker's two TLS keys are required while `nats.create` is true.
     "nats": ("--set", "nats.tls.enabled=false", "--set-string", "nats.tls.clientAuth=off"),
+    # B-V2: the cache's three TLS keys are required while `valkey.create` is
+    # true, mirroring `nats.tls` above.
+    "valkey": (
+        "--set",
+        "valkey.tls.enabled=false",
+        "--set-string",
+        "valkey.tls.clientAuth=off",
+        "--set",
+        "valkey.tls.plaintext=true",
+    ),
 }
 GUARD_CRD_BACKED = re.compile(r"\$crdBacked := \(list (?P<names>[^)]*)\)")
 THE_CRD_REASON = "a CustomResourceDefinition this very release is installing is not registered"

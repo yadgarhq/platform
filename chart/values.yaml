@@ -427,10 +427,12 @@ valkey:
   maxmemoryPolicy: allkeys-lru
 
   # ── THE SERVER TLS CONTRACT (B-V2, ADR-0852) ──────────────────────────────
-  # The off posture, stated rather than left absent, so `valkey.create: true`
-  # alone renders without an adopter writing these three keys. `render-checks.yaml`
-  # refuses `valkey.create: true` with no `tls` key at all (a null or missing
-  # block), so whatever an adopter overlays, SOME posture is always stated.
+  # `tls.enabled`, `tls.clientAuth` and `tls.plaintext` ARE THIS CHART'S OWN
+  # KEYS, REQUIRED WITH NO DEFAULT while `create` is true (ADR-0845, ADR-0854),
+  # mirroring `nats.tls` (B-N2) exactly: none is written here, so none is
+  # written below under `nats:` either. `render-checks.yaml` refuses any of
+  # the three absent (or explicitly `null`) while `valkey.create` is true,
+  # naming each missing key.
   #
   # `clientAuth` IS A QUOTED STRING, because YAML reads a bare `off` as the
   # boolean `false` and this chart's own template compares it to the strings
@@ -445,10 +447,6 @@ valkey:
   # value of `tls`, because the readiness and liveness probes read the socket
   # regardless of posture (measured against `valkey/valkey:9.1.1`: a TCP-only
   # probe and a socket probe answer identically once `requirepass` is set).
-  tls:
-    enabled: false
-    clientAuth: "off"
-    plaintext: true
 
   resources:
     requests:

@@ -20,11 +20,13 @@ Pod (sleep's analogue, kubelet) still up to report an unhealthy probe.
 
 WHY THE PASSWORD IS SET EXPLICITLY HERE. `templates/valkey.yaml` reads
 `VALKEY_PASSWORD` and `VALKEYCLI_AUTH` from a Kubernetes Secret this test does
-not have; a bare docker run gets no credential unless one is given, and an
-unauthenticated run would prove the probe passes for the wrong reason (measured
-2026-10-09, `scripts/bv2/tlscheck`: `NOAUTH` without a credential, `PONG`
-with one — see `templates/valkey.yaml`'s own readiness comment for the same
-measurement against TCP).
+not have; a bare docker run gets no credential unless one is given. The
+readiness probe reads the answer (`NOAUTH` without a credential, `PONG` with
+one — measured 2026-10-09 against this same image), so an unauthenticated run
+would prove THAT probe passes for the wrong reason; the liveness probe is
+credential-independent by design (see `templates/valkey.yaml`'s own comment),
+so the password matters here only for bringing the server up far enough to
+answer at all.
 
 NO SKIP WHEN `docker` IS MISSING (ledger 837: no test silently stops running).
 This matches `templates/render-checks.yaml`'s own ADR-0650 precedent for
@@ -35,6 +37,15 @@ run` itself raises there and the test reports red, naming `docker` in the
 command that failed. The CI runner this contract is written for has it
 (GitHub-hosted `ubuntu` runners ship Docker); a local run with no `docker`
 fails loudly rather than reporting a false green.
+
+WHETHER THIS FILE ACTUALLY RUNS IN CI, STATED RATHER THAN ASSUMED: it runs
+inside `ci / precommit` (the `pytest-scripts` pre-commit hook runs the whole
+of `scripts/tests/`, this file included, on the GitHub-hosted `ubuntu` runner
+that job uses — confirmed green on this PR). `ci / test` is a SEPARATE job,
+gated on `needs.detect.outputs.rust == 'true'` (`yadgarhq/actions`'
+`ci-pr.yaml`) for repos that need a live database for Rust integration tests;
+it always SKIPS on this chart-only repository and has nothing to do with this
+file.
 
 Run: python3 -m pytest scripts/tests/test_valkey_liveness_docker.py -q
 """
@@ -137,12 +148,13 @@ def start_server(container: LiveContainer, *, tls_enabled: bool) -> None:
     hash_clause = ""
     if tls_enabled:
         # No real certs in this isolated check: the hash file is seeded over
-        # the socket args file itself, just to exercise `sha256sum -c
-        # --status` succeeding once and failing once the file it hashed is
-        # gone — the same shape as a rotated/missing cert, without needing a
-        # live CA for a liveness-probe-only test. The TLS LISTENER'S own
-        # handshake is exercised separately in `scripts/bv2/tlscheck`
-        # (`SubagentHandback` report), not duplicated here.
+        # a stand-in file rather than real TLS material, just to exercise
+        # `sha256sum -c --status` succeeding once and failing once that file
+        # changes under it — the same shape as a rotated cert, without
+        # needing a live CA for a liveness-probe-only test. The TLS
+        # LISTENER'S own handshake and `clientAuth` enforcement are measured
+        # separately against this image (not a repo file; see this PR's
+        # verification notes), not duplicated here.
         hash_clause = (
             "touch /run/valkey/tls-material "
             "&& sha256sum /run/valkey/tls-material > /run/valkey/tls.sha256 && "
@@ -204,3 +216,36 @@ def test_the_rendered_readiness_command_reads_the_same_socket(tmp_path):
         start_server(container, tls_enabled=False)
         healthy = run_probe(container, readiness)
         assert healthy.returncode == 0, healthy.stderr + healthy.stdout
+
+
+def test_the_rendered_liveness_command_fails_when_a_hashed_file_changes_while_the_server_stays_up(
+    tmp_path,
+):
+    """THE CASE THE "stopped" SCENARIO ABOVE CANNOT COVER: a cert rotation
+    changes a hashed file on disk WITHOUT the server noticing or stopping —
+    `valkey-server` only reads TLS material at boot. The liveness command's
+    `sha256sum -c --status` clause is what turns that silent change into a
+    failed probe, independent of whether `valkey-server` itself is still
+    answering `ping`."""
+    _, liveness = rendered_probes(tmp_path, tls_enabled=True)
+    with LiveContainer() as container:
+        start_server(container, tls_enabled=True)
+
+        healthy = run_probe(container, liveness)
+        assert healthy.returncode == 0, (
+            f"the rendered liveness command failed before any rotation: {healthy.stdout!r} {healthy.stderr!r}"
+        )
+
+        # THE SERVER NEVER STOPS. Only the file the startup script hashed
+        # changes under it, exactly as a cert-manager rotation would change
+        # `/etc/valkey/tls/tls.crt` without valkey-server noticing.
+        rotated = container.exec("sh", "-c", "echo rotated >> /run/valkey/tls-material")
+        assert rotated.returncode == 0, rotated.stderr + rotated.stdout
+
+        still_alive = run_probe(container, "valkey-cli -s /run/valkey/valkey.sock ping")
+        assert still_alive.returncode == 0, "the server itself must still be answering, unaffected by the rotation"
+
+        after_rotation = run_probe(container, liveness)
+        assert after_rotation.returncode != 0, (
+            f"the rendered liveness command passed after the hashed file changed under it: {liveness!r}"
+        )

@@ -510,8 +510,14 @@ def test_a_create_toggle_true_at_the_defaults_reddens_the_zero(tmp_path):
         # zero above passed over a chart whose `condition` had been deleted.
         ("nats", "StatefulSet"),
     ):
-        # B-N2: the broker's two TLS keys are required while `nats.create` is true.
-        required = '  tls:\n    enabled: false\n    clientAuth: "off"\n' if toggle == "nats" else ""
+        # B-N2: the broker's two TLS keys are required while `nats.create` is
+        # true. B-V2: the cache's three, the same way, while `valkey.create` is.
+        if toggle == "nats":
+            required = '  tls:\n    enabled: false\n    clientAuth: "off"\n'
+        elif toggle == "valkey":
+            required = '  tls:\n    enabled: false\n    clientAuth: "off"\n    plaintext: true\n'
+        else:
+            required = ""
         values = overrides(
             tmp_path / f"{toggle}.yaml", f"{toggle}:\n  create: true\n{required}"
         )
