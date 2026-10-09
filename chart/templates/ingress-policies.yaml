@@ -31,6 +31,12 @@ be usable, and a half-written egress policy breaks name resolution for everythin
 it selects. Ingress is the half that answers the question.
 */}}
 {{- if .Values.valkey.create }}
+{{/* same defensive default as `templates/valkey.yaml`: no ordering guarantee
+     against `render-checks.yaml`'s refusal of a null `valkey.tls`. */}}
+{{- $valkeyTLS := .Values.valkey.tls }}
+{{- if not (kindIs "map" $valkeyTLS) }}
+{{- $valkeyTLS = dict "enabled" false "clientAuth" "off" "plaintext" true }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -48,13 +54,24 @@ spec:
     # the suite asserts it BY VALUE and says so. Each new consumer of the cache
     # is a line added here; the header of the cache's own file describes more
     # that will arrive.
+    #
+    # THE PORT LIST FOLLOWS `valkey.tls.{plaintext,enabled}` (B-V2), the same
+    # two switches `templates/valkey.yaml` reads for the Deployment and Service:
+    # `plaintext: false` closes this policy's 6379 the same render drops the
+    # plain listener, rather than leaving a hole open behind no server.
     - from:
         - podSelector:
             matchLabels:
               app: gateway
       ports:
+        {{- if $valkeyTLS.plaintext }}
         - protocol: TCP
           port: {{ .Values.valkey.port }}
+        {{- end }}
+        {{- if $valkeyTLS.enabled }}
+        - protocol: TCP
+          port: 6380
+        {{- end }}
 {{- end }}
 {{- if .Values.nats.create }}
 ---
@@ -149,9 +166,13 @@ spec:
     # exempt.
     #
     # THE LIVE PROBES ARE `tcpSocket` AND `exec`, THESE ARE `httpGet`, AND THE
-    # EVIDENCE STILL TRANSFERS. Of the eight workloads counted above, seven probe
-    # with `tcpSocket` and `valkey` carries a `tcpSocket` liveness probe beside an
-    # `exec` readiness probe. NetworkPolicy is an L3/L4 control. An `httpGet` probe
+    # EVIDENCE STILL TRANSFERS. Of the eight workloads counted above, seven probed
+    # with `tcpSocket` AS MEASURED 2026-09-12; `valkey` was one of those seven, its
+    # `tcpSocket` liveness probe beside an `exec` readiness probe. B-V2 (2026-10-09)
+    # moves valkey's liveness to `exec` too — both its probes read the unix socket
+    # now, at every TLS posture — so this chart version's `valkey` carries no
+    # `tcpSocket` probe at all and the live count becomes six of eight once this
+    # release deploys. NetworkPolicy is an L3/L4 control. An `httpGet` probe
     # is a TCP connection from the kubelet to the pod IP on this port, with a
     # request written into it once the connection is up; the difference between the
     # probe kinds is entirely above the layer this rule acts on. (An `exec` probe

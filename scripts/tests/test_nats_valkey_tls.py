@@ -1,4 +1,4 @@
-"""NATS AND VALKEY TLS: THE SERVING LEAVES (B-L1), NATS'S CONTRACT (B-N2), VALKEY'S EXPAND.
+"""NATS AND VALKEY TLS: THE SERVING LEAVES (B-L1), NATS'S CONTRACT (B-N2), VALKEY'S OWN GUARD (B-V2).
 
 THE SERVING LEAVES. `nats-tls` and `valkey-tls` sit in `certificates.leaves` on
 the next two free rungs (786h, 792h; ADR-0588).
@@ -15,16 +15,25 @@ keys do the work: `nats.config.nats.tls.{enabled, secretName: nats-tls}`,
 is on, because `allow_non_tls` is not hot-reloadable: every config change is a
 pod roll.
 
-VALKEY STAYS AT THE EXPAND until B-V2: its keys are validated when present, and
-every value nothing renders yet — `enabled: true`, `plaintext: false`, any
-`clientAuth` other than "off" — is refused with ONE sentence naming B-V2.
+VALKEY RENDERS FOR REAL NOW TOO (B-V2): `templates/valkey.yaml` and
+`templates/ingress-policies.yaml` own what `valkey.tls.{enabled, clientAuth,
+plaintext}` render — see `scripts/tests/test_valkey_server_tls.py`. This file
+keeps only valkey's two NEW guards: `valkey.create: true` with no stated
+`valkey.tls` posture at all, and `enabled: false` together with
+`plaintext: false` (no network listener left). Both B-N2's and B-V2's
+contracts lifted the "nothing renders yet" refusal B-L1 opened for their own
+server — nothing in this file can trip that refusal any more, for either
+server, so it and its `NOT_RENDERED_YET` sentence are gone.
 
 SHAPES ARE REFUSED BY NAME for both, because the schema closes key sets and
 nothing else (ADR-0847): a non-map block, a non-bool switch, and a `clientAuth`
 that is not a quoted string (YAML reads a bare `off` as false — the B-U5E
-convention) or not one of the values its server has.
+convention) or not one of the values its server has. This still applies to
+both servers even though both now render: each contract reads `clientAuth` by
+exact string, so a wrong type or an unknown mode is just as bad rendered as
+not.
 
-EVERY SHAPE AND EXPAND REFUSAL IS A BARE RENDER of the chart's own defaults plus
+EVERY SHAPE AND GUARD REFUSAL IS A BARE RENDER of the chart's own defaults plus
 one overlay: every `create` toggle is false there, so no capability check can
 fire and the refusal is attributable to these checks alone. The contract cases
 render `example/values.yaml` (`nats.create: true`) with the API groups stated.
@@ -49,12 +58,8 @@ API_VERSIONS = (
     "gateway.envoyproxy.io/v1alpha1",
 )
 
-# THE ONE SENTENCE every not-yet-rendered valkey value is refused with (B-L1's
-# expand, narrowed to valkey by B-N2).
-NOT_RENDERED_YET = "this chart version declares the key; B-V2 renders it"
-
-# VALKEY'S OFF POSTURE, every key stated. B-V2 will make each required; today
-# each is accepted and changes nothing.
+# VALKEY'S OFF POSTURE, every key stated. `chart/values.yaml` ships exactly
+# this as its own default (B-V2), so stating it explicitly changes nothing.
 VALKEY_OFF_POSTURE = {
     "valkey": {"tls": {"enabled": False, "clientAuth": "off", "plaintext": True}},
 }
@@ -175,42 +180,27 @@ def test_valkey_client_auth_off_is_accepted_without_the_other_keys(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-# ── VALUES THE CONTRACTS RENDER, REFUSED UNTIL THEY DO ───────────────────────
+# ── VALUES BOTH CONTRACTS NOW RENDER, ONCE REFUSED AS UNRENDERED ────────────
 
 
 @pytest.mark.parametrize(
-    ("body", "named"),
+    "valkey_tls",
     [
-        ({"valkey": {"tls": {"enabled": True}}}, "valkey.tls.enabled: true"),
-        ({"valkey": {"tls": {"plaintext": False}}}, "valkey.tls.plaintext: false"),
-        ({"valkey": {"tls": {"clientAuth": "optional"}}}, 'valkey.tls.clientAuth: "optional"'),
-        ({"valkey": {"tls": {"clientAuth": "required"}}}, 'valkey.tls.clientAuth: "required"'),
+        {"enabled": True},
+        {"enabled": True, "plaintext": False},
+        {"clientAuth": "optional"},
+        {"clientAuth": "required"},
     ],
-    ids=[
-        "valkey-enabled",
-        "valkey-plaintext-false",
-        "valkey-optional",
-        "valkey-required",
-    ],
+    ids=["valkey-enabled", "valkey-plaintext-false", "valkey-optional", "valkey-required"],
 )
-def test_a_value_nothing_renders_yet_is_refused_with_the_one_sentence(tmp_path, body, named):
-    stderr = refused(tmp_path, body)
-    assert NOT_RENDERED_YET in stderr, stderr
-    assert named in stderr, stderr
-
-
-def test_every_unrendered_value_is_named_in_one_refusal(tmp_path):
-    stderr = refused(
-        tmp_path,
-        {"valkey": {"tls": {"enabled": True, "plaintext": False, "clientAuth": "required"}}},
-    )
-    assert NOT_RENDERED_YET in stderr, stderr
-    for named in (
-        "valkey.tls.enabled: true",
-        "valkey.tls.plaintext: false",
-        'valkey.tls.clientAuth: "required"',
-    ):
-        assert named in stderr, (named, stderr)
+def test_valkey_values_are_no_longer_refused_as_unrendered(tmp_path, valkey_tls):
+    """B-V2 LIFTS THE EXPAND REFUSAL FOR VALKEY: nothing names it in a bare
+    render. `valkey.create: true` so the guard added alongside this lift
+    (a stated `tls` posture required once the cache is in) does not itself
+    refuse first; `test_valkey_server_tls.py` owns what each value renders."""
+    path = overlay(tmp_path, {"valkey": {"create": True, "tls": valkey_tls}})
+    result = render(CHART, "-f", str(path))
+    assert result.returncode == 0, result.stderr
 
 
 def test_nats_values_are_no_longer_refused_as_unrendered(tmp_path):
@@ -228,14 +218,12 @@ def test_a_bare_off_is_refused_as_not_a_quoted_string(tmp_path):
     stderr = refused(tmp_path, "nats:\n  tls:\n    clientAuth: off\n")
     assert "`nats.tls.clientAuth` must be a quoted string" in stderr, stderr
     assert 'write `clientAuth: "off"`' in stderr, stderr
-    assert NOT_RENDERED_YET not in stderr, stderr
 
 
 def test_nats_has_no_optional_mode(tmp_path):
     stderr = refused(tmp_path, {"nats": {"tls": {"clientAuth": "optional"}}})
     assert "`nats.tls.clientAuth` must be `off` or `required`" in stderr, stderr
     assert "NATS has no optional client-certificate mode" in stderr, stderr
-    assert NOT_RENDERED_YET not in stderr, stderr
 
 
 def test_an_unknown_valkey_client_auth_is_refused(tmp_path):

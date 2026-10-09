@@ -60,10 +60,12 @@ reads every one anyway:
     `issuerRef: {}`, empty; `templates/edge-certificate.yaml` `required`s
     both, so both are declared here rather than left for an open map to
     swallow a typo of either silently.
-  - `nats.tls` and `valkey.tls` with their keys (`enabled`, `clientAuth`,
-    and `plaintext` for valkey) — the platform-owned TLS switches B-L1
-    declares and B-N2 / B-V2 render. Absent from `values.yaml` by design:
-    the contracts make them required with no default (ADR-0845, ADR-0854).
+  - `nats.tls` with its keys (`enabled`, `clientAuth`) — the platform-owned
+    TLS switch B-L1 declares and B-N2 renders. Absent from `values.yaml` by
+    design: the contract makes it required with no default (ADR-0845,
+    ADR-0854). `valkey.tls` is NOT here any more: B-V2 renders it and
+    `values.yaml` now ships its off posture as a real default, so it is no
+    longer a schema key with nothing in `values.yaml` to match.
 
 TWO RESIDUALS ARE NOT, AND CANNOT BE, REFUSABLE HERE: `nats.create` (inside
 the open `nats` section; `render-checks.yaml`'s own mixed-release guard only
@@ -161,18 +163,16 @@ EXTRAS = (
     # template `required`s are declared here rather than left open.
     "edgeTLS.issuerRef.name",
     "edgeTLS.issuerRef.kind",
-    # THE NATS AND VALKEY TLS KEYS (B-L1, the folded B-N2 / B-V2 expand). Absent
-    # from `values.yaml` BY DESIGN: the contracts make them required with no
-    # chart default (ADR-0845, ADR-0854), and an expand that shipped a default
-    # would have to delete it again. `render-checks.yaml` validates each one
-    # when present and refuses every value the contracts have not rendered yet.
+    # THE NATS TLS KEYS (B-L1, B-N2 still pending). Absent from `values.yaml`
+    # BY DESIGN: the contract makes them required with no chart default
+    # (ADR-0845, ADR-0854), and an expand that shipped a default would have
+    # to delete it again. `render-checks.yaml` validates each one when
+    # present and refuses every value the contract has not rendered yet.
+    # `valkey.tls` is NOT here: B-V2 renders it, and `values.yaml` ships its
+    # off posture as a real default (see the module docstring).
     "nats.tls",
     "nats.tls.enabled",
     "nats.tls.clientAuth",
-    "valkey.tls",
-    "valkey.tls.enabled",
-    "valkey.tls.clientAuth",
-    "valkey.tls.plaintext",
 )
 
 # `certificates.leaves` is a KEYED MAP (§3.5): any leaf NAME is accepted, so
