@@ -694,7 +694,12 @@ ARM TWO, AGREEMENT. Every disagreement is collected and refused in ONE sentence:
     another source;
   - while TLS is on, `nats.config.patch` and `nats.config.nats.tls.patch` must
     be empty: a JSON patch runs after `merge` (`nats.loadMergePatch`) and can
-    rewrite any of the above after this check has read it.
+    rewrite any of the above after this check has read it;
+  - `nats.config.merge.tls` refuses at any posture: `nats.loadMergePatch`
+    mergeOverwrites `nats.config.merge` over the WHOLE rendered config, so a
+    `tls` block there replaces the `nats.config.nats.tls` keys read above;
+  - while TLS is on, `nats.podTemplate.configChecksumAnnotation` must be a bool
+    `true` (next paragraph).
 
 `nats.podTemplate.configChecksumAnnotation` is on in `values.yaml`, so every
 change to these keys rolls the broker: `allow_non_tls` is not hot-reloadable
@@ -753,7 +758,14 @@ takes effect. The reloader stays on for leaf renewal.
 {{- if not (empty (dig "tlsCA" "enabled" false .Values.nats)) }}
 {{- $natsDisagree = append $natsDisagree "`nats.tlsCA.enabled` is true: it writes a second `ca_file` from another source; this chart reads the CA through `nats.config.nats.tls.merge.ca_file`" }}
 {{- end }}
+{{- if hasKey (dig "config" "merge" dict .Values.nats) "tls" }}
+{{- $natsDisagree = append $natsDisagree "`nats.config.merge.tls` overrides the `nats.config.nats.tls` keys this check reads; write them under `nats.config.nats.tls.merge`" }}
+{{- end }}
 {{- if $natsEnabled }}
+{{- $checksum := dig "podTemplate" "configChecksumAnnotation" false .Values.nats }}
+{{- if not (and (kindIs "bool" $checksum) $checksum) }}
+{{- $natsDisagree = append $natsDisagree "`nats.podTemplate.configChecksumAnnotation` is not true while `nats.tls.enabled` is true: `allow_non_tls` is not hot-reloadable, so without the roll a step that changes it leaves the old listener running while the values say otherwise" }}
+{{- end }}
 {{- if not (empty (dig "config" "patch" list .Values.nats)) }}
 {{- $natsDisagree = append $natsDisagree "`nats.config.patch` is not empty while `nats.tls.enabled` is true: a JSON patch runs after `merge` and can rewrite the TLS settings this check read" }}
 {{- end }}

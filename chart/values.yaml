@@ -536,6 +536,8 @@ nats:
   # what the TLS steps need: `allow_non_tls` is not hot-reloadable — nats-server
   # rejects the whole reload — so without the roll a step that drops it would
   # leave the old listener running. The reloader stays on for leaf renewal.
+  # `templates/render-checks.yaml` refuses anything but `true` here while
+  # `nats.tls.enabled` is true.
   podTemplate:
     configChecksumAnnotation: true
 

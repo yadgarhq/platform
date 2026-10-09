@@ -570,3 +570,40 @@ def test_every_nats_disagreement_is_named_in_one_refusal(tmp_path):
 def test_tls_ca_enabled_refuses_at_the_off_posture_too(tmp_path):
     stderr = contract_refused(tmp_path, {"nats": {"tlsCA": {"enabled": True}}})
     assert "`nats.tlsCA.enabled` is true" in stderr, stderr
+
+
+def test_a_top_level_merge_tls_block_is_refused(tmp_path):
+    """REVIEW (platform#39): upstream `nats.loadMergePatch` mergeOverwrites
+    `nats.config.merge` over the WHOLE rendered config, so a `tls` block there
+    replaces the `nats.config.nats.tls` keys this check read — `verify: false`
+    and a public CA would render while the values still say "required"."""
+    body = with_changes(
+        NATS_VERIFIED,
+        (("nats", "config", "merge", "tls"), {"verify": False, "ca_file": "/etc/ssl/certs/ca-certificates.crt"}),
+    )
+    stderr = contract_refused(tmp_path, body)
+    assert (
+        "`nats.config.merge.tls` overrides the `nats.config.nats.tls` keys this check reads; "
+        "write them under `nats.config.nats.tls.merge`"
+    ) in stderr, stderr
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [False, "true", None],
+    ids=["false", "string-true", "null"],
+)
+def test_tls_on_without_the_checksum_annotation_is_refused(tmp_path, annotation):
+    """REVIEW (platform#39): `allow_non_tls` is not hot-reloadable, so with TLS on
+    the broker must roll on every config change; without the annotation the
+    values could say TLS-only while the broker still runs the mixed listener."""
+    body = with_changes(NATS_TLS_ONLY, (("nats", "podTemplate", "configChecksumAnnotation"), annotation))
+    if annotation is None:
+        body["nats"]["podTemplate"] = {"configChecksumAnnotation": None}
+    stderr = contract_refused(tmp_path, body)
+    assert "`nats.podTemplate.configChecksumAnnotation` is not true while `nats.tls.enabled` is true" in stderr, stderr
+
+
+def test_tls_off_without_the_checksum_annotation_renders(tmp_path):
+    result = contract(tmp_path, {"nats": {"podTemplate": {"configChecksumAnnotation": False}}})
+    assert result.returncode == 0, result.stderr
