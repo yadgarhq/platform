@@ -130,13 +130,13 @@ certificates:
       clusterLocalNames: true
       usages: [server auth, digital signature]
       renewBefore: 774h
-    # THE BROKER'S AND THE CACHE'S SERVING LEAVES (ADR-0852, B-L1). `nats-tls` is
-    # mounted by the upstream nats chart once an adopter writes
-    # `nats.config.nats.tls.secretName: nats-tls` (B-N2's contract, in
-    # `templates/render-checks.yaml`); `valkey-tls` by nothing until B-V2 renders
-    # valkey's listener. Renewal: the nats reloader re-reads the files on SIGHUP;
-    # valkey loads them only at boot, so B-V2's cert-hash liveness restarts it on
-    # a new leaf.
+    # THE BROKER'S AND THE CACHE'S SERVING LEAVES (ADR-0852, B-L1). Both are
+    # mounted and rendered now: `nats-tls` by the upstream nats chart once an
+    # adopter writes `nats.config.nats.tls.secretName: nats-tls` (B-N2's
+    # contract, in `templates/render-checks.yaml`); `valkey-tls` by
+    # `templates/valkey.yaml` (B-V2). Renewal: the nats reloader re-reads the
+    # files on SIGHUP; valkey loads them only at boot, so B-V2's cert-hash
+    # liveness restarts it on a new leaf.
     nats-tls:
       commonName: nats
       clusterLocalNames: true
@@ -425,6 +425,28 @@ valkey:
   # behaviour for every class of entry stored here, all of which are recomputable.
   maxmemory: 512mb
   maxmemoryPolicy: allkeys-lru
+
+  # ── THE SERVER TLS CONTRACT (B-V2, ADR-0852) ──────────────────────────────
+  # `tls.enabled`, `tls.clientAuth` and `tls.plaintext` ARE THIS CHART'S OWN
+  # KEYS, REQUIRED WITH NO DEFAULT while `create` is true (ADR-0845, ADR-0854),
+  # mirroring `nats.tls` (B-N2) exactly: none is written here, so none is
+  # written below under `nats:` either. `render-checks.yaml` refuses any of
+  # the three absent (or explicitly `null`) while `valkey.create` is true,
+  # naming each missing key.
+  #
+  # `clientAuth` IS A QUOTED STRING, because YAML reads a bare `off` as the
+  # boolean `false` and this chart's own template compares it to the strings
+  # `"off" | "optional" | "required"` (B-U5E convention item 1).
+  #
+  # `plaintext: true` KEEPS PORT 6379 OPEN beside the TLS listener. Setting it
+  # `false` drops 6379 from the Deployment, the Service and `valkey-ingress`
+  # (`templates/valkey.yaml`, `templates/ingress-policies.yaml`).
+  #
+  # THE UNIX SOCKET IS NOT A KEY HERE. `templates/valkey.yaml` renders
+  # `--unixsocket` and the `/run/valkey` `emptyDir` unconditionally, at every
+  # value of `tls`, because the readiness and liveness probes read the socket
+  # regardless of posture (measured against `valkey/valkey:9.1.1`: a TCP-only
+  # probe and a socket probe answer identically once `requirepass` is set).
 
   resources:
     requests:

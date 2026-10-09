@@ -74,9 +74,14 @@ gatewayListener:
 # ── THE ONE SHARED CACHE ─────────────────────────────────────────────────────
 # A Deployment, a Service and an ingress NetworkPolicy. The password comes from
 # the bootstrap Job below; nothing here survives a restart and nothing here needs
-# to.
+# to. `tls.{enabled,clientAuth,plaintext}` have no default (ADR-0845, ADR-0854,
+# B-V2), mirroring `nats.tls` below: all three are stated explicitly. Quote "off".
 valkey:
   create: true
+  tls:
+    enabled: false
+    clientAuth: "off"
+    plaintext: true
 
 # ── THE BROKER, AS AN UPSTREAM CHART DEPENDENCY ──────────────────────────────
 # `nats.create` IS READ BY HELM ITSELF, not by a template: it is the `condition`

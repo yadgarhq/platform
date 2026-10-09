@@ -60,10 +60,15 @@ reads every one anyway:
     `issuerRef: {}`, empty; `templates/edge-certificate.yaml` `required`s
     both, so both are declared here rather than left for an open map to
     swallow a typo of either silently.
-  - `nats.tls` and `valkey.tls` with their keys (`enabled`, `clientAuth`,
-    and `plaintext` for valkey) — the platform-owned TLS switches B-L1
-    declares and B-N2 / B-V2 render. Absent from `values.yaml` by design:
-    the contracts make them required with no default (ADR-0845, ADR-0854).
+  - `nats.tls` with its keys (`enabled`, `clientAuth`), and `valkey.tls` with
+    its keys (`enabled`, `clientAuth`, `plaintext`) — the platform-owned TLS
+    switches B-L1 declares, B-N2 renders NATS's and B-V2 renders valkey's.
+    Both are absent from `values.yaml` by design: each contract makes its own
+    keys required with no default (ADR-0845, ADR-0854), the same for both
+    servers — `valkey.tls` getting a chart default and then losing it again
+    was the mistake a review caught (platform#40): the whole point of "no
+    default" is that `valkey.create: true` with nothing else stated REFUSES,
+    the same way `nats.create: true` alone always has.
 
 TWO RESIDUALS ARE NOT, AND CANNOT BE, REFUSABLE HERE: `nats.create` (inside
 the open `nats` section; `render-checks.yaml`'s own mixed-release guard only
@@ -161,11 +166,13 @@ EXTRAS = (
     # template `required`s are declared here rather than left open.
     "edgeTLS.issuerRef.name",
     "edgeTLS.issuerRef.kind",
-    # THE NATS AND VALKEY TLS KEYS (B-L1, the folded B-N2 / B-V2 expand). Absent
-    # from `values.yaml` BY DESIGN: the contracts make them required with no
-    # chart default (ADR-0845, ADR-0854), and an expand that shipped a default
-    # would have to delete it again. `render-checks.yaml` validates each one
-    # when present and refuses every value the contracts have not rendered yet.
+    # THE NATS AND VALKEY TLS KEYS (B-L1; B-N2 renders NATS's, B-V2 renders
+    # valkey's). Absent from `values.yaml` BY DESIGN for BOTH servers: each
+    # contract makes its own keys required with no chart default (ADR-0845,
+    # ADR-0854), and a default shipped for either would have to be deleted
+    # again the moment `create` is true with nothing else stated. `render-
+    # checks.yaml` validates each one when present and refuses any of them
+    # absent while its server's `create` is true.
     "nats.tls",
     "nats.tls.enabled",
     "nats.tls.clientAuth",
@@ -922,26 +929,46 @@ def argocd_platform_section() -> dict:
     }
 
 
-def test_the_argocd_platform_section_still_renders_with_the_nats_tls_keys(tmp_path):
-    """The argocd block PLUS the two NATS TLS keys at the off posture, which PB-3
-    adds to `applications/yadgar.yaml` before argocd moves to a parent pinning
-    this version (B-N2: they are required while `nats.create` is true). The live
-    gate for argocd and parent inputs is the parent chart's suite plus the K-9
-    valuesObject sweep before each pin bump.
+def test_the_argocd_platform_section_still_renders_with_the_nats_and_valkey_tls_keys(tmp_path):
+    """The argocd block PLUS the NATS and valkey TLS keys at the off posture,
+    which PB-3 adds to `applications/yadgar.yaml` before argocd moves to a
+    parent pinning this version (B-N2 required its two; B-V2 requires valkey's
+    three the same way). The live gate for argocd and parent inputs is the
+    parent chart's suite plus the K-9 valuesObject sweep before each pin bump.
     """
     body = argocd_platform_section()
     body["nats"]["tls"] = {"enabled": False, "clientAuth": "off"}
+    body["valkey"]["tls"] = {"enabled": False, "clientAuth": "off", "plaintext": True}
     result = render_with_overlay(CHART, body, tmp_path, *CERT_MANAGER_AND_GATEWAY_API)
     assert result.returncode == 0, result.stderr
 
 
 def test_the_argocd_platform_section_as_it_stands_refuses_naming_the_nats_tls_keys(tmp_path):
-    """WHY PB-3 MUST CARRY THE KEYS: the block as argocd holds it today names none."""
+    """WHY PB-3 MUST CARRY THE KEYS: the block as argocd holds it today names none.
+
+    NATS'S ABSENCE ARM RUNS FIRST (it is earlier in `render-checks.yaml`), so
+    this refusal names only nats — valkey's absence arm never gets a chance
+    to run. See the next test for valkey's own, once nats is no longer in
+    the way.
+    """
     result = render_with_overlay(
         CHART, argocd_platform_section(), tmp_path, *CERT_MANAGER_AND_GATEWAY_API
     )
     assert result.returncode != 0, result.stdout[:400]
     assert "`nats.tls.enabled` and `nats.tls.clientAuth` are absent" in result.stderr, result.stderr
+
+
+def test_the_argocd_platform_section_with_only_nats_fixed_refuses_naming_valkey(tmp_path):
+    """PB-3 MUST CARRY VALKEY'S THREE TOO: with nats's keys stated but valkey's
+    still absent, the render reaches valkey's own absence arm (B-V2) and
+    refuses naming all three."""
+    body = argocd_platform_section()
+    body["nats"]["tls"] = {"enabled": False, "clientAuth": "off"}
+    result = render_with_overlay(CHART, body, tmp_path, *CERT_MANAGER_AND_GATEWAY_API)
+    assert result.returncode != 0, result.stdout[:400]
+    assert "valkey.create is true and" in result.stderr, result.stderr
+    for key in ("enabled", "clientAuth", "plaintext"):
+        assert f"`valkey.tls.{key}`" in result.stderr, result.stderr
 
 
 def test_an_operator_application_values_block_still_renders(tmp_path):

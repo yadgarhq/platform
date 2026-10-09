@@ -567,41 +567,33 @@ first. `scripts/tests/test_force_namespace.py` is the gate.
 {{- end }}{{/* end of the prometheus.forceNamespace arm */}}
 
 {{/*
-THE NATS AND VALKEY TLS KEYS: THE SHAPE OF BOTH, AND VALKEY'S EXPAND (B-L1, plan
-K-8 step 1). NATS'S CONTRACT (B-N2) FOLLOWS THESE TWO ARMS.
+THE NATS AND VALKEY TLS KEYS: THE SHAPE OF BOTH, BOTH FULLY RENDERED NOW. B-L1
+declared `nats.tls.{enabled,clientAuth}` and `valkey.tls.{enabled,clientAuth,
+plaintext}` and refused every value that would turn either server's TLS on.
+B-N2 rendered NATS's contract (below) and lifted its half of that refusal;
+this version (B-V2) renders valkey's (`templates/valkey.yaml`,
+`templates/ingress-policies.yaml`) and lifts the other half. Nothing is
+refused as "not rendered yet" any more, so the `$tlsUnrendered` list the two
+expands used to share — and the one `fail` that read it — is deleted here
+rather than kept as a check nothing can ever trip.
 
-`nats.tls.enabled`, `nats.tls.clientAuth`, `valkey.tls.enabled`,
-`valkey.tls.clientAuth` and `valkey.tls.plaintext` are platform-owned. B-N2 made
-the NATS pair required (below); B-V2 does the same for valkey (ADR-0845,
-ADR-0854). Until then this version only DECLARES the valkey keys, so a parent can
-state them before a contract pin needs them. Both arms refuse wherever this chart
-runs. The parent names these keys too (`yadgarhq/chart` B-U6 Part 3), but only to
-compare platform against its clients, never to validate a key's own shape — so
-nothing here shadows a parent refusal.
-
-ARM ONE, THE SHAPE. The schema closes the key set and nothing else (ADR-0847), so
-the types are checked here: each block a mapping, `enabled` and `plaintext`
-booleans, `clientAuth` a QUOTED STRING tested with `kindIs` BEFORE any `eq` (YAML
-reads a bare `off` as false, and Go then dies on incompatible types — B-U5E
-convention item 1), and one of the values its server has. NATS has no optional
-client-certificate mode (`verify` is require-and-verify only; ADR-0854), so its
-set is `off | required`; valkey's is `off | optional | required`.
-
-ARM TWO, VALKEY'S EXPAND REFUSAL. `valkey.tls.enabled: true`, `plaintext: false`
-and any `clientAuth` other than "off" each describe a listener no template here
-renders yet. Accepting one would let a values file look encrypted while the cache
-still serves plaintext only, so each is refused with ONE sentence naming B-V2,
-the contract that renders it and lifts this arm. The off posture — `enabled:
-false`, `clientAuth: "off"`, `plaintext: true` — renders exactly what the absent
-keys render. B-N2 lifted this arm for NATS: the NATS branch below skips the
-`enabled` arm and adds nothing to `$tlsUnrendered`.
+THE SHAPE CHECK REMAINS, for both servers, because the schema closes the key
+set and nothing else (ADR-0847): a non-map block, a non-bool switch, and a
+`clientAuth` that is not a quoted string (YAML reads a bare `off` as false —
+the B-U5E convention) or not one of the values its server has. NATS has no
+optional client-certificate mode (`verify` is require-and-verify only;
+ADR-0854), so its set is `off | required`; valkey's is `off | optional |
+required` — a shape BOTH contracts below still enforce, because each reads
+`clientAuth` by exact string. The parent names these keys too
+(`yadgarhq/chart` B-U6 Part 3), but only to compare platform against its
+clients, never to validate a key's own shape — so nothing here shadows a
+parent refusal.
 
 THE LOOP VARIABLE IS NOT `$operator` OR `$toggle`, so the mixed-release guard's
 two lists above stay the first `range` of each name in this file, which
 `test_render_checks.py` reads.
 */}}
 {{- $tlsShape := list }}
-{{- $tlsUnrendered := list }}
 {{- range $tlsServer := (list "nats" "valkey") }}
 {{- $server := index $.Values $tlsServer }}
 {{- if and (kindIs "map" $server) (hasKey $server "tls") }}
@@ -618,11 +610,6 @@ two lists above stay the first `range` of each name in this file, which
 {{- $kind := kindOf $value }}
 {{- if eq $kind "invalid" }}{{ $kind = "null" }}{{ end }}
 {{- $tlsShape = append $tlsShape (printf "`%s.tls.%s` is a %s rather than true or false: write it unquoted" $tlsServer $switch $kind) }}
-{{- else if eq $tlsServer "nats" }}
-{{- else if and (eq $switch "enabled") $value }}
-{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.enabled: true`" $tlsServer) }}
-{{- else if and (eq $switch "plaintext") (not $value) }}
-{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.plaintext: false`" $tlsServer) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -636,8 +623,6 @@ two lists above stay the first `range` of each name in this file, which
 {{- end }}
 {{- else if not (has $mode (list "off" "optional" "required")) }}
 {{- $tlsShape = append $tlsShape (printf "`%s.tls.clientAuth` must be `off`, `optional` or `required`, and it is %q" $tlsServer $mode) }}
-{{- else if ne $mode "off" }}
-{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.clientAuth: %q`" $tlsServer $mode) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -645,13 +630,6 @@ two lists above stay the first `range` of each name in this file, which
 {{- end }}
 {{- if $tlsShape }}
 {{- fail (printf "platform: %s." (join "; " $tlsShape)) }}
-{{- end }}
-{{- if $tlsUnrendered }}
-{{- fail (printf (join "" (list
-      "platform: %s %s TLS that no template in this chart renders: this chart version declares the key; B-V2 renders it. "
-      "Until that release, a values file stating it would look encrypted while the cache still serves plaintext only. "
-      "Write the off posture — `enabled: false`, `clientAuth: \"off\"` and `plaintext: true` — or pin the release that renders it."))
-      (join ", " $tlsUnrendered) (ternary "asks for" "ask for" (eq (len $tlsUnrendered) 1))) }}
 {{- end }}
 
 {{/*
@@ -778,6 +756,46 @@ takes effect. The reloader stays on for leaf renewal.
 {{- end }}
 {{- end }}{{/* end of the NATS contract arms */}}
 
+{{/*
+VALKEY'S OWN GUARD (B-V2, ADR-0852), MIRRORING NATS'S ABSENCE ARM ABOVE.
+`valkey.tls.enabled`, `valkey.tls.clientAuth` and `valkey.tls.plaintext` are
+this chart's own keys, REQUIRED WITH NO DEFAULT while `valkey.create` is true
+(ADR-0845, ADR-0854) — exactly like `nats.tls`, so neither key is written in
+`values.yaml`. Each of the three absent refuses, naming it, with the off
+posture to write. ABSENT MEANS MISSING *OR* EXPLICITLY `null`: a key present
+with a `null` value still has `hasKey` answer true, so this checks the KIND of
+the value too — `kindOf` on a nil interface is `"invalid"` — rather than
+trusting `hasKey` alone the way the NATS arm above does, because a `null`
+override says exactly as little about the posture as a missing key.
+
+`enabled: false` together with `plaintext: false` is refused too, once all
+three are present: it leaves the cache with no network listener at all, the
+unix socket aside.
+*/}}
+{{- $valkeyCreate := and (kindIs "map" .Values.valkey) (kindIs "bool" (index .Values.valkey "create")) (index .Values.valkey "create") }}
+{{- if $valkeyCreate }}
+{{- $valkeyTls := index .Values.valkey "tls" | default dict }}
+{{- $valkeyAbsent := list }}
+{{- range $key := (list "enabled" "clientAuth" "plaintext") }}
+{{- $present := and (hasKey $valkeyTls $key) (ne (kindOf (index $valkeyTls $key)) "invalid") }}
+{{- if not $present }}
+{{- $valkeyAbsent = append $valkeyAbsent (printf "`valkey.tls.%s`" $key) }}
+{{- end }}
+{{- end }}
+{{- if $valkeyAbsent }}
+{{- fail (printf (join "" (list
+      "platform: valkey.create is true and %s %s absent (missing, or explicitly null). "
+      "The cache's TLS switch, its client-certificate mode and its plaintext switch have no default (ADR-0845, ADR-0854): "
+      "only these keys say what you run, so all three must be written explicitly. "
+      "Write `valkey.tls.enabled: false`, `valkey.tls.clientAuth: \"off\"` and `valkey.tls.plaintext: true` for a plaintext cache, or the TLS posture you run."))
+      (join " and " $valkeyAbsent) (ternary "is" "are" (eq (len $valkeyAbsent) 1))) }}
+{{- end }}
+{{- $valkeyEnabled := index $valkeyTls "enabled" }}
+{{- $valkeyPlaintext := index $valkeyTls "plaintext" }}
+{{- if and (kindIs "bool" $valkeyEnabled) (kindIs "bool" $valkeyPlaintext) (not $valkeyEnabled) (not $valkeyPlaintext) }}
+{{- fail "platform: valkey.tls.enabled: false and valkey.tls.plaintext: false together leave the cache with no network listener at all but the unix socket: turn one on." }}
+{{- end }}
+{{- end }}{{/* end of the valkey contract arms */}}
 {{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}
 {{- include "platform.require-api" (dict
       "context" $

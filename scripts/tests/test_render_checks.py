@@ -126,10 +126,16 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and fourteen values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and fifteen values
 # checks, and the module docstring is where the difference between them lives. It
-# is the number a DELETION reddens, whichever kind was deleted.
-EXPECTED_RENDER_CHECKS = 16
+# is the number a DELETION reddens, whichever kind was deleted. B-N2 added two
+# values checks (nats.create with no nats.tls keys; the NATS/upstream
+# disagreement) and removed none; B-V2 added two more (valkey.create with no
+# valkey.tls key; valkey.tls.enabled: false together with valkey.tls.plaintext:
+# false) and DELETED one — the combined "nothing renders yet" refusal the two
+# expands shared, which nothing can trip once both contracts are rendered —
+# moving this from 12 (pre-B-N2/B-V2) to 15.
+EXPECTED_RENDER_CHECKS = 17
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
@@ -146,19 +152,25 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # And the `prometheus.forceNamespace` arm (ledger 1340): an empty or null
 # namespace while the prometheus operator is on, refused wherever this chart runs;
 # `scripts/tests/test_force_namespace.py` owns what it does.
-# And the TWO NATS/valkey TLS arms (B-L1): a key of the wrong shape, and a valkey
-# value B-V2 renders but this version does not. And the TWO NATS contract arms
-# (B-N2): an absent `nats.tls` key while `nats.create` is true, and the platform
-# keys disagreeing with the upstream keys that render the listener. All four
-# refuse wherever this chart runs: the parent's NATS cross-checks compare
-# platform against its clients, never platform against itself;
-# `scripts/tests/test_nats_valkey_tls.py` owns what they do.
+# And the ONE NATS/valkey SHAPE arm (B-L1, B-N2, B-V2): a key of the wrong
+# shape, for either server, at any posture — the only thing left of the pair
+# of expand arms B-L1 opened, now that both contracts are fully rendered and
+# the "nothing renders yet" refusal they shared has nothing left to trip.
+# And the TWO NATS contract arms (B-N2): an absent `nats.tls` key while
+# `nats.create` is true, and the platform keys disagreeing with the upstream
+# keys that render the listener. And the TWO VALKEY contract arms (B-V2): an
+# absent `valkey.tls` key while `valkey.create` is true, and
+# `enabled: false` together with `plaintext: false` (no network listener
+# left). All five refuse wherever this chart runs: the parent's NATS and
+# valkey cross-checks compare platform against its clients, never platform
+# against itself; `scripts/tests/test_nats_valkey_tls.py` and
+# `scripts/tests/test_valkey_server_tls.py` own what they do.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 14
+EXPECTED_VALUES_CHECKS = 15
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
@@ -1144,6 +1156,16 @@ TOGGLE_ALONE_EXTRA = {
     "edgeTLS": ("--set", "edgeTLS.issuerRef.name=edge-issuer,edgeTLS.issuerRef.kind=ClusterIssuer"),
     # B-N2: the broker's two TLS keys are required while `nats.create` is true.
     "nats": ("--set", "nats.tls.enabled=false", "--set-string", "nats.tls.clientAuth=off"),
+    # B-V2: the cache's three TLS keys are required while `valkey.create` is
+    # true, mirroring `nats.tls` above.
+    "valkey": (
+        "--set",
+        "valkey.tls.enabled=false",
+        "--set-string",
+        "valkey.tls.clientAuth=off",
+        "--set",
+        "valkey.tls.plaintext=true",
+    ),
 }
 GUARD_CRD_BACKED = re.compile(r"\$crdBacked := \(list (?P<names>[^)]*)\)")
 THE_CRD_REASON = "a CustomResourceDefinition this very release is installing is not registered"

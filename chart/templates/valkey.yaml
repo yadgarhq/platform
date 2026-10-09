@@ -16,9 +16,60 @@ enforced by the SERVER, so it holds on every CNI and every platform;
 `ingress-policies.yaml` is a second layer whose enforcement depends on the
 cluster's CNI. That ordering is deliberate and is the reason this file does not
 depend on the policy existing.
+
+THE SERVER TLS CONTRACT (B-V2, ADR-0852). `valkey.tls.enabled` adds a
+`--tls-port` listener beside (or, with `plaintext: false`, instead of) the plain
+one; `valkey.tls.clientAuth` maps to `VALKEY_TLS_AUTH_CLIENTS`, the env var
+`--tls-auth-clients` reads (`off` -> `no`, `optional` -> `optional`,
+`required` -> `yes`) — an env var rather than a literal baked into `args`, so
+it is the one break-glass an operator can move without a new release. The
+serving cert is `valkey-tls`, the Secret `values.yaml`'s `certificates.leaves`
+issues (B-L1) — the SAME Secret is read for the certificate, the key and the
+CA bundle, because cert-manager writes `ca.crt` into every leaf Secret in this
+estate (measured 2026-10-08), so there is no separate CA Secret to name.
+
+THE UNIX SOCKET AND ITS `emptyDir` RENDER AT EVERY VALUE OF `tls`, not only
+when TLS is on. The readiness and liveness probes read the socket regardless
+of posture — measured against `valkey/valkey:9.1.1`: a probe over the socket
+answers identically to one over TCP once `requirepass` is set, `NOAUTH` either
+way without `VALKEYCLI_AUTH`, `PONG` either way with it — so there is no
+posture-conditional probe shape to keep two of.
+
+THE LIVENESS PROBE IS ONE `exec`, NOT A SEPARATE `tcpSocket` ONE. A TCP-only
+liveness never answered whether TLS was serving, and once `plaintext: false`
+drops port 6379 a `tcpSocket` probe on it would fail the pod outright. The
+socket is the one listener every posture keeps.
+
+THE HASH CLAUSE, ONLY WHEN `tls.enabled`, OVER ALL THREE MOUNTED FILES —
+`tls.crt`, `tls.key` AND `ca.crt`. `valkey-server` reads its TLS material
+once, at boot (unlike the nats reloader, which re-reads on SIGHUP) — measured
+against this image: a `kubectl cp`'d replacement certificate changes nothing a
+running process can see. So the startup script hashes the mounted cert, key
+and CA bundle once, into the same `emptyDir` the socket lives in, and the
+liveness probe re-hashes them on every check: cert-manager rotating any of the
+three changes the files on disk, the hash stops matching, and the restart
+that follows picks up the new leaf (and, if it rotated, the new CA) at its
+next boot. `ca.crt` is included because a CA rotation is exactly as silent to
+a running process as a leaf rotation, and `clientAuth` other than `off`
+depends on it as much as on the leaf. This is also the risk PB-3 states for
+the first roll: a `Recreate` strategy, so the cache is briefly unavailable,
+and it is empty on the far side either way.
 */}}
 {{- if .Values.valkey.create }}
 {{- $valkey := .Values.valkey }}
+{{/*
+`$tls` DEFAULTS TO THE OFF POSTURE RATHER THAN CRASHING ON A NIL MAP. A
+`valkey.tls: null` overlay is refused below by `render-checks.yaml`'s own
+arm, but Helm's template set has no ordering guarantee this file reads
+AFTER that one, so this file does not trust the refusal to have already
+run — it degrades to the off posture instead of panicking on `$tls.enabled`
+against a nil map, and the refusal still aborts the render by itself.
+*/}}
+{{- $tls := $valkey.tls }}
+{{- if not (kindIs "map" $tls) }}
+{{- $tls = dict "enabled" false "clientAuth" "off" "plaintext" true }}
+{{- end }}
+{{- $authClients := (dict "off" "no" "optional" "optional" "required" "yes") }}
 ---
 apiVersion: v1
 kind: Service
@@ -35,9 +86,16 @@ spec:
   selector:
     app.kubernetes.io/name: {{ $valkey.name }}
   ports:
+    {{- if $tls.plaintext }}
     - name: valkey
       port: {{ $valkey.port }}
       targetPort: valkey
+    {{- end }}
+    {{- if $tls.enabled }}
+    - name: valkey-tls
+      port: 6380
+      targetPort: valkey-tls
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -66,6 +124,17 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        # THE SOCKET LIVES HERE AT EVERY POSTURE, and so does the cert-hash file
+        # the liveness probe reads when TLS is on. `emptyDir`, not a `Secret`
+        # mount, because the socket itself is not estate material.
+        - name: run-valkey
+          emptyDir: {}
+        {{- if $tls.enabled }}
+        - name: valkey-tls
+          secret:
+            secretName: valkey-tls
+        {{- end }}
       containers:
         - name: valkey
           image: {{ $valkey.image }}
@@ -89,14 +158,40 @@ spec:
           # three places it would otherwise reach somebody who is not already
           # inside the container.
           command: ["sh", "-c"]
+          # ── THE ARG LIST IS BUILT, NOT HAND-WRITTEN WITH TRAILING `\` ───────
+          # A shell line continuation with nothing following it is the one
+          # failure mode a hand-written `\`-per-line block risks the moment the
+          # last conditional arm can be absent (`tls.enabled: false` drops the
+          # whole `--tls-*` tail) — the generated script would end on a bare
+          # `\` with no next line. Building the list and `join`-ing it with the
+          # same separator sidesteps that by construction: there is always
+          # exactly one token after the last separator, present or not.
+          {{- $args := list
+              "--requirepass \"$VALKEY_PASSWORD\""
+              (printf "--maxmemory %s" $valkey.maxmemory)
+              (printf "--maxmemory-policy %s" $valkey.maxmemoryPolicy)
+              "--save \"\""
+              "--appendonly no"
+              "--unixsocket /run/valkey/valkey.sock"
+              "--unixsocketperm 700"
+              (printf "--port %v" (ternary $valkey.port 0 $tls.plaintext))
+            }}
+          {{- if $tls.enabled }}
+          {{- $args = concat $args (list
+              "--tls-port 6380"
+              "--tls-cert-file /etc/valkey/tls/tls.crt"
+              "--tls-key-file /etc/valkey/tls/tls.key"
+              "--tls-ca-cert-file /etc/valkey/tls/ca.crt"
+              "--tls-auth-clients \"$VALKEY_TLS_AUTH_CLIENTS\""
+            ) }}
+          {{- end }}
           args:
             - |
+              {{- if $tls.enabled }}
+              sha256sum /etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key /etc/valkey/tls/ca.crt > /run/valkey/tls.sha256
+              {{- end }}
               exec valkey-server \
-                --requirepass "$VALKEY_PASSWORD" \
-                --maxmemory {{ $valkey.maxmemory }} \
-                --maxmemory-policy {{ $valkey.maxmemoryPolicy }} \
-                --save "" \
-                --appendonly no
+                {{ join " \\\n                " $args }}
           env:
             # MINTED BY THE BOOTSTRAP JOB, not by a human and not by a template
             # here. A missing Secret leaves this pod in `ContainerCreating`, which
@@ -119,9 +214,30 @@ spec:
                 secretKeyRef:
                   name: {{ $valkey.passwordSecret.name }}
                   key: {{ $valkey.passwordSecret.key }}
+            {{- if $tls.enabled }}
+            # THE BREAK-GLASS: an env var, not a literal baked into `args`
+            # above, so `kubectl set env` can move `--tls-auth-clients`
+            # between `no`/`optional`/`yes` without a new release while an
+            # incident is live. `templates/render-checks.yaml` still closes
+            # `valkey.tls.clientAuth` to `off`/`optional`/`required` at
+            # render time; this is the mapped runtime value the server reads.
+            - name: VALKEY_TLS_AUTH_CLIENTS
+              # QUOTED: `no` and `yes` are YAML 1.1 booleans unquoted (the
+              # same trap `clientAuth` itself is quoted against, B-U5E
+              # convention item 1) — an unquoted `no` here renders as the
+              # boolean `false`, which env values coerce to the STRING
+              # `"false"`, a value `valkey-server` does not recognise.
+              value: {{ index $authClients $tls.clientAuth | quote }}
+            {{- end }}
           ports:
+            {{- if $tls.plaintext }}
             - name: valkey
               containerPort: {{ $valkey.port }}
+            {{- end }}
+            {{- if $tls.enabled }}
+            - name: valkey-tls
+              containerPort: 6380
+            {{- end }}
           resources:
             {{- toYaml $valkey.resources | nindent 12 }}
           securityContext:
@@ -129,13 +245,37 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: run-valkey
+              mountPath: /run/valkey
+            {{- if $tls.enabled }}
+            - name: valkey-tls
+              mountPath: /etc/valkey/tls
+              readOnly: true
+            {{- end }}
           livenessProbe:
-            # A TCP PROBE DELIBERATELY. It asks whether the port is open, which is
-            # a question `requirepass` does not change — a liveness probe that
-            # could fail on a credential would restart a healthy server because a
-            # Secret was rotated wrong.
-            tcpSocket:
-              port: valkey
+            # ONE exec PROBE OVER THE UNIX SOCKET, at every posture — see the
+            # file header for why a `tcpSocket` probe on port 6379 cannot be the
+            # one liveness check once `plaintext: false` can close that port.
+            #
+            # CREDENTIAL-INDEPENDENT, LIKE THE `tcpSocket` PROBE IT REPLACES:
+            # `ping >/dev/null` asks only whether the socket answers at all, the
+            # same question a TCP connect asked before this version — a
+            # liveness probe that could fail on a bad credential would restart
+            # a healthy server because a Secret rotated wrong (see the Service
+            # above; the readiness probe below is the one that checks the
+            # answer, deliberately, because readiness IS about whether a
+            # client can use the cache). The hash clause is appended only when
+            # `tls.enabled`; the socket check alone is the whole probe
+            # otherwise, identical in kind (not just in spirit) to the
+            # `tcpSocket` probe this version replaces.
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  valkey-cli -s /run/valkey/valkey.sock ping >/dev/null
+                  {{- if $tls.enabled }} && sha256sum -c --status /run/valkey/tls.sha256{{- end }}
             initialDelaySeconds: 5
           readinessProbe:
             # THE ANSWER IS CHECKED, NOT JUST THE EXIT CODE. Measured against this
@@ -143,9 +283,12 @@ spec:
             # `valkey-cli ping` prints `NOAUTH Authentication required.` and EXITS
             # 0. So the bare form is a probe that cannot fail on the one thing
             # this arrangement makes possible to get wrong — it would report a
-            # server nobody can talk to as Ready.
+            # server nobody can talk to as Ready. Read over the unix socket at
+            # every posture (measured identical to the TCP form once
+            # `requirepass` is set), so readiness never depends on which
+            # network listener a posture happens to keep.
             exec:
-              command: ["sh", "-c", "valkey-cli ping | grep -q PONG"]
+              command: ["sh", "-c", "valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG"]
             initialDelaySeconds: 2
             periodSeconds: 5
 {{- end }}
