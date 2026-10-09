@@ -881,14 +881,11 @@ def test_the_committed_adopter_example_still_renders():
     assert result.returncode == 0, result.stderr
 
 
-def test_the_argocd_platform_section_still_renders(tmp_path):
+def argocd_platform_section() -> dict:
     """A FROZEN COPY of `applications/yadgar.yaml`'s `platform:` block as read
-    from `yadgarhq/argocd` `origin/main` on 2026-10-07; it does not track the
-    other repository. The live gate for argocd and parent inputs is the
-    parent chart's suite plus the K-9 valuesObject sweep before each pin
-    bump.
-    """
-    body = {
+    from `yadgarhq/argocd` `origin/main` on 2026-10-07 (unchanged on 2026-10-09);
+    it does not track the other repository."""
+    return {
         "enabled": True,
         "valkey": {"create": True},
         "internalCA": {"create": True},
@@ -923,8 +920,28 @@ def test_the_argocd_platform_section_still_renders(tmp_path):
         "operators": {"create": False},
         "preflight": {"enabled": True},
     }
+
+
+def test_the_argocd_platform_section_still_renders_with_the_nats_tls_keys(tmp_path):
+    """The argocd block PLUS the two NATS TLS keys at the off posture, which PB-3
+    adds to `applications/yadgar.yaml` before argocd moves to a parent pinning
+    this version (B-N2: they are required while `nats.create` is true). The live
+    gate for argocd and parent inputs is the parent chart's suite plus the K-9
+    valuesObject sweep before each pin bump.
+    """
+    body = argocd_platform_section()
+    body["nats"]["tls"] = {"enabled": False, "clientAuth": "off"}
     result = render_with_overlay(CHART, body, tmp_path, *CERT_MANAGER_AND_GATEWAY_API)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_argocd_platform_section_as_it_stands_refuses_naming_the_nats_tls_keys(tmp_path):
+    """WHY PB-3 MUST CARRY THE KEYS: the block as argocd holds it today names none."""
+    result = render_with_overlay(
+        CHART, argocd_platform_section(), tmp_path, *CERT_MANAGER_AND_GATEWAY_API
+    )
+    assert result.returncode != 0, result.stdout[:400]
+    assert "`nats.tls.enabled` and `nats.tls.clientAuth` are absent" in result.stderr, result.stderr
 
 
 def test_an_operator_application_values_block_still_renders(tmp_path):

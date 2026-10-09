@@ -27,3 +27,14 @@
 # chart`: rc 0, 190 objects, on both helm v4.3.0 and v3.18.4.
 operators:
   create: true
+
+# THE BROKER'S TWO TLS KEYS, AT THE OFF POSTURE (B-N2). Required only while
+# `nats.create` is true, which it is not here — `nats.create` stays at the
+# chart's `false` for the mixed-release reason above — so they change nothing in
+# this render. They are stated so this file names every key an adopter must
+# write, and so the shape arm of `templates/render-checks.yaml` validates them.
+# "off" is QUOTED: a bare off is YAML false.
+nats:
+  tls:
+    enabled: false
+    clientAuth: "off"

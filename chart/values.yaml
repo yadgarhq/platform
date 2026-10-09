@@ -130,12 +130,13 @@ certificates:
       clusterLocalNames: true
       usages: [server auth, digital signature]
       renewBefore: 774h
-    # THE BROKER'S AND THE CACHE'S SERVING LEAVES (ADR-0852, B-L1). Issued now and
-    # mounted by nothing until B-N2 and B-V2 render the listeners: `nats.tls.*`
-    # and `valkey.tls.*` are declared but refuse every value that would turn TLS
-    # on (`templates/render-checks.yaml`). Renewal: the nats reloader re-reads the
-    # files on SIGHUP; valkey loads them only at boot, so B-V2's cert-hash
-    # liveness restarts it on a new leaf.
+    # THE BROKER'S AND THE CACHE'S SERVING LEAVES (ADR-0852, B-L1). `nats-tls` is
+    # mounted by the upstream nats chart once an adopter writes
+    # `nats.config.nats.tls.secretName: nats-tls` (B-N2's contract, in
+    # `templates/render-checks.yaml`); `valkey-tls` by nothing until B-V2 renders
+    # valkey's listener. Renewal: the nats reloader re-reads the files on SIGHUP;
+    # valkey loads them only at boot, so B-V2's cert-hash liveness restarts it on
+    # a new leaf.
     nats-tls:
       commonName: nats
       clusterLocalNames: true
@@ -519,6 +520,24 @@ nats:
                 allow:
                   - "yadgar.iam.credential.revoked"
                   - "yadgar.iam.user.teams-changed"
+
+  # ── TLS: TWO SOURCES, AND THE RENDER CHECK MAKES THEM AGREE (B-N2) ──────────
+  # `tls.enabled` AND `tls.clientAuth` ARE THIS CHART'S OWN KEYS, REQUIRED WITH NO
+  # DEFAULT while `create` is true (ADR-0845, ADR-0854), so none is written here.
+  # `clientAuth` is "off" or "required" — NATS has no optional mode — and is
+  # always QUOTED: a bare off is YAML false. The upstream keys that do the work sit
+  # beside them in an adopter's values: `config.nats.tls.{enabled, secretName:
+  # nats-tls}`, `config.nats.tls.merge.{verify: true, ca_file:
+  # /etc/nats-certs/nats/ca.crt}` and, for the transport step only,
+  # `config.merge.allow_non_tls: true`. `templates/render-checks.yaml` refuses
+  # every disagreement between the two.
+  #
+  # `configChecksumAnnotation` ROLLS THE BROKER ON EVERY CONFIG CHANGE, and that is
+  # what the TLS steps need: `allow_non_tls` is not hot-reloadable — nats-server
+  # rejects the whole reload — so without the roll a step that drops it would
+  # leave the old listener running. The reloader stays on for leaf renewal.
+  podTemplate:
+    configChecksumAnnotation: true
 
   container:
     env:

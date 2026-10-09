@@ -4,18 +4,18 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. TWELVE of the second kind live below — the
+release's own values and nothing else. FOURTEEN of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
 arms, the per-operator create arm, the `prometheus.forceNamespace` arm, then the
-mixed-release refusal and the type arm of its toggle list, and last the two NATS/valkey
-TLS arms — and everything that makes a capability
+mixed-release refusal and the type arm of its toggle list, then the two NATS/valkey
+TLS arms, and last the two NATS contract arms — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all twelve;
+the mixed-release pair and the count of all fourteen;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
 `scripts/tests/test_force_namespace.py` owns what the forceNamespace arm does;
-`scripts/tests/test_nats_valkey_tls.py` owns what the two TLS arms do.
+`scripts/tests/test_nats_valkey_tls.py` owns what the four TLS arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the twelve internal leaves and the edge leaf all come from
@@ -567,15 +567,17 @@ first. `scripts/tests/test_force_namespace.py` is the gate.
 {{- end }}{{/* end of the prometheus.forceNamespace arm */}}
 
 {{/*
-THE NATS AND VALKEY TLS KEYS: DECLARED BY THIS VERSION, RENDERED BY NONE (B-L1,
-THE FOLDED B-N2 / B-V2 EXPAND, plan K-8 step 1).
+THE NATS AND VALKEY TLS KEYS: THE SHAPE OF BOTH, AND VALKEY'S EXPAND (B-L1, plan
+K-8 step 1). NATS'S CONTRACT (B-N2) FOLLOWS THESE TWO ARMS.
 
 `nats.tls.enabled`, `nats.tls.clientAuth`, `valkey.tls.enabled`,
-`valkey.tls.clientAuth` and `valkey.tls.plaintext` are platform-owned. B-N2 and
-B-V2 render them and then make them required with no default (ADR-0845,
-ADR-0854). This version only DECLARES them, so a parent can state them before a
-contract pin needs them. Two arms, each refusing wherever this chart runs: no
-parent names these keys yet, so nothing a subchart `fail` could shadow exists.
+`valkey.tls.clientAuth` and `valkey.tls.plaintext` are platform-owned. B-N2 made
+the NATS pair required (below); B-V2 does the same for valkey (ADR-0845,
+ADR-0854). Until then this version only DECLARES the valkey keys, so a parent can
+state them before a contract pin needs them. Both arms refuse wherever this chart
+runs. The parent names these keys too (`yadgarhq/chart` B-U6 Part 3), but only to
+compare platform against its clients, never to validate a key's own shape — so
+nothing here shadows a parent refusal.
 
 ARM ONE, THE SHAPE. The schema closes the key set and nothing else (ADR-0847), so
 the types are checked here: each block a mapping, `enabled` and `plaintext`
@@ -585,13 +587,14 @@ convention item 1), and one of the values its server has. NATS has no optional
 client-certificate mode (`verify` is require-and-verify only; ADR-0854), so its
 set is `off | required`; valkey's is `off | optional | required`.
 
-ARM TWO, THE EXPAND REFUSAL. `enabled: true`, `plaintext: false` and any
-`clientAuth` other than "off" each describe a listener no template here renders.
-Accepting one would let a values file look encrypted while the broker and the
-cache still serve plaintext only, so each is refused with ONE sentence naming
-the contract that renders it, and that contract lifts this arm. The off posture
-— `enabled: false`, `clientAuth: "off"`, `plaintext: true` — renders exactly
-what the absent keys render.
+ARM TWO, VALKEY'S EXPAND REFUSAL. `valkey.tls.enabled: true`, `plaintext: false`
+and any `clientAuth` other than "off" each describe a listener no template here
+renders yet. Accepting one would let a values file look encrypted while the cache
+still serves plaintext only, so each is refused with ONE sentence naming B-V2,
+the contract that renders it and lifts this arm. The off posture — `enabled:
+false`, `clientAuth: "off"`, `plaintext: true` — renders exactly what the absent
+keys render. B-N2 lifted this arm for NATS: the NATS branch below skips the
+`enabled` arm and adds nothing to `$tlsUnrendered`.
 
 THE LOOP VARIABLE IS NOT `$operator` OR `$toggle`, so the mixed-release guard's
 two lists above stay the first `range` of each name in this file, which
@@ -615,6 +618,7 @@ two lists above stay the first `range` of each name in this file, which
 {{- $kind := kindOf $value }}
 {{- if eq $kind "invalid" }}{{ $kind = "null" }}{{ end }}
 {{- $tlsShape = append $tlsShape (printf "`%s.tls.%s` is a %s rather than true or false: write it unquoted" $tlsServer $switch $kind) }}
+{{- else if eq $tlsServer "nats" }}
 {{- else if and (eq $switch "enabled") $value }}
 {{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.enabled: true`" $tlsServer) }}
 {{- else if and (eq $switch "plaintext") (not $value) }}
@@ -629,8 +633,6 @@ two lists above stay the first `range` of each name in this file, which
 {{- else if eq $tlsServer "nats" }}
 {{- if not (has $mode (list "off" "required")) }}
 {{- $tlsShape = append $tlsShape (printf "`nats.tls.clientAuth` must be `off` or `required`, and it is %q. NATS has no optional client-certificate mode: its `verify` requires and verifies (ADR-0854)" $mode) }}
-{{- else if ne $mode "off" }}
-{{- $tlsUnrendered = append $tlsUnrendered (printf "`nats.tls.clientAuth: %q`" $mode) }}
 {{- end }}
 {{- else if not (has $mode (list "off" "optional" "required")) }}
 {{- $tlsShape = append $tlsShape (printf "`%s.tls.clientAuth` must be `off`, `optional` or `required`, and it is %q" $tlsServer $mode) }}
@@ -646,11 +648,123 @@ two lists above stay the first `range` of each name in this file, which
 {{- end }}
 {{- if $tlsUnrendered }}
 {{- fail (printf (join "" (list
-      "platform: %s %s TLS that no template in this chart renders: this chart version declares the key; B-N2 / B-V2 renders it. "
-      "Until that release, a values file stating it would look encrypted while the broker and the cache still serve plaintext only. "
-      "Write the off posture — `enabled: false`, `clientAuth: \"off\"` and, for valkey, `plaintext: true` — or pin the release that renders it."))
+      "platform: %s %s TLS that no template in this chart renders: this chart version declares the key; B-V2 renders it. "
+      "Until that release, a values file stating it would look encrypted while the cache still serves plaintext only. "
+      "Write the off posture — `enabled: false`, `clientAuth: \"off\"` and `plaintext: true` — or pin the release that renders it."))
       (join ", " $tlsUnrendered) (ternary "asks for" "ask for" (eq (len $tlsUnrendered) 1))) }}
 {{- end }}
+
+{{/*
+NATS'S SERVER TLS CONTRACT (B-N2, ledger 925, ADR-0852): THE PLATFORM KEYS ARE
+REQUIRED, AND THEY MUST AGREE WITH THE UPSTREAM KEYS THAT DO THE WORK.
+
+TWO SOURCES, ON PURPOSE. The upstream nats chart (2.14.6) renders the listener
+from `nats.config.nats.tls.{enabled, secretName}` (mounted at
+`nats.config.nats.tls.dir`, default `/etc/nats-certs/nats`), client verification
+from `nats.config.nats.tls.merge.{verify, ca_file}`, and the transport step's
+mixed listener from the top-level `nats.config.merge.allow_non_tls`. A parent
+template cannot write a subchart's values, and the parent always sees the
+subchart's own default `false` for `nats.config.nats.tls.enabled` — measured:
+`helm template --set nats.create=true` reads it as a bool `false` with no
+override. So ADR-0845's "absent refuses" can live only on a platform-owned key:
+`nats.tls.enabled` and `nats.tls.clientAuth` ("off" | "required"; NATS has no
+optional mode, ADR-0854). The adopter writes both sources; this check makes them
+say the same thing.
+
+BOTH ARMS RUN ONLY WHILE `nats.create` IS TRUE. With the broker out — the
+operator Applications pin this chart with `nats.create` false — nothing reads
+these keys and nothing is required. The shape arm above still validates any key
+that is present.
+
+ARM ONE, ABSENCE. Either platform key absent refuses, naming each, with the off
+posture to write.
+
+ARM TWO, AGREEMENT. Every disagreement is collected and refused in ONE sentence:
+  - `nats.tls.enabled` equals the TRUTHINESS of `nats.config.nats.tls.enabled`,
+    because the upstream template reads it with `if .enabled`;
+  - TLS on needs `secretName: nats-tls`, the serving leaf this chart issues;
+  - `clientAuth: "required"` needs TLS on, `merge.verify` a bool `true`, and
+    `merge.ca_file` exactly `<dir>/ca.crt` — the CA cert-manager writes beside
+    the leaf, and never the image's public bundle. The reloader watches that
+    file (`nats.reloaderConfig` matches every `ca_file`), so CA renewal reloads;
+  - `clientAuth: "off"` with `verify` set is a disagreement the other way;
+  - `clientAuth: "required"` with `allow_non_tls` true refuses: a plaintext
+    client never reaches the handshake, so `verify` never sees it;
+  - `nats.tlsCA.enabled` must stay false: it writes a second `ca_file` from
+    another source;
+  - while TLS is on, `nats.config.patch` and `nats.config.nats.tls.patch` must
+    be empty: a JSON patch runs after `merge` (`nats.loadMergePatch`) and can
+    rewrite any of the above after this check has read it.
+
+`nats.podTemplate.configChecksumAnnotation` is on in `values.yaml`, so every
+change to these keys rolls the broker: `allow_non_tls` is not hot-reloadable
+(nats-server's reload rejects the whole change), and a roll is the only way it
+takes effect. The reloader stays on for leaf renewal.
+*/}}
+{{- $natsCreate := and (kindIs "map" .Values.nats) (kindIs "bool" (index .Values.nats "create")) (index .Values.nats "create") }}
+{{- if $natsCreate }}
+{{- $natsTls := index .Values.nats "tls" | default dict }}
+{{- $natsAbsent := list }}
+{{- range $key := (list "enabled" "clientAuth") }}
+{{- if not (hasKey $natsTls $key) }}
+{{- $natsAbsent = append $natsAbsent (printf "`nats.tls.%s`" $key) }}
+{{- end }}
+{{- end }}
+{{- if $natsAbsent }}
+{{- fail (printf (join "" (list
+      "platform: nats.create is true and %s %s absent. "
+      "The broker's TLS switch and its client-certificate mode have no default (ADR-0845, ADR-0854): "
+      "the upstream `nats.config.nats.tls.enabled` always reads as the subchart's own false here, so only these keys can say what you run. "
+      "Write `nats.tls.enabled: false` and `nats.tls.clientAuth: \"off\"` for a plaintext broker, or the TLS posture you run."))
+      (join " and " $natsAbsent) (ternary "is" "are" (eq (len $natsAbsent) 1))) }}
+{{- end }}
+{{- $natsEnabled := index $natsTls "enabled" }}
+{{- $natsMode := index $natsTls "clientAuth" }}
+{{- $up := dig "config" "nats" "tls" dict .Values.nats }}
+{{- $upEnabled := not (empty (index $up "enabled")) }}
+{{- $upMerge := index $up "merge" | default dict }}
+{{- $verify := index $upMerge "verify" }}
+{{- $caFile := index $upMerge "ca_file" | default "" }}
+{{- $expectedCaFile := printf "%s/ca.crt" (trimSuffix "/" ((index $up "dir") | default "/etc/nats-certs/nats")) }}
+{{- $allowNonTls := not (empty (dig "config" "merge" "allow_non_tls" false .Values.nats)) }}
+{{- $natsDisagree := list }}
+{{- if ne $natsEnabled $upEnabled }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.tls.enabled` is %t and `nats.config.nats.tls.enabled` is %t: the platform switch and the upstream key that renders the listener must agree" $natsEnabled $upEnabled) }}
+{{- end }}
+{{- if and $natsEnabled (ne (toString (index $up "secretName" | default "")) "nats-tls") }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.secretName` is %q: it must be \"nats-tls\", the serving leaf this chart issues" (toString (index $up "secretName" | default ""))) }}
+{{- end }}
+{{- if eq $natsMode "required" }}
+{{- if not $natsEnabled }}
+{{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"required\" and `nats.tls.enabled` is false: client verification needs the TLS listener (ADR-0854)" }}
+{{- end }}
+{{- if not (and (kindIs "bool" $verify) $verify) }}
+{{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"required\" and `nats.config.nats.tls.merge.verify` is not true: write `verify: true`, unquoted" }}
+{{- end }}
+{{- if ne (toString $caFile) $expectedCaFile }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.merge.ca_file` is %q rather than %q: the broker verifies clients against the internal CA cert-manager writes beside its leaf, never a public bundle" (toString $caFile) $expectedCaFile) }}
+{{- end }}
+{{- if $allowNonTls }}
+{{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"required\" and `nats.config.merge.allow_non_tls` is true: a plaintext client never reaches the TLS handshake, so `verify` cannot refuse it" }}
+{{- end }}
+{{- else if not (empty $verify) }}
+{{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"off\" and `nats.config.nats.tls.merge.verify` is true: the platform mode and the upstream key must agree" }}
+{{- end }}
+{{- if not (empty (dig "tlsCA" "enabled" false .Values.nats)) }}
+{{- $natsDisagree = append $natsDisagree "`nats.tlsCA.enabled` is true: it writes a second `ca_file` from another source; this chart reads the CA through `nats.config.nats.tls.merge.ca_file`" }}
+{{- end }}
+{{- if $natsEnabled }}
+{{- if not (empty (dig "config" "patch" list .Values.nats)) }}
+{{- $natsDisagree = append $natsDisagree "`nats.config.patch` is not empty while `nats.tls.enabled` is true: a JSON patch runs after `merge` and can rewrite the TLS settings this check read" }}
+{{- end }}
+{{- if not (empty (index $up "patch")) }}
+{{- $natsDisagree = append $natsDisagree "`nats.config.nats.tls.patch` is not empty while `nats.tls.enabled` is true: a JSON patch runs after `merge` and can rewrite the TLS settings this check read" }}
+{{- end }}
+{{- end }}
+{{- if $natsDisagree }}
+{{- fail (printf "platform: the NATS TLS keys disagree: %s." (join "; " $natsDisagree)) }}
+{{- end }}
+{{- end }}{{/* end of the NATS contract arms */}}
 
 {{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}
 {{- include "platform.require-api" (dict
