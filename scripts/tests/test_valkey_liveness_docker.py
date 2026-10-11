@@ -18,9 +18,9 @@ the server is launched inside it in the background; "stopped" is `valkey-cli
 liveness probe guards against in the cluster: valkey not answering, with the
 Pod (sleep's analogue, kubelet) still up to report an unhealthy probe.
 
-WHY THE PASSWORD IS SET EXPLICITLY HERE. `templates/valkey.yaml` reads
-`VALKEY_PASSWORD` and `VALKEYCLI_AUTH` from a Kubernetes Secret this test does
-not have; a bare docker run gets no credential unless one is given. The
+WHY THE PASSWORD IS SET EXPLICITLY HERE. `templates/valkey.yaml` reads the
+password from a mounted Kubernetes Secret file (ledger 1437) this test does
+not have, so `start_server` seeds that file at the chart's path; a bare docker run gets no credential unless one is given. The
 readiness probe reads the answer (`NOAUTH` without a credential, `PONG` with
 one — measured 2026-10-09 against this same image), so an unauthenticated run
 would prove THAT probe passes for the wrong reason; the liveness probe is
@@ -145,7 +145,14 @@ class LiveContainer:
 
 def start_server(container: LiveContainer, *, tls_enabled: bool) -> None:
     container.exec("mkdir", "-p", "/run/valkey", check=True)
-    hash_clause = ""
+    # LEDGER 1437: the password file is mounted, and hashed, at EVERY posture,
+    # and the rendered readiness probe reads it. Seeded here at the chart's path;
+    # `test_valkey_password_rotation.py` runs the rendered startup script itself.
+    seeded = container.exec(
+        "sh", "-c", f"mkdir -p /etc/valkey/auth && printf %s {PASSWORD} > /etc/valkey/auth/password"
+    )
+    assert seeded.returncode == 0, seeded.stderr
+    hash_clause = "sha256sum /etc/valkey/auth/password > /run/valkey/watched.sha256 && "
     if tls_enabled:
         # No real certs in this isolated check: the hash file is seeded over
         # a stand-in file rather than real TLS material, just to exercise
@@ -157,7 +164,7 @@ def start_server(container: LiveContainer, *, tls_enabled: bool) -> None:
         # verification notes), not duplicated here.
         hash_clause = (
             "touch /run/valkey/tls-material "
-            "&& sha256sum /run/valkey/tls-material > /run/valkey/tls.sha256 && "
+            "&& sha256sum /etc/valkey/auth/password /run/valkey/tls-material > /run/valkey/watched.sha256 && "
         )
     start = (
         f"{hash_clause}"

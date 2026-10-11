@@ -4,8 +4,9 @@ WHAT THIS FILE OWNS. `test_nats_valkey_tls.py` keeps the SHAPE checks and
 valkey's own absence/posture guards (mirroring NATS's, B-N2); this file owns
 what `valkey.tls.*` actually renders now that `templates/valkey.yaml` and
 `templates/ingress-policies.yaml` read it: the unix socket and its `emptyDir`
-at every posture, the socket-based readiness and liveness probes, the hash
-clause on liveness only when `tls.enabled`, the `--tls-*` server arguments and
+at every posture, the socket-based readiness and liveness probes, the TLS
+files in the liveness hash only when `tls.enabled` (the password file is in it
+at every posture, ledger 1437), the `--tls-*` server arguments and
 the Secret mount only when `tls.enabled`, and the Deployment/Service/
 NetworkPolicy port list following `plaintext` and `enabled`.
 
@@ -95,6 +96,7 @@ def test_readiness_always_reads_the_socket_and_checks_the_answer(tmp_path, tls):
     assert probe["exec"]["command"] == [
         "sh",
         "-c",
+        'VALKEYCLI_AUTH="$(cat /etc/valkey/auth/password)" '
         "valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG",
     ]
 
@@ -117,24 +119,32 @@ def test_liveness_never_checks_the_answer_only_that_the_socket_answers(tmp_path,
 # ── THE LIVENESS HASH CLAUSE, ONLY WHEN tls.enabled, OVER ALL THREE FILES ───
 
 
-def test_liveness_has_no_hash_clause_when_tls_is_off(tmp_path):
+def test_liveness_hashes_the_password_but_no_tls_material_when_tls_is_off(tmp_path):
+    # Ledger 1437: the hash clause renders at every posture, because the
+    # password file is mounted at every posture; only the TLS files are
+    # posture-conditional. `test_valkey_password_rotation.py` owns the rest.
     found = render_valkey(tmp_path, OFF)
     container = found[("Deployment", "valkey")]["spec"]["template"]["spec"]["containers"][0]
     command = container["livenessProbe"]["exec"]["command"][2]
-    assert command == "valkey-cli -s /run/valkey/valkey.sock ping >/dev/null"
-    assert "sha256sum" not in command
+    assert command == (
+        "valkey-cli -s /run/valkey/valkey.sock ping >/dev/null && sha256sum -c --status /run/valkey/watched.sha256"
+    )
+    args = container["args"][0]
+    assert "sha256sum /etc/valkey/auth/password > /run/valkey/watched.sha256" in args, args
+    assert "/etc/valkey/tls/" not in args, args
 
 
 def test_liveness_has_the_hash_clause_over_cert_key_and_ca_when_tls_is_enabled(tmp_path):
     found = render_valkey(tmp_path, DUAL_STACK)
     container = found[("Deployment", "valkey")]["spec"]["template"]["spec"]["containers"][0]
     command = container["livenessProbe"]["exec"]["command"][2]
-    assert "sha256sum -c --status /run/valkey/tls.sha256" in command
+    assert "sha256sum -c --status /run/valkey/watched.sha256" in command
     assert command.startswith("valkey-cli -s /run/valkey/valkey.sock ping >/dev/null && ")
     args = container["args"][0]
     assert (
-        "sha256sum /etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key /etc/valkey/tls/ca.crt "
-        "> /run/valkey/tls.sha256"
+        "sha256sum /etc/valkey/auth/password "
+        "/etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key /etc/valkey/tls/ca.crt "
+        "> /run/valkey/watched.sha256"
     ) in args, args
 
 
@@ -192,7 +202,7 @@ def test_client_auth_maps_to_the_tls_auth_clients_env_var(tmp_path, client_auth,
 def test_tls_off_has_no_auth_clients_env_var(tmp_path):
     found = render_valkey(tmp_path, OFF)
     container = found[("Deployment", "valkey")]["spec"]["template"]["spec"]["containers"][0]
-    names = {e["name"] for e in container["env"]}
+    names = {e["name"] for e in container.get("env") or []}
     assert "VALKEY_TLS_AUTH_CLIENTS" not in names, names
 
 

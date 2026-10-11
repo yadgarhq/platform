@@ -414,9 +414,13 @@ valkey:
   # `test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints` is the
   # gate over it.
   #
-  # `VALKEYCLI_AUTH` IS THE PROBE'S COPY, under the name `valkey-cli` itself reads.
-  # Read off `valkey-cli --help` in this exact image rather than assumed from
-  # Redis: the fork renamed it, and `REDISCLI_AUTH` is silently ignored.
+  # THE SECRET IS MOUNTED AS A FILE, NEVER READ INTO `env` (ledger 1437): the
+  # startup script hashes it and the liveness probe re-checks the hash, so a
+  # rotation restarts valkey onto the new value, as it restarts `gateway`. The
+  # readiness probe reads the same file into `VALKEYCLI_AUTH`, the name
+  # `valkey-cli` itself reads — read off `valkey-cli --help` in this exact image
+  # rather than assumed from Redis: the fork renamed it, and `REDISCLI_AUTH` is
+  # silently ignored.
   passwordSecret:
     name: valkey-password
     key: password
