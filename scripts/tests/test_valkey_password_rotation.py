@@ -137,7 +137,8 @@ def test_readiness_authenticates_with_the_file_not_an_env_copy(tmp_path, tls):
     _, container = pod(tmp_path, tls)
     readiness = container["readinessProbe"]["exec"]["command"][2]
     assert readiness == (
-        f'VALKEYCLI_AUTH="$(cat {PASSWORD_FILE})" '
+        f'VALKEYCLI_AUTH="$(cat {PASSWORD_FILE})"; '
+        'VALKEYCLI_AUTH="${VALKEYCLI_AUTH%"$(printf \'\\r\')"}" '
         "valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG"
     ), readiness
 
@@ -216,6 +217,29 @@ def test_the_rendered_script_heals_a_rotation_against_a_real_server(tmp_path):
         assert probe(container, liveness) == 0, "liveness failed after the restart onto the new file"
         assert auth_answer(container, new) == "PONG"
         assert auth_answer(container, old) != "PONG", "the old password still authenticates after the heal"
+
+
+def test_a_crlf_password_file_is_trimmed_alike_by_startup_and_readiness(tmp_path):
+    """REVIEW OF #42: the startup script strips one trailing `\\r` and
+    `gateway` trims trailing `\\n`/`\\r`, so a CRLF file (a hand-made restore)
+    must read the same in the readiness probe — else the server holds the
+    trimmed password, readiness presents the untrimmed one, and the pod is
+    NotReady for ever."""
+    script, readiness, liveness = rendered(tmp_path)
+    with LiveContainer() as container:
+        container.exec("mkdir", "-p", "/run/valkey")
+        written = container.exec(
+            "sh", "-c", f"mkdir -p {PASSWORD_DIR} && printf 'crlf-password\\r\\n' > {PASSWORD_FILE}"
+        )
+        assert written.returncode == 0, written.stderr
+        launch(container, script)
+        for _ in range(40):
+            if auth_answer(container, "crlf-password") == "PONG":
+                break
+            time.sleep(0.25)
+        assert auth_answer(container, "crlf-password") == "PONG", "the server did not take the trimmed password"
+        assert probe(container, readiness) == 0, "readiness fails on a CRLF password file the server accepted"
+        assert probe(container, liveness) == 0
 
 
 @pytest.mark.parametrize("contents", ["empty", "missing"])

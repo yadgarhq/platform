@@ -96,7 +96,8 @@ def test_readiness_always_reads_the_socket_and_checks_the_answer(tmp_path, tls):
     assert probe["exec"]["command"] == [
         "sh",
         "-c",
-        'VALKEYCLI_AUTH="$(cat /etc/valkey/auth/password)" '
+        'VALKEYCLI_AUTH="$(cat /etc/valkey/auth/password)"; '
+        'VALKEYCLI_AUTH="${VALKEYCLI_AUTH%"$(printf \'\\r\')"}" '
         "valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG",
     ]
 

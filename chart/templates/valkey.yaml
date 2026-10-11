@@ -189,10 +189,12 @@ spec:
           # trimmed below for the same reason.
           #
           # THE RESIDUAL, stated rather than left to be found: the password is
-          # visible in `/proc/1/cmdline` inside this container. It is not in this
-          # chart, not in `kubectl describe pod`, and not in git — which are the
-          # three places it would otherwise reach somebody who is not already
-          # inside the container.
+          # passed on `valkey-server`'s command line, so it exists in the
+          # process's initial argv. valkey 9.1.1 rewrites its proctitle (measured:
+          # `/proc/1/cmdline` reads `valkey-server unixsocket:/run/valkey/valkey.sock`),
+          # so a casual `ps` does not show it; anyone inside this container can
+          # read the mounted file anyway. It is not in this chart, not in
+          # `kubectl describe pod`, and not in git.
           command: ["sh", "-c"]
           # ── THE ARG LIST IS BUILT, NOT HAND-WRITTEN WITH TRAILING `\` ───────
           # A shell line continuation with nothing following it is the one
@@ -322,9 +324,13 @@ spec:
             # `exec.command` gets no `$(VAR)` expansion, and an env copy would be
             # the stale value ledger 1437 removed. Between a rotation landing and
             # the liveness restart this reports NotReady, which is true: a client
-            # holding the new password cannot use this server yet.
+            # holding the new password cannot use this server yet. The value is
+            # trimmed EXACTLY as the startup script trims it (trailing newlines
+            # by `$(cat)`, then one `\r`): a CRLF file trimmed on one side only
+            # leaves a server that accepts its password and a probe that never
+            # presents it, NotReady for ever.
             exec:
-              command: ["sh", "-c", "VALKEYCLI_AUTH=\"$(cat /etc/valkey/auth/password)\" valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG"]
+              command: ["sh", "-c", "VALKEYCLI_AUTH=\"$(cat /etc/valkey/auth/password)\"; VALKEYCLI_AUTH=\"${VALKEYCLI_AUTH%\"$(printf '\\r')\"}\" valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG"]
             initialDelaySeconds: 2
             periodSeconds: 5
 {{- end }}
