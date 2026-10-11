@@ -57,6 +57,14 @@ Set `bootstrap.iamKeys.create: true` and the Job mints `iam-keys` as a fourth `c
 
 **Rotation is not provided.** Deleting a Secret and re-running the Job mints a _different_ value, which is destructive for anything already encrypted under the old one.
 
+**If you rotate `nats-auth` or `nats-auth-gateway` anyway, the broker needs a restart you do yourself (ledger 1425).** `iam` and `gateway` pick up a new password because each of their own charts rolls its Deployment on that Secret's checksum; this chart's broker cannot the same way, because `nats-auth`'s value never reaches a Helm-rendered object — there is no rendered Secret to checksum. The password instead reaches the broker as an environment variable the container reads once at process start; `nats.podTemplate.configChecksumAnnotation` (`chart/values.yaml`) rolls the broker on a _config_ change, but the ConfigMap it hashes carries only the literal text `$NATS_PASSWORD`, which does not change when the Secret does. A reload would not help either: SIGHUP re-expands that variable against the same already-fixed environment. After the new Secret exists, restart the broker yourself:
+
+```sh
+kubectl -n yadgar delete pod nats-0
+```
+
+**Use `delete pod`, not `kubectl rollout restart statefulset/nats`.** This organisation's Argo Application sets `syncPolicy.automated.selfHeal: true` (`yadgarhq/argocd`'s `applications/yadgar.yaml`), and `rollout restart` writes a `restartedAt` annotation the committed pod template does not carry — Argo reads that as drift and reverts it, which restarts the broker a second time, unplanned. Deleting the Pod directly leaves the StatefulSet's own spec untouched, so Argo sees nothing to revert. The broker is unreachable for the few seconds the Pod takes to reschedule; `iam` and `gateway` already tolerate that outage (ADR-0893: a 5-second redial on a dropped connection). They tolerate the window before it too — each already rolled onto the new password and was redialling every 60 seconds on the `AuthorizationViolation` the broker's old password caused, so the first redial after this restart succeeds without a client restart of its own.
+
 ## The ladder, which is the reason these objects live together
 
 `chart/values.yaml` carries the twelve internal leaves as a **map keyed by name**, each entry with its own `renewBefore`. Those values are **one invariant, not twelve settings**: they are distinct and six hours apart, so at most one service restarts per renewal instant. The edge leaf's 720h belongs to the same ladder and is held out of the map, because a different toggle renders it.

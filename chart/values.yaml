@@ -560,6 +560,19 @@ nats:
   # leave the old listener running. The reloader stays on for leaf renewal.
   # `templates/render-checks.yaml` refuses anything but `true` here while
   # `nats.tls.enabled` is true.
+  #
+  # IT DOES NOT COVER A `nats-auth` / `nats-auth-gateway` ROTATION (ledger 1425).
+  # The checksum is `sha256sum` over the RENDERED ConfigMap, and that ConfigMap
+  # carries the literal text `$NATS_PASSWORD` — the `<< >>` escape two paragraphs
+  # up is what keeps it unquoted so nats-server treats it as a variable — never
+  # the password's bytes. Rotating the Secret changes no character of that
+  # rendered text, so the checksum is identical before and after and the
+  # annotation does not move. Even a reload that DID fire would not help: the
+  # value is this container's OWN ENVIRONMENT, read once at process start from
+  # `secretKeyRef`, and a SIGHUP re-expands `$NATS_PASSWORD` against that SAME
+  # unchanged environment. Only restarting the pod picks up a new value — see
+  # README.md, "The bootstrap Jobs, and the Secrets nothing owns", for the
+  # command and why it is `delete pod` rather than `rollout restart`.
   podTemplate:
     configChecksumAnnotation: true
 
