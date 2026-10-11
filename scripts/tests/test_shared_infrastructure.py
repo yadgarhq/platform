@@ -824,6 +824,30 @@ def test_the_valkey_service_selects_the_pods_the_deployment_creates():
     assert deployment["spec"]["selector"]["matchLabels"].items() <= labels.items()
 
 
+def valkey_password_secrets(deployment: dict) -> set[str]:
+    """Every Secret the valkey container reads, through `env` OR a mounted volume,
+    minus `valkey-tls` (cert-manager's, not the bootstrap Job's). PURE.
+
+    BOTH PATHS, because ledger 1437 moved the password from `secretKeyRef` to a
+    mounted file: a gate that read `env` alone would find nothing and either crash
+    or — worse, once `env` exists for another reason — call an open cache fine.
+    """
+    spec = deployment["spec"]["template"]["spec"]
+    (container,) = spec["containers"]
+    mounted = {m["name"] for m in container.get("volumeMounts") or []}
+    from_volumes = {
+        volume["secret"]["secretName"]
+        for volume in spec.get("volumes") or []
+        if "secret" in volume and volume["name"] in mounted
+    }
+    from_env = {
+        variable["valueFrom"]["secretKeyRef"]["name"]
+        for variable in container.get("env") or []
+        if "secretKeyRef" in (variable.get("valueFrom") or {})
+    }
+    return (from_volumes | from_env) - {"valkey-tls"}
+
+
 def test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints():
     """A REFERENCE ACROSS TWO TOGGLES AGAIN, and this one loses the cache when broken.
 
@@ -845,13 +869,7 @@ def test_the_valkey_deployment_mounts_the_secret_the_bootstrap_job_mints():
     """
     rendered = adopter_render()
     deployment = by_name(rendered, "Deployment", chart_values()["valkey"]["name"])
-    (container,) = deployment["spec"]["template"]["spec"]["containers"]
-
-    referenced = {
-        variable["valueFrom"]["secretKeyRef"]["name"]
-        for variable in container["env"]
-        if "secretKeyRef" in variable.get("valueFrom", {})
-    }
+    referenced = valkey_password_secrets(deployment)
     minted = minted_secret_names(rendered)
     assert referenced, "the valkey container reads no Secret, so the cache is open"
     assert referenced <= minted, (
@@ -878,12 +896,7 @@ def test_a_valkey_secret_nothing_mints_reddens_the_gate(tmp_path):
     )
     rendered = adopter_render(CHART, "-f", str(values))
     deployment = by_name(rendered, "Deployment", chart_values()["valkey"]["name"])
-    (container,) = deployment["spec"]["template"]["spec"]["containers"]
-    referenced = {
-        variable["valueFrom"]["secretKeyRef"]["name"]
-        for variable in container["env"]
-        if "secretKeyRef" in variable.get("valueFrom", {})
-    }
+    referenced = valkey_password_secrets(deployment)
     assert referenced == {"nobody-mints-this"}, referenced
     minted = minted_secret_names(rendered)
     assert minted, "the render mints no Secret at all, so this red case checks nothing"

@@ -54,6 +54,21 @@ a running process as a leaf rotation, and `clientAuth` other than `off`
 depends on it as much as on the leaf. This is also the risk PB-3 states for
 the first roll: a `Recreate` strategy, so the cache is briefly unavailable,
 and it is empty on the far side either way.
+
+THE PASSWORD IS IN THE SAME HASH, AT EVERY POSTURE (ledger 1437). `gateway`
+reads `valkey-password` as a mounted file and exits when it changes (ADR-0523),
+and it maps WRONGPASS to a fail-closed 503 rather than its local floor — so a
+server still holding the OLD password after a rotation turned every
+rate-limited request into a 503 until somebody deleted this pod. This
+container used to read the password from its ENVIRONMENT, fixed at process
+start. It now reads it from the Secret mounted as a DIRECTORY (never `subPath`,
+which kubelet never refreshes), the startup script hashes that file beside the
+TLS material, and the liveness probe's hash clause renders at every posture: a
+rotation restarts valkey onto the new value, as it restarts `gateway`. The heal
+is bounded by kubelet's Secret-volume refresh on each node plus three failed
+liveness checks; neither side alters `gateway`'s fail-closed answer, which
+stays correct for a password that is genuinely wrong. Each such restart empties
+the cache, token buckets and epoch counters included — the same as any restart.
 */}}
 {{- if .Values.valkey.create }}
 {{- $valkey := .Values.valkey }}
@@ -130,6 +145,16 @@ spec:
         # mount, because the socket itself is not estate material.
         - name: run-valkey
           emptyDir: {}
+        # THE PASSWORD, AS A DIRECTORY MOUNT SO KUBELET REFRESHES IT. `items`
+        # names the one key, and the mount is NOT optional: a Secret without
+        # that key leaves the pod in `ContainerCreating`, the same fail-closed
+        # answer the `secretKeyRef` this replaces gave.
+        - name: valkey-password
+          secret:
+            secretName: {{ $valkey.passwordSecret.name }}
+            items:
+              - key: {{ $valkey.passwordSecret.key }}
+                path: password
         {{- if $tls.enabled }}
         - name: valkey-tls
           secret:
@@ -152,11 +177,24 @@ spec:
           # Without it the shell is PID 1, the signal never reaches the server,
           # and every rollout waits out the whole termination grace period.
           #
+          # THE FILE, NOT THE ENVIRONMENT (ledger 1437). The script hashes the
+          # password file FIRST and reads it SECOND: a swap between the two then
+          # stores the old hash beside the new password, which costs one spare
+          # restart; the other order would store the new hash beside the old
+          # password and never restart again. `set -eu` and the empty check
+          # refuse to start rather than run `--requirepass ""`, which valkey
+          # reads as NO password. `$(cat ...)` drops trailing newlines, matching
+          # `gateway`, which trims trailing `\n`/`\r` from the same file
+          # (`gateway/src/boot/config.rs`); the one `\r` a CRLF file leaves is
+          # trimmed below for the same reason.
+          #
           # THE RESIDUAL, stated rather than left to be found: the password is
-          # visible in `/proc/1/cmdline` inside this container. It is not in this
-          # chart, not in `kubectl describe pod`, and not in git — which are the
-          # three places it would otherwise reach somebody who is not already
-          # inside the container.
+          # passed on `valkey-server`'s command line, so it exists in the
+          # process's initial argv. valkey 9.1.1 rewrites its proctitle (measured:
+          # `/proc/1/cmdline` reads `valkey-server unixsocket:/run/valkey/valkey.sock`),
+          # so a casual `ps` does not show it; anyone inside this container can
+          # read the mounted file anyway. It is not in this chart, not in
+          # `kubectl describe pod`, and not in git.
           command: ["sh", "-c"]
           # ── THE ARG LIST IS BUILT, NOT HAND-WRITTEN WITH TRAILING `\` ───────
           # A shell line continuation with nothing following it is the one
@@ -187,34 +225,21 @@ spec:
           {{- end }}
           args:
             - |
-              {{- if $tls.enabled }}
-              sha256sum /etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key /etc/valkey/tls/ca.crt > /run/valkey/tls.sha256
-              {{- end }}
+              set -eu
+              sha256sum /etc/valkey/auth/password
+              {{- if $tls.enabled }} /etc/valkey/tls/tls.crt /etc/valkey/tls/tls.key /etc/valkey/tls/ca.crt{{- end }} > /run/valkey/watched.sha256
+              VALKEY_PASSWORD="$(cat /etc/valkey/auth/password)"
+              VALKEY_PASSWORD="${VALKEY_PASSWORD%"$(printf '\r')"}"
+              [ -n "$VALKEY_PASSWORD" ] || { echo "valkey: /etc/valkey/auth/password is empty; refusing to start without requirepass" >&2; exit 1; }
               exec valkey-server \
                 {{ join " \\\n                " $args }}
+          {{- if $tls.enabled }}
+          # NO PASSWORD IN `env` (ledger 1437): an env copy is fixed at process
+          # start and would outlive a rotation; the mounted file above is the
+          # one source. The Secret is still MINTED BY THE BOOTSTRAP JOB — a
+          # missing one leaves this pod in `ContainerCreating`, which is why the
+          # Job is a `pre-install` hook that fails the install instead.
           env:
-            # MINTED BY THE BOOTSTRAP JOB, not by a human and not by a template
-            # here. A missing Secret leaves this pod in `ContainerCreating`, which
-            # is why the Job is a `pre-install` hook that fails the install
-            # instead.
-            - name: VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $valkey.passwordSecret.name }}
-                  key: {{ $valkey.passwordSecret.key }}
-            # THE PROBE'S COPY, under the name `valkey-cli` itself reads. A
-            # probe's `exec.command` is NOT subject to Kubernetes' `$(VAR)`
-            # expansion — that applies to `command` and `args` only — so the
-            # credential reaches the probe either through the environment or on a
-            # command line that runs every few seconds. This is the better of the
-            # two. `VALKEYCLI_AUTH` and NOT `REDISCLI_AUTH`: the fork renamed it
-            # and the Redis name is silently ignored.
-            - name: VALKEYCLI_AUTH
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $valkey.passwordSecret.name }}
-                  key: {{ $valkey.passwordSecret.key }}
-            {{- if $tls.enabled }}
             # THE BREAK-GLASS: an env var, not a literal baked into `args`
             # above, so `kubectl set env` can move `--tls-auth-clients`
             # between `no`/`optional`/`yes` without a new release while an
@@ -248,6 +273,9 @@ spec:
           volumeMounts:
             - name: run-valkey
               mountPath: /run/valkey
+            - name: valkey-password
+              mountPath: /etc/valkey/auth
+              readOnly: true
             {{- if $tls.enabled }}
             - name: valkey-tls
               mountPath: /etc/valkey/tls
@@ -265,17 +293,19 @@ spec:
             # a healthy server because a Secret rotated wrong (see the Service
             # above; the readiness probe below is the one that checks the
             # answer, deliberately, because readiness IS about whether a
-            # client can use the cache). The hash clause is appended only when
-            # `tls.enabled`; the socket check alone is the whole probe
-            # otherwise, identical in kind (not just in spirit) to the
-            # `tcpSocket` probe this version replaces.
+            # client can use the cache).
+            #
+            # THE HASH CLAUSE RENDERS AT EVERY POSTURE (ledger 1437). It still
+            # never authenticates: it compares files on disk to the hash the
+            # startup script took, so it fails on a ROTATION — password, and
+            # with TLS on the leaf and CA too — and on nothing a client does. A
+            # rotation restarting valkey is the point: the new process reads the
+            # new password, as `gateway` does on the same change (ADR-0523).
             exec:
               command:
                 - sh
                 - -c
-                - >-
-                  valkey-cli -s /run/valkey/valkey.sock ping >/dev/null
-                  {{- if $tls.enabled }} && sha256sum -c --status /run/valkey/tls.sha256{{- end }}
+                - valkey-cli -s /run/valkey/valkey.sock ping >/dev/null && sha256sum -c --status /run/valkey/watched.sha256
             initialDelaySeconds: 5
           readinessProbe:
             # THE ANSWER IS CHECKED, NOT JUST THE EXIT CODE. Measured against this
@@ -287,8 +317,20 @@ spec:
             # every posture (measured identical to the TCP form once
             # `requirepass` is set), so readiness never depends on which
             # network listener a posture happens to keep.
+            #
+            # THE CREDENTIAL IS READ FROM THE MOUNTED FILE ON EVERY CHECK, into
+            # `VALKEYCLI_AUTH` (the name `valkey-cli` reads; the Redis name
+            # `REDISCLI_AUTH` is silently ignored by this fork). A probe's
+            # `exec.command` gets no `$(VAR)` expansion, and an env copy would be
+            # the stale value ledger 1437 removed. Between a rotation landing and
+            # the liveness restart this reports NotReady, which is true: a client
+            # holding the new password cannot use this server yet. The value is
+            # trimmed EXACTLY as the startup script trims it (trailing newlines
+            # by `$(cat)`, then one `\r`): a CRLF file trimmed on one side only
+            # leaves a server that accepts its password and a probe that never
+            # presents it, NotReady for ever.
             exec:
-              command: ["sh", "-c", "valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG"]
+              command: ["sh", "-c", "VALKEYCLI_AUTH=\"$(cat /etc/valkey/auth/password)\"; VALKEYCLI_AUTH=\"${VALKEYCLI_AUTH%\"$(printf '\\r')\"}\" valkey-cli -s /run/valkey/valkey.sock ping | grep -q PONG"]
             initialDelaySeconds: 2
             periodSeconds: 5
 {{- end }}
