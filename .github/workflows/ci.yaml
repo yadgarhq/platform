@@ -76,7 +76,7 @@ jobs:
   # loses jobs over time, and ADR-0560 asks that the secret reach every job that
   # reads it, not only the ones that exist in it today.
   #
-  # THE FAILURE WOULD BE GREEN, which is why it is stated rather than assumed.
+  # THE FAILURE WAS GREEN, which is why it is stated rather than assumed.
   # Both secrets are declared `required: false` in the callee, so a caller that
   # passes none hands over two empty strings. The retired `deployment` job
   # reported SUCCESS rather than refusing, where it ran; `parent`'s `cred` step
