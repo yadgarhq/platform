@@ -62,21 +62,25 @@ jobs:
       RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-  # THE TAG PATH, AND THE CREDENTIAL HERE IS NOT FOR THE `deployment` JOB.
+  # THE TAG PATH, AND THE CREDENTIAL HERE IS FOR THE `parent` JOB.
   # `platform` ships no `Containerfile` — it is a chart with no binary, as
-  # ADR-0752 authorised it — so `ci-release.yaml`'s `image` job skips and
-  # `deployment` skips with it (its condition is `needs.image.result ==
-  # 'success'`). No pod is ever pinned to a `platform` image.
+  # ADR-0752 authorised it — so `ci-release.yaml`'s `image` job skips, but its
+  # `chart` job still publishes and `parent` still runs
+  # (`needs.chart.result == 'success'`, with `always()` so the skipped `image`
+  # does not take it down). `parent` re-pins this chart in the parent chart
+  # `yadgarhq/chart` as the release App. No pod is ever pinned to a `platform`
+  # image.
   #
   # The credential is for whichever job in `ci-release.yaml` needs to act with the
   # release App's identity once a chart is released. The shared workflow gains and
   # loses jobs over time, and ADR-0560 asks that the secret reach every job that
   # reads it, not only the ones that exist in it today.
   #
-  # THE FAILURE WOULD BE GREEN, which is why it is stated rather than assumed.
+  # THE FAILURE WAS GREEN, which is why it is stated rather than assumed.
   # Both secrets are declared `required: false` in the callee, so a caller that
-  # passes none hands over two empty strings and the job reports SUCCESS rather
-  # than refusing.
+  # passes none hands over two empty strings. The retired `deployment` job
+  # reported SUCCESS rather than refusing, where it ran; `parent`'s `cred` step
+  # now fails the release and names the repair.
   release:
     if: startsWith(github.ref, 'refs/tags/')
     uses: yadgarhq/actions/.github/workflows/ci-release.yaml@main
