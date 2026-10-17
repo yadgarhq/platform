@@ -126,7 +126,7 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and fifteen values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and eighteen values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted. B-N2 added two
 # values checks (nats.create with no nats.tls keys; the NATS/upstream
@@ -134,8 +134,10 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # valkey.tls key; valkey.tls.enabled: false together with valkey.tls.plaintext:
 # false) and DELETED one — the combined "nothing renders yet" refusal the two
 # expands shared, which nothing can trip once both contracts are rendered —
-# moving this from 12 (pre-B-N2/B-V2) to 15.
-EXPECTED_RENDER_CHECKS = 17
+# moving this from 12 (pre-B-N2/B-V2) to 15. Ledger 1440 (ADR-0924) added three
+# (a broker image with no shell; a monitor the liveness probe cannot reach; an
+# adopter patch list that lost the rotation wiring), moving it to 18.
+EXPECTED_RENDER_CHECKS = 20
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
@@ -165,12 +167,17 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # valkey cross-checks compare platform against its clients, never platform
 # against itself; `scripts/tests/test_nats_valkey_tls.py` and
 # `scripts/tests/test_valkey_server_tls.py` own what they do.
+# And the THREE broker credential-rotation arms (ledger 1440, ADR-0924), while
+# `nats.create` is true: a non-alpine broker image, a monitor the hash-checking
+# liveness probe cannot reach, and an adopter `container.patch` or
+# `podTemplate.patch` that lost the rotation wiring;
+# `scripts/tests/test_nats_password_rotation.py` owns what they do.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 15
+EXPECTED_VALUES_CHECKS = 18
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves

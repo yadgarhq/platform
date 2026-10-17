@@ -757,6 +757,109 @@ takes effect. The reloader stays on for leaf renewal.
 {{- end }}{{/* end of the NATS contract arms */}}
 
 {{/*
+THE BROKER'S CREDENTIAL ROTATION (ADR-0924, ledger 1440): REFUSE WHAT WOULD
+SILENTLY BREAK IT. `values.yaml` mounts both passwords as directories, runs a
+shell wrapper that hashes them, and swaps the liveness probe for one that
+re-checks that hash beside `/healthz`. Three adopter moves break that at run
+time, two of them silently, so each refuses here instead. All three run only
+while `nats.create` is true.
+
+ARM ONE, THE IMAGE. The wrapper needs `/bin/sh`, `sha256sum` and `wget`. The
+upstream `nats` image ships them only in its alpine flavour; the default flavour
+is `scratch`-based and the container would fail to start. The reference is
+resolved as the upstream `nats.image` helper resolves it: `fullImageName`, else
+`repository@digest`, else `repository:tag`. A digest-only pin hides the
+flavour, because the helper drops the tag, so it refuses too; pin an alpine
+digest through `fullImageName` instead.
+
+ARM TWO, THE MONITOR. The probe is fixed at `http://127.0.0.1:8222`. With
+`config.monitor.enabled` false the upstream chart renders NO liveness probe at
+all, so a rotation never restarts the broker. Measured on helm 3.18.4, that
+case never reaches this arm: helm renders the subchart first, and the chart's
+own `remove /livenessProbe/httpGet` refuses there ("key livenessProbe does not
+exist"). The arm stays for a renderer that orders templates otherwise. Another
+port, or monitor TLS, makes the probe fail for ever and restart the broker in a
+loop.
+
+ARM THREE, THE PATCH LISTS. Helm replaces a list across values files, so an
+adopter `container.patch` or `podTemplate.patch` drops the chart's entries. A
+lost mount fails at startup; a lost probe swap leaves the upstream `/healthz`
+probe, and a rotation then never restarts the broker. The check reads the
+entries by `op`, `path` and volume name; the tests lock their full content.
+*/}}
+{{- if $natsCreate }}
+{{- $rotation := list }}
+{{- $image := dig "container" "image" dict .Values.nats }}
+{{- $imageRef := "" }}
+{{- if $image.fullImageName }}
+{{- $imageRef = toString $image.fullImageName }}
+{{- else if $image.digest }}
+{{- $imageRef = printf "%s@%s" (toString $image.repository) (toString $image.digest) }}
+{{- else }}
+{{- $imageRef = printf "%s:%s" (toString $image.repository) (toString $image.tag) }}
+{{- end }}
+{{- if not (contains "alpine" $imageRef) }}
+{{- fail (printf (join "" (list
+      "platform: the broker image resolves to %q, which is not an alpine image. "
+      "The credential-rotation wrapper (ADR-0924) runs in the nats container and needs a shell; the default nats image is scratch-based and has none. "
+      "Use an alpine tag such as `2.14.6-alpine`, or pin a digest as `fullImageName: nats:2.14.6-alpine@sha256:...` — a digest-only pin drops the tag, so its flavour cannot be checked."))
+      $imageRef) }}
+{{- end }}
+{{- $monitor := dig "config" "monitor" dict .Values.nats }}
+{{- if not (dig "enabled" true $monitor) }}
+{{- $rotation = append $rotation "`nats.config.monitor.enabled` is false, so the upstream chart renders no liveness probe and a rotated password never restarts the broker" }}
+{{- end }}
+{{- if ne (toString (dig "port" 8222 $monitor)) "8222" }}
+{{- $rotation = append $rotation (printf "`nats.config.monitor.port` is %v, and the probe checks 127.0.0.1:8222" (dig "port" 8222 $monitor)) }}
+{{- end }}
+{{- if dig "tls" "enabled" false $monitor }}
+{{- $rotation = append $rotation "`nats.config.monitor.tls.enabled` is true, and the probe speaks plain http" }}
+{{- end }}
+{{- if $rotation }}
+{{- fail (printf "platform: the broker's liveness probe cannot work as configured: %s. The probe re-checks the password hash beside `/healthz` (ADR-0924); without it a credential rotation never restarts the broker." (join "; " $rotation)) }}
+{{- end }}
+{{- $lost := list }}
+{{- $containerPatch := dig "container" "patch" list .Values.nats }}
+{{- $podPatch := dig "podTemplate" "patch" list .Values.nats }}
+{{- range $volume := (list "nats-auth-iam" "nats-auth-gateway") }}
+{{- $mounted := false }}
+{{- range $op := $containerPatch }}
+{{- if and (kindIs "map" $op) (eq (toString $op.op) "add") (eq (toString $op.path) "/volumeMounts/-") (eq (toString (dig "name" "" ($op.value | default dict))) $volume) }}
+{{- $mounted = true }}
+{{- end }}
+{{- end }}
+{{- if not $mounted }}
+{{- $lost = append $lost (printf "`nats.container.patch` does not mount %s" $volume) }}
+{{- end }}
+{{- $declared := false }}
+{{- range $op := $podPatch }}
+{{- if and (kindIs "map" $op) (eq (toString $op.op) "add") (eq (toString $op.path) "/spec/volumes/-") (eq (toString (dig "name" "" ($op.value | default dict))) $volume) }}
+{{- $declared = true }}
+{{- end }}
+{{- end }}
+{{- if not $declared }}
+{{- $lost = append $lost (printf "`nats.podTemplate.patch` does not declare the volume %s" $volume) }}
+{{- end }}
+{{- end }}
+{{- $removesHttpGet := false }}
+{{- $addsExec := false }}
+{{- range $op := $containerPatch }}
+{{- if and (kindIs "map" $op) (eq (toString $op.op) "remove") (eq (toString $op.path) "/livenessProbe/httpGet") }}
+{{- $removesHttpGet = true }}
+{{- end }}
+{{- if and (kindIs "map" $op) (eq (toString $op.op) "add") (eq (toString $op.path) "/livenessProbe/exec") }}
+{{- $addsExec = true }}
+{{- end }}
+{{- end }}
+{{- if not (and $removesHttpGet $addsExec) }}
+{{- $lost = append $lost "`nats.container.patch` does not swap the liveness probe for the hash-checking exec probe" }}
+{{- end }}
+{{- if $lost }}
+{{- fail (printf "platform: the broker's credential-rotation wiring is incomplete: %s. Helm replaces a patch list whole, so copy the chart's own entries from its `values.yaml` into yours (ADR-0924)." (join "; " $lost)) }}
+{{- end }}
+{{- end }}{{/* end of the broker credential-rotation arms */}}
+
+{{/*
 VALKEY'S OWN GUARD (B-V2, ADR-0852), MIRRORING NATS'S ABSENCE ARM ABOVE.
 `valkey.tls.enabled`, `valkey.tls.clientAuth` and `valkey.tls.plaintext` are
 this chart's own keys, REQUIRED WITH NO DEFAULT while `valkey.create` is true
