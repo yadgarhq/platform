@@ -13,7 +13,7 @@ The certificate half of the layer, and the Jobs that mint the credentials nothin
 | object set                                                                                                           | toggle                   | default |
 | -------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------- |
 | Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca` | `internalCA.create`      | `false` |
-| The twelve internal leaf Certificates, each carrying its own `renewBefore`                                           | `certificates.create`    | `false` |
+| The thirteen internal leaf Certificates, each carrying its own `renewBefore`                                         | `certificates.create`    | `false` |
 | The edge Certificate, whose issuer is an authority this chart does not own                                           | `edgeTLS.create`         | `false` |
 | Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share        | `bootstrap.create`       | `false` |
 | GatewayClass `eg`, Gateway `edge` and the EnvoyProxy that places its data plane                                      | `gatewayListener.create` | `false` |
@@ -77,7 +77,7 @@ kubectl -n yadgar delete pod -l app.kubernetes.io/name=valkey
 
 ## The ladder, which is the reason these objects live together
 
-`chart/values.yaml` carries the twelve internal leaves as a **map keyed by name**, each entry with its own `renewBefore`. Those values are **one invariant, not twelve settings**: they are distinct and six hours apart, so at most one service restarts per renewal instant. The edge leaf's 720h belongs to the same ladder and is held out of the map, because a different toggle renders it.
+`chart/values.yaml` carries the thirteen internal leaves as a **map keyed by name**, each entry with its own `renewBefore`. Those values are **one invariant, not thirteen settings**: they are distinct and six hours apart, so at most one service restarts per renewal instant. The edge leaf's 720h belongs to the same ladder and is held out of the map, because a different toggle renders it.
 
 Every leaf has exactly one consuming module, so ADR-0752's rule that a single-consumer object stays with its module would put each of them in a different repository. ADR-0754 is the amendment that does not: **an object whose correctness depends on an invariant spanning its siblings belongs with the invariant, not with its consumer.** An invariant is checkable only where every one of its terms is visible at once. In one values file the ladder is a map with one gate over it; spread over seven repositories it is seven numbers nobody compares.
 
@@ -101,7 +101,7 @@ chart/values.yaml                          every toggle, every leaf and the ladd
 chart/templates/_require_api.tpl           the render check's definition — a partial, which helm never renders
 chart/templates/render-checks.yaml         where it is CALLED, which is what makes the refusal happen
 chart/templates/internal-ca.yaml           the self-signed Issuer, the CA Certificate and the CA Issuer
-chart/templates/certificates.yaml          the twelve internal leaves, from the map in values.yaml
+chart/templates/certificates.yaml          the thirteen internal leaves, from the map in values.yaml
 chart/templates/edge-certificate.yaml      the edge leaf; issuerRef falls back to the internal CA if left empty, else required
 chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
 chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook

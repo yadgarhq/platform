@@ -30,7 +30,7 @@
 # ─── what you should not change without reading first ────────────────────────
 #
 # The `renewBefore` values under `certificates.leaves` in the chart's own
-# `values.yaml`. They are one invariant across the whole set, not ten settings.
+# `values.yaml`. They are one invariant across the whole set, not thirteen settings.
 # This file does not restate them, deliberately — it turns the set on and inherits
 # the ladder, which is what keeps one source for it.
 #
