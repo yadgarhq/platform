@@ -358,6 +358,29 @@ def secret_names(workload: dict) -> set[str]:
     }
 
 
+def broker_password_secrets(stateful_set: dict) -> set[str]:
+    """Every Secret the broker's containers read, through `env` OR a mounted volume,
+    minus `nats-tls` (cert-manager's, not the bootstrap Job's). PURE.
+
+    BOTH PATHS, because ledger 1440 (ADR-0924) moved both passwords from
+    `secretKeyRef` to mounted directories, the way ledger 1437 moved valkey's: a
+    gate that read `env` alone would find nothing. Over ALL containers, because a
+    credential mounted into the reloader is still one this install has to mint.
+    """
+    spec = stateful_set["spec"]["template"]["spec"]
+    mounted = {
+        mount["name"]
+        for container in spec["containers"]
+        for mount in container.get("volumeMounts") or []
+    }
+    from_volumes = {
+        volume["secret"]["secretName"]
+        for volume in spec.get("volumes") or []
+        if "secret" in volume and volume["name"] in mounted
+    }
+    return (secret_names(stateful_set) | from_volumes) - {"nats-tls"}
+
+
 def broker_ports(rendered: list[dict]) -> set[int]:
     """Every port the UPSTREAM chart's render serves on the broker. PURE.
 
@@ -937,11 +960,11 @@ def test_the_broker_reads_the_secrets_the_bootstrap_job_mints():
     """
     rendered = adopter_render()
     stateful_set = one(rendered, "StatefulSet")
-    referenced = secret_names(stateful_set)
+    referenced = broker_password_secrets(stateful_set)
     minted = minted_secret_names(rendered)
 
     assert referenced == EXPECTED_NATS_SECRETS, (
-        f"the broker's containers read {sorted(referenced)} through secretKeyRef; "
+        f"the broker's containers read {sorted(referenced)}; "
         f"{sorted(EXPECTED_NATS_SECRETS)} is one account per service and a missing "
         f"one is a service whose access cannot be revoked on its own"
     )
@@ -956,22 +979,22 @@ def test_a_broker_secret_nothing_mints_reddens_the_gate(tmp_path):
     """The red case: a values flip that renames one Secret the StatefulSet reads.
 
     A VALUES FLIP AND NOT A TEMPLATE EDIT, because that is the move an adopter
-    actually makes — `nats.container.env` is a documented key of this chart's
-    `values.yaml` and renaming a Secret there touches no template at all.
+    actually makes — `nats.podTemplate.patch` is a documented key of this chart's
+    `values.yaml`, and renaming a Secret there touches no template at all. The
+    adopter copies the chart's list and changes one `secretName`, which is the
+    only way to edit one entry of a list Helm replaces whole.
     """
+    patch = chart_values()["nats"]["podTemplate"]["patch"]
+    for op in patch:
+        if op["value"]["secret"]["secretName"] == "nats-auth":
+            op["value"]["secret"]["secretName"] = "nobody-mints-this"
     values = overrides(
         tmp_path / "other-broker-password.yaml",
-        "nats:\n"
-        "  container:\n"
-        "    env:\n"
-        "      NATS_PASSWORD:\n"
-        "        valueFrom:\n"
-        "          secretKeyRef:\n"
-        "            name: nobody-mints-this\n",
+        yaml.safe_dump({"nats": {"podTemplate": {"patch": patch}}}),
     )
     rendered = adopter_render(CHART, "-f", str(values))
     stateful_set = one(rendered, "StatefulSet")
-    referenced = secret_names(stateful_set)
+    referenced = broker_password_secrets(stateful_set)
 
     assert "nobody-mints-this" in referenced, referenced
     assert referenced != EXPECTED_NATS_SECRETS, referenced

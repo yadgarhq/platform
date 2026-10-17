@@ -565,46 +565,142 @@ nats:
   # `templates/render-checks.yaml` refuses anything but `true` here while
   # `nats.tls.enabled` is true.
   #
-  # IT DOES NOT COVER A `nats-auth` / `nats-auth-gateway` ROTATION (ledger 1425).
-  # The checksum is `sha256sum` over the RENDERED ConfigMap, and that ConfigMap
-  # carries the literal text `$NATS_PASSWORD` — the `<< >>` escape two paragraphs
-  # up is what keeps it unquoted so nats-server treats it as a variable — never
-  # the password's bytes. Rotating the Secret changes no character of that
-  # rendered text, so the checksum is identical before and after and the
-  # annotation does not move. Even a reload that DID fire would not help: the
-  # value is this container's OWN ENVIRONMENT, read once at process start from
-  # `secretKeyRef`, and a SIGHUP re-expands `$NATS_PASSWORD` against that SAME
-  # unchanged environment. Only restarting the pod picks up a new value — see
-  # README.md, "The bootstrap Jobs, and the Secrets nothing owns", for the
-  # command and why it is `delete pod` rather than `rollout restart`.
+  # A `nats-auth` / `nats-auth-gateway` ROTATION IS NOT A CONFIG CHANGE, so this
+  # checksum never sees one: the ConfigMap carries the literal text
+  # `$NATS_PASSWORD`, never the password's bytes. ADR-0924 (ledger 1440) handles a
+  # rotation with the wrapper and the liveness probe below instead.
+  #
+  # ── CREDENTIAL ROTATION: THE BROKER RESTARTS ITSELF (ADR-0924, ledger 1440) ──
+  # The valkey pattern of ledger 1437, applied to the broker. Each password is a
+  # Secret MOUNTED AS A DIRECTORY, never `secretKeyRef` env and never `subPath`
+  # (kubelet never refreshes a `subPath` mount). The wrapper in `container.merge`
+  # hashes both files, THEN reads them into the two variables the config above
+  # expands, and `exec`s nats-server. The liveness probe re-checks that hash
+  # beside `/healthz`, so once kubelet refreshes a rotated Secret on the node the
+  # probe fails and kubelet restarts the container in place onto the new value.
+  # No operator or controller touches the StatefulSet; Argo stays its only writer.
+  #
+  # THE MOUNTS SIT OUTSIDE `/etc/`. The upstream chart copies every nats mount
+  # under `/etc/` into the reloader (`reloader.natsVolumeMountPrefixes`), which
+  # needs neither password. The TLS leaf and CA stay OUT of the hash: the
+  # reloader reloads them hot, and hashing them would restart the broker on every
+  # leaf renewal.
+  #
+  # THE PATCH KEYS, NOT `merge`, CARRY THE MOUNTS AND THE PROBE SWAP. `merge`
+  # REPLACES lists, so a mount added through it drops the chart's own `config`,
+  # `pid` and `nats-tls` (measured for the plan, docs#145). The probe swap is a
+  # JSON-patch `remove` plus `add` rather than a values `null`, because the
+  # patch runs inside the upstream template after every coalescing step, so the
+  # result does not depend on the helm version that renders it.
+  #
+  # AN ADOPTER WHO SETS `container.patch` OR `podTemplate.patch` REPLACES THESE
+  # LISTS WHOLE (helm replaces lists across values files). Copy the chart's
+  # entries into yours. `templates/render-checks.yaml` refuses a render that has
+  # lost any of them, and refuses a broker image with no shell (non-alpine) and a
+  # monitor endpoint the probe below cannot reach.
+  #
+  # TIMING STAYS AT THE CHART'S DEFAULTS, AS RULED: liveness at the upstream
+  # 30 s x 3, lame duck and `terminationGracePeriodSeconds` untouched. Clients
+  # keep ADR-0893's 60 s refusal redial, because the two ends of a hop see a
+  # rotated Secret at different times.
+  #
+  # ONE REPLICA IS A TEMPORARY D55 DEVIATION, accepted only until NATS clustering
+  # ships (ledger 1519). Until then every rotation is a short full broker outage.
   podTemplate:
     configChecksumAnnotation: true
+    patch:
+      - op: add
+        path: /spec/volumes/-
+        value:
+          name: nats-auth-iam
+          secret:
+            secretName: nats-auth
+            items:
+              - key: password
+                path: password
+      - op: add
+        path: /spec/volumes/-
+        value:
+          name: nats-auth-gateway
+          secret:
+            secretName: nats-auth-gateway
+            items:
+              - key: password
+                path: password
 
   container:
-    env:
-      # A FILE WOULD BE BETTER AND THIS CHART OFFERS NO WAY TO ASK FOR ONE:
-      # `container.env` is where it accepts a `secretKeyRef`, and the config above
-      # references an environment variable by name. So the password is in this
-      # container's environment. It is still out of git, out of this file and out
-      # of any repository — and this pod is the one that legitimately holds the
-      # credential, unlike its clients.
-      #
-      # BOTH SECRETS ARE MINTED BY THE BOOTSTRAP JOB, as the Valkey password is.
-      # `nats-auth-gateway` is a SEPARATE Secret rather than a second key on
-      # `nats-auth`: the Job's Role grants `create` alone, and a key added to an
-      # existing created Secret is a `create` against a name that already exists —
-      # the API server answers 409, the script reads that as "already done", and
-      # the key would never materialise on a cluster that has already bootstrapped.
-      NATS_PASSWORD:
-        valueFrom:
-          secretKeyRef:
-            name: nats-auth
-            key: password
-      NATS_PASSWORD_GATEWAY:
-        valueFrom:
-          secretKeyRef:
-            name: nats-auth-gateway
-            key: password
+    # BOTH SECRETS ARE MINTED BY THE BOOTSTRAP JOB, as the Valkey password is.
+    # `nats-auth-gateway` is a SEPARATE Secret rather than a second key on
+    # `nats-auth`: the Job's Role grants `create` alone, and a key added to an
+    # existing created Secret is a `create` against a name that already exists —
+    # the API server answers 409, the script reads that as "already done", and
+    # the key would never materialise on a cluster that has already bootstrapped.
+    #
+    # THE WRAPPER, line by line:
+    #   - `set -eu`: a missing file stops it before nats-server starts.
+    #   - HASH FIRST, READ SECOND. A swap between the two then stores the old hash
+    #     beside the new password, which costs one spare restart. The other order
+    #     stores the new hash beside the old password and never restarts again.
+    #   - TRIM EVERY TRAILING `\n` AND `\r`, as `iam` and `gateway` do
+    #     (`trim_end_matches(['\n', '\r'])`). A hand-made file can end in `\r\n`,
+    #     and two ends that trim differently disagree on the password for ever.
+    #   - REFUSE AN EMPTY VALUE rather than start a broker whose account has none.
+    #   - `exec` keeps nats-server PID 1, so the lame-duck `preStop` and the pid
+    #     file still work. It runs in this container, not an init container: an
+    #     init container does not run again on a liveness restart, so its stored
+    #     hash would stay stale and the pod would restart in a loop.
+    # The image needs a shell, which is why the render check refuses non-alpine.
+    merge:
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          sha256sum /var/run/secrets/nats-auth/iam/password /var/run/secrets/nats-auth/gateway/password > /var/run/nats/auth.sha256
+          cr="$(printf '\r')"
+          nl="$(printf '\nx')"
+          nl="${nl%x}"
+          trimmed() {
+            v="$(cat "$1")"
+            while :; do
+              case "$v" in
+                *"$cr"|*"$nl") v="${v%?}" ;;
+                *) break ;;
+              esac
+            done
+            printf '%s' "$v"
+          }
+          NATS_PASSWORD="$(trimmed "/var/run/secrets/nats-auth/iam/password")"
+          NATS_PASSWORD_GATEWAY="$(trimmed "/var/run/secrets/nats-auth/gateway/password")"
+          [ -n "$NATS_PASSWORD" ] || { echo "nats: /var/run/secrets/nats-auth/iam/password is empty; refusing to start" >&2; exit 1; }
+          [ -n "$NATS_PASSWORD_GATEWAY" ] || { echo "nats: /var/run/secrets/nats-auth/gateway/password is empty; refusing to start" >&2; exit 1; }
+          export NATS_PASSWORD NATS_PASSWORD_GATEWAY
+          exec nats-server --config /etc/nats-config/nats.conf
+    patch:
+      - op: add
+        path: /volumeMounts/-
+        value:
+          name: nats-auth-iam
+          mountPath: /var/run/secrets/nats-auth/iam
+          readOnly: true
+      - op: add
+        path: /volumeMounts/-
+        value:
+          name: nats-auth-gateway
+          mountPath: /var/run/secrets/nats-auth/gateway
+          readOnly: true
+      # The upstream `/healthz` check, kept, AND the hash. `httpGet` is removed
+      # first because Kubernetes rejects a probe with two handlers. The URL is
+      # fixed at plain http on 127.0.0.1:8222; the render check refuses a
+      # `config.monitor` that moves it.
+      - op: remove
+        path: /livenessProbe/httpGet
+      - op: add
+        path: /livenessProbe/exec
+        value:
+          command:
+            - /bin/sh
+            - -c
+            - sha256sum -c -s /var/run/nats/auth.sha256 && wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true'
 
 # ── THE OPERATORS, WHICH THIS CHART MAY INSTALL AND OWNS THE CRDS OF ────────
 # ONE KEY GATES ALL FIVE (ADR-0787): cert-manager, KEDA, mariadb-operator, Envoy
