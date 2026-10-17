@@ -47,9 +47,9 @@ internalCA:
     size: 256
     rotationPolicy: Never
 
-# ── THE TWELVE INTERNAL LEAVES, AND THE LADDER ACROSS THEM ───────────────────
+# ── THE THIRTEEN INTERNAL LEAVES, AND THE LADDER ACROSS THEM ─────────────────
 # READ THIS BEFORE ADDING OR MOVING A LEAF. The `renewBefore` values below are one
-# invariant, not twelve settings. They are distinct and six hours apart so that AT
+# invariant, not thirteen settings. They are distinct and six hours apart so that AT
 # MOST ONE SERVICE RESTARTS PER RENEWAL INSTANT, and a leaf renews every
 # `duration - renewBefore`, so a distinct `renewBefore` is a distinct period as
 # well as a distinct instant and the separations grow rather than drifting back
@@ -60,11 +60,11 @@ internalCA:
 # 720h IS DELIBERATELY ABSENT FROM THIS MAP. It belongs to the EDGE leaf under
 # `edgeTLS` below, which a different authority issues and a different toggle
 # renders. The ladder is shared across both: a step is free only if NEITHER uses
-# it. THE NEXT FREE STEP IS 798h, then 804h. Never a value already in use.
+# it. THE NEXT FREE STEP IS 804h, then 810h. Never a value already in use.
 #
 # THE LEAVES ARE A MAP KEYED BY NAME, CARRYING THE `renewBefore` EXPLICITLY, and
 # no template derives one. A range over a list of modules that computed the step
-# from an index would render the same twelve objects today and destroy the invariant
+# from an index would render the same thirteen objects today and destroy the invariant
 # the moment the list was reordered — the value would follow the position instead
 # of the leaf. The template ranges over THIS map, and every rung is a line
 # somebody wrote down.
@@ -171,6 +171,14 @@ certificates:
       commonName: project-caller
       usages: [client auth, digital signature]
       renewBefore: 780h
+    # THE SEEDER'S OWN LEAF, not `project-client-tls` reused: the common name is
+    # the caller's identity and `project`'s caller check reads it, so a new
+    # caller of `project` needs its own (D35 seeder plan, stage 4). 798h was the
+    # next free step when it was added.
+    seeder-client-tls:
+      commonName: seeder-caller
+      usages: [client auth, digital signature]
+      renewBefore: 798h
 
 # ── THE EDGE LEAF, WHICH THIS CHART DOES NOT ISSUE ───────────────────────────
 # A DIFFERENT AUTHORITY SIGNS THIS ONE, and that is the whole reason it sits

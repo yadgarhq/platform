@@ -18,7 +18,7 @@ the mixed-release pair and the count of all fourteen;
 `scripts/tests/test_nats_valkey_tls.py` owns what the four TLS arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
-Certificate, the CA Issuer, the twelve internal leaves and the edge leaf all come from
+Certificate, the CA Issuer, the thirteen internal leaves and the edge leaf all come from
 `cert-manager.io/v1`, and one operator provides that whole group — so they share a
 check. The Gateway listener is the same shape one level along: it renders three
 kinds from TWO groups behind ONE toggle, and carries ONE check.
