@@ -10,15 +10,15 @@ A bare cluster with the third-party operators already installed should become a 
 
 The certificate half of the layer, and the Jobs that mint the credentials nothing outside the installation can supply.
 
-| object set                                                                                                           | toggle                   | default |
-| -------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------- |
-| Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca` | `internalCA.create`      | `false` |
-| The thirteen internal leaf Certificates, each carrying its own `renewBefore`                                         | `certificates.create`    | `false` |
-| The edge Certificate, whose issuer is an authority this chart does not own                                           | `edgeTLS.create`         | `false` |
-| Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share        | `bootstrap.create`       | `false` |
-| GatewayClass `eg`, Gateway `edge` and the EnvoyProxy that places its data plane                                      | `gatewayListener.create` | `false` |
-| The Valkey Deployment and Service, and the `valkey-ingress` NetworkPolicy                                            | `valkey.create`          | `false` |
-| The upstream `nats` chart as a DEPENDENCY, and the `nats-ingress` NetworkPolicy this chart renders itself            | `nats.create`            | `false` |
+| object set                                                                                                                                                                            | toggle                   | default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------- |
+| Issuer `yadgar-internal-selfsign`, Certificate `yadgar-internal-ca` (`isCA`, ten years), Issuer `yadgar-internal-ca`                                                                  | `internalCA.create`      | `false` |
+| The thirteen internal leaf Certificates, each carrying its own `renewBefore`                                                                                                          | `certificates.create`    | `false` |
+| The edge Certificate, whose issuer is an authority this chart does not own                                                                                                            | `edgeTLS.create`         | `false` |
+| Jobs `bootstrap-secrets` and `admin-bootstrap-token`, and the ServiceAccount, Role and RoleBinding they share                                                                         | `bootstrap.create`       | `false` |
+| GatewayClass `eg`, Gateway `edge`, the EnvoyProxy that places its data plane, and the BackendTrafficPolicy `edge-upstream-idle` that sets Envoy's idle timeout to backends (ADR-1016) | `gatewayListener.create` | `false` |
+| The Valkey Deployment and Service, and the `valkey-ingress` NetworkPolicy                                                                                                             | `valkey.create`          | `false` |
+| The upstream `nats` chart as a DEPENDENCY, and the `nats-ingress` NetworkPolicy this chart renders itself                                                                             | `nats.create`            | `false` |
 
 **Prometheus installs with the operators (ADR-0820).** The upstream `prometheus` chart is a dependency under `condition: operators.prometheus.create,operators.create`, so every release with `operators.create: true` installs it: server only, no volume, Service `prometheus-server` in namespace `observability` on port 80. That is the address the module charts' KEDA ScaledObjects query by default (`autoscaling.prometheusAddress`). The chart renders the `observability` Namespace itself. Set `operators.prometheus.create: false` to keep your own Prometheus; then point the modules' `autoscaling.prometheusAddress` and `preflight.prometheus.address` at it. `preflight.probes.prometheus: true` adds a preflight check that the address answers `/-/ready`.
 
@@ -106,7 +106,7 @@ chart/templates/edge-certificate.yaml      the edge leaf; issuerRef falls back t
 chart/templates/bootstrap-rbac.yaml        the one identity both Jobs run as — `create` on secrets, nothing else
 chart/templates/bootstrap-secrets.yaml     the three machine-only credentials, minted by a pre-install hook
 chart/templates/admin-bootstrap-token.yaml the one credential an operator reads out, in its own file
-chart/templates/gateway-listener.yaml       the GatewayClass, the Gateway and the EnvoyProxy that places its data plane
+chart/templates/gateway-listener.yaml       the GatewayClass, the Gateway, the EnvoyProxy that places its data plane, and the BackendTrafficPolicy that sets Envoy's upstream idle timeout
 chart/templates/valkey.yaml                 the one shared cache — a Deployment and a Service, no persistence
 chart/templates/ingress-policies.yaml       who may dial the cache and who may dial the broker
 chart/templates/_preflight.tpl              the probe/toggle tie, and the refusal when the two disagree

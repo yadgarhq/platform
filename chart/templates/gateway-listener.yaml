@@ -27,6 +27,12 @@ the edge with the other two still rendering, which is exactly the failure a
 render check cannot see. `scripts/tests/test_shared_infrastructure.py` asserts
 the annotation on all three independently. `Delete=false` is a separate,
 unruled question and deliberately absent here.
+
+A FOURTH OBJECT RIDES THE SAME TOGGLE: the BackendTrafficPolicy at the end of
+this file (ADR-1016). It sets how long Envoy keeps an idle connection to a
+backend, so that Envoy closes it before the gateway's header-read timeout does.
+It also carries `Prune=false`: a pruned policy returns Envoy to its 1 h default
+and brings the reuse race back with nothing reporting it.
 */}}
 {{- if .Values.gatewayListener.create }}
 {{- $listener := .Values.gatewayListener }}
@@ -152,4 +158,40 @@ spec:
                 - port: 443
                   nodePort: {{ . }}
         {{- end }}
+---
+{{/*
+THE ENVOY UPSTREAM IDLE TIMEOUT (ADR-1016). The gateway closes a kept-alive
+connection that sends no request head within its header-read timeout. Envoy must
+close an idle upstream connection first, or it can reuse one as the gateway
+closes it and answer 503 UC.
+
+IT TARGETS THE GATEWAY, NOT THE GATEWAY CHART'S HTTPRoute. The Gateway is this
+chart's own object, so the reference needs no name from another chart, and the
+policy covers every route on this edge. No `metadata.namespace`, for the reason
+the header gives: a policy attaches only to a target in its own namespace.
+
+THE VALUE IS CHECKED HERE, beside the one field it fills, the way `valkey.yaml`
+checks its own fields. Whole seconds in 1..59: a values file hands helm a
+float64 and `--set` an int64, so both are read. `yadgarhq/chart` holds the check
+against the gateway's bound, which this chart cannot see.
+*/}}
+{{- $idle := $listener.upstreamIdleTimeoutSeconds }}
+{{- $whole := or (kindIs "int64" $idle) (kindIs "int" $idle) (and (kindIs "float64" $idle) (eq (float64 (int64 $idle)) $idle)) }}
+{{- if not (and $whole (ge (int64 $idle) 1) (le (int64 $idle) 59)) }}
+{{- fail (printf "gatewayListener.upstreamIdleTimeoutSeconds must be a whole number of seconds in 1..59, and it is %s (%s). It sets Envoy's idle timeout to the gateway, which must stay below the gateway's header-read timeout (ADR-1016)." (toJson $idle) (ternary "null" (kindOf $idle) (eq (kindOf $idle) "invalid"))) }}
+{{- end }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $listener.gatewayName }}-upstream-idle
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $listener.gatewayName }}
+  timeout:
+    http:
+      connectionIdleTimeout: {{ printf "%ds" (int64 $idle) | quote }}
 {{- end }}
