@@ -97,6 +97,7 @@
         "gatewayName": {},
         "hostname": {},
         "certificateSecretName": {},
+        "upstreamIdleTimeoutSeconds": {},
         "envoyProxy": {
           "properties": {
             "name": {},

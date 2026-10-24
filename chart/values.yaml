@@ -340,6 +340,21 @@ gatewayListener:
   # ReferenceGrant, so this Secret is the one the release namespace holds.
   certificateSecretName: gateway-tls
 
+  # HOW LONG ENVOY KEEPS AN IDLE CONNECTION TO A BACKEND OPEN, in whole seconds
+  # (ADR-1016). Rendered as `spec.timeout.http.connectionIdleTimeout` on a
+  # BackendTrafficPolicy that targets the Gateway above, so it applies to every
+  # route on this edge. Envoy Gateway's own default is 1 h.
+  #
+  # IT MUST STAY STRICTLY BELOW THE GATEWAY'S HEADER-READ TIMEOUT. The gateway
+  # closes a kept-alive connection that sends no request head within
+  # `gateway.server.limits.headerReadTimeoutSeconds` (default 10). If Envoy keeps
+  # its idle connection longer, it can reuse one at the moment the gateway closes
+  # it, and the client gets a 503 UC. Envoy closing first removes that race.
+  # This chart cannot see the gateway's value: `yadgarhq/chart` renders both and
+  # refuses a value here that is not below it. This chart refuses only a value
+  # outside 1..59 (the gateway's own range ends at 60).
+  upstreamIdleTimeoutSeconds: 8
+
   # HOW THE PROVISIONED DATA PLANE IS PLACED AND EXPOSED. Envoy Gateway does not
   # run the data plane itself: it provisions a Deployment and a Service per
   # Gateway, and this object is the only way to influence either.
