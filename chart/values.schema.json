@@ -98,6 +98,7 @@
         "hostname": {},
         "certificateSecretName": {},
         "upstreamIdleTimeoutSeconds": {},
+        "requestHeadersTimeoutSeconds": {},
         "envoyProxy": {
           "properties": {
             "name": {},
