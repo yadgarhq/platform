@@ -37,8 +37,10 @@ and brings the reuse race back with nothing reporting it.
 A FIFTH OBJECT RIDES IT TOO: the ClientTrafficPolicy after it (yaadgaar #218).
 It bounds how long Envoy waits for a client's request headers, because Envoy
 never forwards an incomplete head and so the gateway's own header-read bound
-never sees a client that stalls at the edge. It carries `Prune=false` for the
-same reason: a pruned policy returns the edge to no headers timeout at all.
+never sees a client that stalls at the edge. It also bounds how long Envoy holds
+a client connection with no active request (ADR-1022 follow-up), which covers a
+client that never sends a byte. It carries `Prune=false` for the same reason: a
+pruned policy returns the edge to no headers timeout and a 1 h idle timeout.
 */}}
 {{- if .Values.gatewayListener.create }}
 {{- $listener := .Values.gatewayListener }}
@@ -216,18 +218,37 @@ set.
 
 NOT THE SAME TIMER AS THE GATEWAY'S. The gateway's header-read timer starts at
 accept; this one starts at the first header byte. So a connection that sends no
-byte at all is not bounded here: Envoy's `timeout.http.idleTimeout` (default
-1 h) holds it. This policy closes the measured gap, a stalled half-sent head,
-and sets nothing else.
+byte at all is not bounded by it. Envoy's `timeout.http.idleTimeout` holds such
+a connection, and its default is 1 h. That is why this policy ALSO sets
+`idleTimeout`, from `idleTimeoutSeconds` (default 30 s, Max 2026-10-25). Envoy
+defines idle as "no active requests in the connection", so the same bound also
+closes a kept-alive client connection 30 s after its last response.
 
-THE VALUE IS CHECKED HERE, as the idle timeout above is: whole seconds in 1..60,
-the gateway's own range. This chart cannot see the gateway's bound; the
-companion check in `yadgarhq/chart` compares the two.
+THE VALUES ARE CHECKED HERE, as the upstream idle timeout above is:
+- `requestHeadersTimeoutSeconds`: whole seconds in 1..60, the gateway's own
+  range. This chart cannot see the gateway's bound; the companion check in
+  `yadgarhq/chart` compares the two.
+- `idleTimeoutSeconds`: whole seconds in 1..3600. The top is Envoy's own
+  default, so the value is never looser than what it replaces.
+- `idleTimeoutSeconds` is not below `requestHeadersTimeoutSeconds`. This is a
+  policy choice, not an Envoy constraint: the two timers never run together.
+  The idle timer runs while no request is active and stops at the first byte
+  of a request; the headers timer runs from that byte to the last header byte.
+  The rule keeps the edge from being stricter with a client that has sent
+  nothing than with a client that has started a request head.
 */}}
 {{- $headers := $listener.requestHeadersTimeoutSeconds }}
 {{- $headersWhole := or (kindIs "int64" $headers) (kindIs "int" $headers) (and (kindIs "float64" $headers) (eq (float64 (int64 $headers)) $headers)) }}
 {{- if not (and $headersWhole (ge (int64 $headers) 1) (le (int64 $headers) 60)) }}
 {{- fail (printf "gatewayListener.requestHeadersTimeoutSeconds must be a whole number of seconds in 1..60, and it is %s (%s). It bounds how long the edge waits for a client's request headers, and must not be looser than the gateway's header-read timeout (yaadgaar #218)." (toJson $headers) (ternary "null" (kindOf $headers) (eq (kindOf $headers) "invalid"))) }}
+{{- end }}
+{{- $clientIdle := $listener.idleTimeoutSeconds }}
+{{- $clientIdleWhole := or (kindIs "int64" $clientIdle) (kindIs "int" $clientIdle) (and (kindIs "float64" $clientIdle) (eq (float64 (int64 $clientIdle)) $clientIdle)) }}
+{{- if not (and $clientIdleWhole (ge (int64 $clientIdle) 1) (le (int64 $clientIdle) 3600)) }}
+{{- fail (printf "gatewayListener.idleTimeoutSeconds must be a whole number of seconds in 1..3600, and it is %s (%s). It bounds how long the edge holds a client connection with no active request, including one that never sends a byte (ADR-1022)." (toJson $clientIdle) (ternary "null" (kindOf $clientIdle) (eq (kindOf $clientIdle) "invalid"))) }}
+{{- end }}
+{{- if lt (int64 $clientIdle) (int64 $headers) }}
+{{- fail (printf "gatewayListener.idleTimeoutSeconds is %d and gatewayListener.requestHeadersTimeoutSeconds is %d. The edge's idle timeout must not be below its request-headers timeout, so that the edge is not stricter with a client that has sent nothing than with one that has started a request head (ADR-1022)." (int64 $clientIdle) (int64 $headers)) }}
 {{- end }}
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
@@ -243,4 +264,5 @@ spec:
   timeout:
     http:
       requestHeadersReceivedTimeout: {{ printf "%ds" (int64 $headers) | quote }}
+      idleTimeout: {{ printf "%ds" (int64 $clientIdle) | quote }}
 {{- end }}
