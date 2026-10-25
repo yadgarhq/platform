@@ -13,7 +13,8 @@ WHAT THIS CHART OWNS. One `ClientTrafficPolicy` on the edge Gateway, behind
 `gatewayListener.requestHeadersTimeoutSeconds` (default 10). That field bounds
 the request HEADERS only, from their first byte to their last. (The gateway's
 own timer starts at accept, so a connection that sends no byte is not bounded
-by this field.)
+by this field. The same policy's `idleTimeout` bounds that one; see
+`test_edge_idle_timeout.py`.)
 `requestReceivedTimeout` bounds the whole request with its body, and would cut a
 slow valid upload; it is deliberately not set.
 
@@ -159,10 +160,14 @@ def test_the_policy_targets_the_gateway_this_chart_renders(tmp_path):
     )
 
 
-def test_the_default_is_ten_seconds_and_sets_nothing_else(tmp_path):
-    """Only the headers bound: no whole-request bound, no idle change."""
+def test_the_default_is_ten_seconds_and_sets_no_whole_request_bound(tmp_path):
+    """The headers bound and the idle bound only: no whole-request bound.
+
+    The idle bound rides the same policy (`test_edge_idle_timeout.py`).
+    """
     policy, _ = one_policy(tmp_path)
-    assert policy["spec"]["timeout"] == {"http": {FIELD: f"{DEFAULT_SECONDS}s"}}
+    assert policy["spec"]["timeout"]["http"][FIELD] == f"{DEFAULT_SECONDS}s"
+    assert set(policy["spec"]["timeout"]["http"]) == {FIELD, "idleTimeout"}
     assert set(policy["spec"]) == {"targetRefs", "timeout"}
 
 
@@ -214,8 +219,11 @@ def test_a_misspelt_key_is_refused_by_the_schema(tmp_path):
 
 @pytest.mark.parametrize("written", ["1", "60"])
 def test_the_ends_of_the_range_render(tmp_path, written):
+    """The idle bound is raised with it: it may not sit below the headers bound."""
     policy, _ = one_policy(
-        tmp_path, f"gatewayListener:\n  requestHeadersTimeoutSeconds: {written}\n"
+        tmp_path,
+        f"gatewayListener:\n  requestHeadersTimeoutSeconds: {written}\n"
+        "  idleTimeoutSeconds: 60\n",
     )
     assert policy["spec"]["timeout"]["http"][FIELD] == f"{written}s"
 

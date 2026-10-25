@@ -99,6 +99,7 @@
         "certificateSecretName": {},
         "upstreamIdleTimeoutSeconds": {},
         "requestHeadersTimeoutSeconds": {},
+        "idleTimeoutSeconds": {},
         "envoyProxy": {
           "properties": {
             "name": {},
