@@ -27,6 +27,20 @@ the edge with the other two still rendering, which is exactly the failure a
 render check cannot see. `scripts/tests/test_shared_infrastructure.py` asserts
 the annotation on all three independently. `Delete=false` is a separate,
 unruled question and deliberately absent here.
+
+A FOURTH OBJECT RIDES THE SAME TOGGLE: the BackendTrafficPolicy at the end of
+this file (ADR-1016). It sets how long Envoy keeps an idle connection to a
+backend, so that Envoy closes it before the gateway's header-read timeout does.
+It also carries `Prune=false`: a pruned policy returns Envoy to its 1 h default
+and brings the reuse race back with nothing reporting it.
+
+A FIFTH OBJECT RIDES IT TOO: the ClientTrafficPolicy after it (yaadgaar #218).
+It bounds how long Envoy waits for a client's request headers, because Envoy
+never forwards an incomplete head and so the gateway's own header-read bound
+never sees a client that stalls at the edge. It also bounds how long Envoy holds
+a client connection with no active request (ADR-1022 follow-up), which covers a
+client that never sends a byte. It carries `Prune=false` for the same reason: a
+pruned policy returns the edge to no headers timeout and a 1 h idle timeout.
 */}}
 {{- if .Values.gatewayListener.create }}
 {{- $listener := .Values.gatewayListener }}
@@ -152,4 +166,103 @@ spec:
                 - port: 443
                   nodePort: {{ . }}
         {{- end }}
+---
+{{/*
+THE ENVOY UPSTREAM IDLE TIMEOUT (ADR-1016). The gateway closes a kept-alive
+connection that sends no request head within its header-read timeout. Envoy must
+close an idle upstream connection first, or it can reuse one as the gateway
+closes it and answer 503 UC.
+
+IT TARGETS THE GATEWAY, NOT THE GATEWAY CHART'S HTTPRoute. The Gateway is this
+chart's own object, so the reference needs no name from another chart, and the
+policy covers every route on this edge. No `metadata.namespace`, for the reason
+the header gives: a policy attaches only to a target in its own namespace.
+
+THE VALUE IS CHECKED HERE, beside the one field it fills, the way `valkey.yaml`
+checks its own fields. Whole seconds in 1..59: a values file hands helm a
+float64 and `--set` an int64, so both are read. `yadgarhq/chart` holds the check
+against the gateway's bound, which this chart cannot see.
+*/}}
+{{- $idle := $listener.upstreamIdleTimeoutSeconds }}
+{{- $whole := or (kindIs "int64" $idle) (kindIs "int" $idle) (and (kindIs "float64" $idle) (eq (float64 (int64 $idle)) $idle)) }}
+{{- if not (and $whole (ge (int64 $idle) 1) (le (int64 $idle) 59)) }}
+{{- fail (printf "gatewayListener.upstreamIdleTimeoutSeconds must be a whole number of seconds in 1..59, and it is %s (%s). It sets Envoy's idle timeout to the gateway, which must stay below the gateway's header-read timeout (ADR-1016)." (toJson $idle) (ternary "null" (kindOf $idle) (eq (kindOf $idle) "invalid"))) }}
+{{- end }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $listener.gatewayName }}-upstream-idle
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $listener.gatewayName }}
+  timeout:
+    http:
+      connectionIdleTimeout: {{ printf "%ds" (int64 $idle) | quote }}
+---
+{{/*
+THE EDGE'S REQUEST-HEADERS TIMEOUT (yaadgaar #218). The gateway closes a
+connection that sends no complete request head within its header-read timeout
+(ADR-1006). Envoy buffers a request head until it is complete and forwards
+nothing before that, so a client that stalls mid-head is held by Envoy alone.
+Envoy Gateway sets no headers timeout by default: measured on kind, such a
+connection stayed open past 45 s.
+
+`requestHeadersReceivedTimeout` AND NOT `requestReceivedTimeout`. The first
+bounds the headers only, from their first byte to their last. The second bounds
+the whole request with its body and would cut a slow valid upload, so it is not
+set.
+
+NOT THE SAME TIMER AS THE GATEWAY'S. The gateway's header-read timer starts at
+accept; this one starts at the first header byte. So a connection that sends no
+byte at all is not bounded by it. Envoy's `timeout.http.idleTimeout` holds such
+a connection, and its default is 1 h. That is why this policy ALSO sets
+`idleTimeout`, from `idleTimeoutSeconds` (default 30 s, Max 2026-10-25). Envoy
+defines idle as "no active requests in the connection", so the same bound also
+closes a kept-alive client connection 30 s after its last response.
+
+THE VALUES ARE CHECKED HERE, as the upstream idle timeout above is:
+- `requestHeadersTimeoutSeconds`: whole seconds in 1..60, the gateway's own
+  range. This chart cannot see the gateway's bound; the companion check in
+  `yadgarhq/chart` compares the two.
+- `idleTimeoutSeconds`: whole seconds in 1..3600. The top is Envoy's own
+  default, so the value is never looser than what it replaces.
+- `idleTimeoutSeconds` is not below `requestHeadersTimeoutSeconds`. This is a
+  policy choice, not an Envoy constraint: the two timers never run together.
+  The idle timer runs while no request is active and stops at the first byte
+  of a request; the headers timer runs from that byte to the last header byte.
+  The rule keeps the edge from being stricter with a client that has sent
+  nothing than with a client that has started a request head.
+*/}}
+{{- $headers := $listener.requestHeadersTimeoutSeconds }}
+{{- $headersWhole := or (kindIs "int64" $headers) (kindIs "int" $headers) (and (kindIs "float64" $headers) (eq (float64 (int64 $headers)) $headers)) }}
+{{- if not (and $headersWhole (ge (int64 $headers) 1) (le (int64 $headers) 60)) }}
+{{- fail (printf "gatewayListener.requestHeadersTimeoutSeconds must be a whole number of seconds in 1..60, and it is %s (%s). It bounds how long the edge waits for a client's request headers, and must not be looser than the gateway's header-read timeout (yaadgaar #218)." (toJson $headers) (ternary "null" (kindOf $headers) (eq (kindOf $headers) "invalid"))) }}
+{{- end }}
+{{- $clientIdle := $listener.idleTimeoutSeconds }}
+{{- $clientIdleWhole := or (kindIs "int64" $clientIdle) (kindIs "int" $clientIdle) (and (kindIs "float64" $clientIdle) (eq (float64 (int64 $clientIdle)) $clientIdle)) }}
+{{- if not (and $clientIdleWhole (ge (int64 $clientIdle) 1) (le (int64 $clientIdle) 3600)) }}
+{{- fail (printf "gatewayListener.idleTimeoutSeconds must be a whole number of seconds in 1..3600, and it is %s (%s). It bounds how long the edge holds a client connection with no active request, including one that never sends a byte (ADR-1022)." (toJson $clientIdle) (ternary "null" (kindOf $clientIdle) (eq (kindOf $clientIdle) "invalid"))) }}
+{{- end }}
+{{- if lt (int64 $clientIdle) (int64 $headers) }}
+{{- fail (printf "gatewayListener.idleTimeoutSeconds is %d and gatewayListener.requestHeadersTimeoutSeconds is %d. The edge's idle timeout must not be below its request-headers timeout, so that the edge is not stricter with a client that has sent nothing than with one that has started a request head (ADR-1022)." (int64 $clientIdle) (int64 $headers)) }}
+{{- end }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: {{ $listener.gatewayName }}-request-headers
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $listener.gatewayName }}
+  timeout:
+    http:
+      requestHeadersReceivedTimeout: {{ printf "%ds" (int64 $headers) | quote }}
+      idleTimeout: {{ printf "%ds" (int64 $clientIdle) | quote }}
 {{- end }}
