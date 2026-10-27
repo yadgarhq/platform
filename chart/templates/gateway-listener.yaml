@@ -220,9 +220,10 @@ NOT THE SAME TIMER AS THE GATEWAY'S. The gateway's header-read timer starts at
 accept; this one starts at the first header byte. So a connection that sends no
 byte at all is not bounded by it. Envoy's `timeout.http.idleTimeout` holds such
 a connection, and its default is 1 h. That is why this policy ALSO sets
-`idleTimeout`, from `idleTimeoutSeconds` (default 30 s, Max 2026-10-25). Envoy
-defines idle as "no active requests in the connection", so the same bound also
-closes a kept-alive client connection 30 s after its last response.
+`idleTimeout`, from `idleTimeoutSeconds` (default 60 s, Max 2026-10-27,
+yaadgaar #448). Envoy defines idle as "no active requests in the connection", so
+the same bound also closes a kept-alive client connection 60 s after its last
+response.
 
 THE VALUES ARE CHECKED HERE, as the upstream idle timeout above is:
 - `requestHeadersTimeoutSeconds`: whole seconds in 1..60, the gateway's own

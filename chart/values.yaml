@@ -373,14 +373,15 @@ gatewayListener:
   requestHeadersTimeoutSeconds: 10
 
   # HOW LONG THE EDGE HOLDS A CLIENT CONNECTION WITH NO ACTIVE REQUEST, in whole
-  # seconds (ADR-1022 follow-up; Max 2026-10-25: "Set idleTimeout ~10-30 s").
+  # seconds (ADR-1022 follow-up; Max 2026-10-27: "Set 60s idleTimeout", which
+  # replaces the 30 s of 2026-10-25, yaadgaar #448).
   # Rendered as `spec.timeout.http.idleTimeout` on the same ClientTrafficPolicy.
   # It closes a client that completes TLS and then sends no byte at all, which
   # the request-headers bound above never sees. It also closes a kept-alive
   # client connection this long after its last response. Envoy's own default is
   # 1 h. This chart refuses a value outside 1..3600, and a value below
   # `requestHeadersTimeoutSeconds`.
-  idleTimeoutSeconds: 30
+  idleTimeoutSeconds: 60
 
   # HOW THE PROVISIONED DATA PLANE IS PLACED AND EXPOSED. Envoy Gateway does not
   # run the data plane itself: it provisions a Deployment and a Service per
