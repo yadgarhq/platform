@@ -9,7 +9,8 @@ accept, so behind Envoy that gap is the edge's alone.
 
 WHAT THIS CHART OWNS. The same ClientTrafficPolicy also sets
 `spec.timeout.http.idleTimeout` from `gatewayListener.idleTimeoutSeconds`
-(default 30, Max 2026-10-25: "Set idleTimeout ~10-30 s"). It is not a new
+(default 60, Max 2026-10-27: "Set 60s idleTimeout", which replaces the
+30 s of 2026-10-25). It is not a new
 object: the parent's object census does not move.
 
 WHAT IS REFUSED, BY NAME. A value that is not a whole number in 1..3600 (3600 is
@@ -45,7 +46,7 @@ from test_request_headers_timeout import (
 
 # ── WRITTEN DOWN ─────────────────────────────────────────────────────────────
 FIELD = "idleTimeout"
-DEFAULT_SECONDS = 30
+DEFAULT_SECONDS = 60
 VALUE_KEY = "gatewayListener.idleTimeoutSeconds"
 HEADERS_KEY = "gatewayListener.requestHeadersTimeoutSeconds"
 
@@ -73,7 +74,7 @@ def test_the_rendered_idle_duration_matches_the_crd_pattern(tmp_path):
 # ── THE SAME POLICY, NOT A NEW OBJECT ────────────────────────────────────────
 
 
-def test_the_default_is_thirty_seconds_on_the_one_policy(tmp_path):
+def test_the_default_is_sixty_seconds_on_the_one_policy(tmp_path):
     """One ClientTrafficPolicy still renders; it now carries both bounds."""
     policy, rendered = one_policy(tmp_path)
     assert len(policies(rendered)) == 1
