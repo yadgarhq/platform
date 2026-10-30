@@ -495,6 +495,12 @@ UPSTREAM_TLS = ("nats", "config", "nats", "tls")
             '`nats.tls.clientAuth` is "required" and `nats.config.merge.allow_non_tls` is true',
         ),
         (
+            # nats-server reads top-level keys case-insensitively (opts.go
+            # v2.14.6:1143 `strings.ToLower(k)`, :1454 `allow_non_tls`).
+            with_changes(NATS_VERIFIED, (("nats", "config", "merge", "Allow_Non_TLS"), True)),
+            '`nats.tls.clientAuth` is "required" and `nats.config.merge.Allow_Non_TLS` is true',
+        ),
+        (
             with_changes(
                 NATS_TLS_ONLY,
                 (("nats", "tls", "clientAuth"), "off"),
@@ -537,6 +543,7 @@ UPSTREAM_TLS = ("nats", "config", "nats", "tls")
         "required-ca-file-public-bundle",
         "required-ca-file-absent",
         "required-allow-non-tls",
+        "required-allow-non-tls-mixed-case",
         "off-with-verify",
         "required-without-enabled",
         "tls-ca-enabled",
@@ -586,6 +593,17 @@ def test_a_top_level_merge_tls_block_is_refused(tmp_path):
     ) in stderr, stderr
 
 
+def test_a_top_level_merge_tls_block_in_another_case_is_refused(tmp_path):
+    """nats-server lowercases every top-level key before its switch (opts.go
+    v2.14.6:1143, `case "tls":` at :1386), so `TLS` is the same block as `tls`."""
+    body = with_changes(
+        NATS_VERIFIED,
+        (("nats", "config", "merge", "TLS"), {"verify": False, "ca_file": "/etc/ssl/certs/ca-certificates.crt"}),
+    )
+    stderr = contract_refused(tmp_path, body)
+    assert "`nats.config.merge.TLS` overrides the `nats.config.nats.tls` keys this check reads" in stderr, stderr
+
+
 @pytest.mark.parametrize(
     "annotation",
     [False, "true", None],
@@ -604,4 +622,80 @@ def test_tls_on_without_the_checksum_annotation_is_refused(tmp_path, annotation)
 
 def test_tls_off_without_the_checksum_annotation_renders(tmp_path):
     result = contract(tmp_path, {"nats": {"podTemplate": {"configChecksumAnnotation": False}}})
+    assert result.returncode == 0, result.stderr
+
+
+# THE SIDE LISTENERS (yaadgaar 325, ADR-0852). Each upstream listener below has its
+# own `enabled` and `tls` and none of them sees `nats.config.nats.tls.merge.verify`,
+# so under `clientAuth: "required"` an enabled one is a way past mutual TLS.
+# `cluster` (6222, task 1519) and `monitor` (8222, plain HTTP) carry the same two
+# keys and are NOT in this list on purpose.
+SIDE_LISTENERS = ("websocket", "mqtt", "leafnodes", "gateway")
+# What nats-server itself accepts as a top-level key for those four, read off
+# server/opts.go at v2.14.6 (the vendored chart's appVersion and image tag):
+# :1301 `case "gateway":`, :1306 `case "leaf", "leafnodes":`,
+# :1786 `case "websocket", "ws":`, :1791 `case "mqtt":`, all under :1143
+# `switch strings.ToLower(k)`, so any casing of these is the same listener.
+SIDE_LISTENER_CONFIG_KEYS = ("websocket", "ws", "mqtt", "leafnodes", "leaf", "gateway")
+
+
+def test_the_side_listener_list_matches_the_upstream_chart():
+    """The literal in the template is gated against the vendored chart's own keys."""
+    import glob
+    import tarfile
+
+    (archive,) = glob.glob(str(CHART / "charts" / "nats-*.tgz"))
+    with tarfile.open(archive) as tar:
+        upstream = yaml.safe_load(tar.extractfile("nats/values.yaml"))["config"]
+    listeners = {
+        key
+        for key, value in upstream.items()
+        if isinstance(value, dict) and {"enabled", "tls"} <= set(value)
+    } - {"cluster", "monitor"}
+    assert listeners == set(SIDE_LISTENERS), listeners
+
+
+@pytest.mark.parametrize("listener", SIDE_LISTENERS)
+def test_a_side_listener_under_required_client_auth_is_refused(tmp_path, listener):
+    stderr = contract_refused(
+        tmp_path, with_changes(NATS_VERIFIED, (("nats", "config", listener, "enabled"), True))
+    )
+    assert f"`nats.config.{listener}.enabled` is true" in stderr, stderr
+    assert "`nats.tls.clientAuth` is \"required\"" in stderr, stderr
+
+
+def test_the_template_carries_both_listener_lists():
+    """The two literals in render-checks.yaml are the two constants above."""
+    template = (CHART / "templates" / "render-checks.yaml").read_text()
+    for names in (SIDE_LISTENERS, SIDE_LISTENER_CONFIG_KEYS):
+        literal = "(list " + " ".join(f'"{n}"' for n in names) + ")"
+        assert literal in template, literal
+
+
+@pytest.mark.parametrize(
+    "listener",
+    SIDE_LISTENER_CONFIG_KEYS + ("Websocket", "WS", "MQTT", "Leafnodes", "LEAF", "Gateway"),
+)
+def test_a_side_listener_block_in_the_top_level_merge_is_refused(tmp_path, listener):
+    """`nats.config.merge` is mergeOverwritten over the WHOLE rendered config, so it
+    can add a listener block without touching `nats.config.<l>.enabled`."""
+    stderr = contract_refused(
+        tmp_path,
+        with_changes(NATS_VERIFIED, (("nats", "config", "merge", listener), {"port": 9999})),
+    )
+    assert f"`nats.config.merge.{listener}`" in stderr, stderr
+
+
+@pytest.mark.parametrize("listener", SIDE_LISTENERS)
+def test_a_side_listener_renders_while_client_auth_is_off(tmp_path, listener):
+    """No posture is claimed at `off`, so the listener is the adopter's call."""
+    result = contract(
+        tmp_path, with_changes(NATS_TLS_ONLY, (("nats", "config", listener, "enabled"), True))
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_disabled_side_listener_under_required_client_auth_renders(tmp_path):
+    body = with_changes(NATS_VERIFIED, (("nats", "config", "websocket", "enabled"), False))
+    result = contract(tmp_path, body)
     assert result.returncode == 0, result.stderr

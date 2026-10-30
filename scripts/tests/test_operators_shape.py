@@ -76,6 +76,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1832,8 +1833,12 @@ def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
 
     `nats:` with nothing under it, with the broker arm cut out: the NATS subchart
     renders on ITS OWN defaults, because this chart's whole `nats` block went with
-    the deleted key. More documents than `nats.create: true` produces, and no
-    `nats-ingress` NetworkPolicy in front of any of them.
+    the deleted key. More documents than `nats.create: true` produces: no
+    authorization users, natsBox back on.
+
+    The `nats-ingress` NetworkPolicy DOES render in front of them (yaadgaar 359):
+    it follows helm's resolution of `condition: nats.create`, which leaves the
+    broker on for the deleted key, so the policy is asserted present here.
     """
     copy = chart_copy(tmp_path, "no-broker-arm")
     template = copy / "templates" / "render-checks.yaml"
@@ -1880,20 +1885,22 @@ def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
         f"{subchart_documents(asked.stdout)}. The harm this case records is that "
         f"the deleted key renders MORE, on upstream defaults."
     )
-    policies = [
-        (d.get("metadata") or {}).get("name")
-        for d in documents(deleted.stdout)
-        if d.get("kind") == "NetworkPolicy"
-    ]
-    assert not any(name and "nats" in name for name in policies), (
-        f"a nats NetworkPolicy rendered, so the harm is not the one described: "
-        f"{sorted(n for n in policies if n)}"
+    rendered = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in documents(deleted.stdout)}
+    # The whole `nats` block went, `fullnameOverride: nats` with it, so the
+    # broker is named after the release here (`platform-nats`).
+    assert ("StatefulSet", "platform-nats") in rendered, (
+        f"the deleted key no longer installs the broker, so the policy row "
+        f"measures nothing: {sorted(map(str, rendered))}"
+    )
+    assert ("NetworkPolicy", "nats-ingress") in rendered, (
+        "the deleted `nats` block installs the broker with no nats-ingress policy "
+        "in front of it (yaadgaar 359)"
     )
     print(
         f"operators-shape: red case 6 — without the broker arm, a deleted `nats` "
         f"block renders {subchart_documents(deleted.stdout)} subchart documents "
-        f"against {subchart_documents(asked.stdout)} for an explicit true, and no "
-        f"NetworkPolicy"
+        f"against {subchart_documents(asked.stdout)} for an explicit true, with "
+        f"nats-ingress in front of them"
     )
 
 
@@ -2070,3 +2077,132 @@ def test_reverting_the_register_branch_to_truthiness_puts_crds_beside_an_operato
         "operators-shape: red case 10 — a truthy-only register branch installs "
         "KEDA with 0 of its CRDs when `operators.create` is a falsy non-bool"
     )
+
+
+# ═══ A NON-BOOL REGISTER KEY BESIDE THE ESTATE, AND THE BROKER POLICY ════════
+
+
+def test_the_parent_still_names_a_non_bool_register_key_beside_the_estates_toggles(tmp_path):
+    """The parent's refusal survives an estate toggle being on (yaadgaar 367, ledger 1359).
+
+    `yadgarhq/chart` turns `certificates`, `internalCA`, `nats` and `valkey` on by
+    default, so a non-bool `platform.operators.create` there arrives BESIDE an
+    estate toggle. The helper reads that key as ON (ADR-0873), and if the
+    mixed-release guard counted it, this chart's `fail` would run first and shadow
+    the parent's `platform.operators.create is a <kind> rather than a boolean`.
+    The guard counts a register key only when it is a bool; the helper itself is
+    unchanged, because the vendored CRDs must keep following helm.
+    """
+    parent = parent_around(tmp_path, with_refusal=True)
+    for name, scalar, kind in THE_REGISTER_KEY_IS_NOT_A_BOOL:
+        overlay = values_file(
+            tmp_path / f"register-beside-a-toggle-{name}.yaml",
+            f"platform:\n  operators:\n    create: {scalar}\n  certificates:\n    create: true\n",
+        )
+        result = helm(
+            "template", "yadgar", str(parent), "-f", str(overlay),
+            "--api-versions", "cert-manager.io/v1",
+        )
+        assert result.returncode != 0, f"`{name}` was not refused: {result.stdout[:2000]}"
+        assert f"platform.operators.create is a {kind} rather than a boolean" in result.stderr, (
+            f"`{name}` beside `certificates.create: true`: the parent's refusal did "
+            f"not reach the adopter, so this chart shadowed it:\n{result.stderr}"
+        )
+        assert "asked for the operators" not in result.stderr, (
+            f"`{name}`: the mixed-release refusal fired for a non-bool register "
+            f"key: {result.stderr}"
+        )
+    print(
+        f"operators-shape: {len(THE_REGISTER_KEY_IS_NOT_A_BOOL)} non-bool register "
+        f"keys beside an estate toggle still reach the parent's refusal"
+    )
+
+
+def test_a_bool_register_key_beside_the_estates_toggles_is_still_refused(tmp_path):
+    """The other half: the skip is for non-bools only, a real `true` still counts."""
+    overlay = values_file(
+        tmp_path / "bool-register-beside-a-toggle.yaml",
+        "operators:\n  create: true\ncertificates:\n  create: true\n",
+    )
+    result = helm(
+        "template", "platform", str(CHART), "-f", str(overlay),
+        "--api-versions", "cert-manager.io/v1",
+    )
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "operators.create asked for the operators" in result.stderr, result.stderr
+
+
+def test_a_non_bool_broker_switch_under_a_bare_parent_keeps_the_policy(tmp_path):
+    """The broker's NetworkPolicy follows helm, not truthiness (yaadgaar 359, ADR-0873).
+
+    `condition: nats.create` leaves the broker ENABLED for any non-bool, so the
+    policy in front of 4222/8222 must render whenever the broker does. Under a
+    bare parent nothing refuses the value first, so the policy is the only
+    defence. The `null` row is the root-refused deletion and is not a present
+    non-bool, so it is left out.
+    """
+    parent = parent_around(tmp_path, with_refusal=False)
+    rows = [row for row in THE_BROKER_REGISTER_IS_NOT_A_BOOL if row[2] != "invalid"]
+    assert len(rows) == 3
+    for name, body, _kind in rows:
+        result = render_under_parent_body(tmp_path, parent, f"policy-{name}", body)
+        assert result.returncode == 0, f"`{name}`: {result.stderr}"
+        rendered = {(d["kind"], d["metadata"]["name"]) for d in documents(result.stdout)}
+        assert ("StatefulSet", "nats") in rendered, (
+            f"`{name}`: helm no longer installs the broker for this value, so the "
+            f"row measures nothing: {sorted(rendered)}"
+        )
+        assert ("NetworkPolicy", "nats-ingress") in rendered, (
+            f"`{name}`: the broker is installed with no nats-ingress policy"
+        )
+
+
+def test_a_bool_false_broker_switch_renders_neither_broker_nor_policy(tmp_path):
+    parent = parent_around(tmp_path, with_refusal=False)
+    result = render_under_parent_body(tmp_path, parent, "policy-false", "nats:\n  create: false\n")
+    assert result.returncode == 0, result.stderr
+    rendered = {(d["kind"], d["metadata"]["name"]) for d in documents(result.stdout)}
+    assert ("StatefulSet", "nats") not in rendered
+    assert ("NetworkPolicy", "nats-ingress") not in rendered
+
+
+# The ONE sanctioned dotted read of the broker switch: off only on the bool `false`
+# (ADR-0873). A line is clean only when every `.Values.nats.create` on it sits
+# inside this exact expression; a `kindIs` elsewhere on the line buys nothing.
+BROKER_SWITCH_READ = '(and (kindIs "bool" .Values.nats.create) (not .Values.nats.create))'
+BROKER_SWITCH_DOTTED = re.compile(r"\.Values\.nats\.create\b")
+
+
+def reads_the_broker_switch_by_truthiness(line):
+    return bool(BROKER_SWITCH_DOTTED.search(line.replace(BROKER_SWITCH_READ, "")))
+
+
+@pytest.mark.parametrize(
+    ("line", "truthy"),
+    [
+        ('{{- if not ' + BROKER_SWITCH_READ + ' }}', False),
+        ("{{- if .Values.nats.create }}", True),
+        ('{{- if .Values.nats.create }}{{/* kindIs "bool" */}}', True),
+        ('{{- if or (kindIs "bool" .Values.nats.create) .Values.nats.create }}', True),
+        ('{{- if and (kindIs "map" .Values.nats) .Values.nats.create }}', True),
+        ('{{- if and ' + BROKER_SWITCH_READ + ' $.Values.nats.create }}', True),
+    ],
+    ids=["sanctioned", "bare", "kindis-in-comment", "or-kindis", "kindis-other-key", "sanctioned-plus-bare"],
+)
+def test_the_truthiness_scan_reads_the_expression_not_the_line(line, truthy):
+    assert reads_the_broker_switch_by_truthiness(line) is truthy, line
+
+
+def test_no_template_reads_the_broker_switch_by_truthiness():
+    """Every read of `.Values.nats.create` in a template is a bool-aware one (yaadgaar 359).
+
+    A new `{{ if .Values.nats.create }}` would reopen the same split from helm's
+    resolution, so it reddens here. The dotted form is the truthiness one; the
+    `index`/`hasKey` reads in the register-key arm carry their own `kindIs`.
+    """
+    offenders = []
+    for path in sorted(p for p in (CHART / "templates").rglob("*") if p.is_file()):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if reads_the_broker_switch_by_truthiness(line):
+                offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert not offenders, "truthiness read of nats.create:\n" + "\n".join(offenders)
