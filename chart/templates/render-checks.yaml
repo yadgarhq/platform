@@ -210,7 +210,7 @@ against the parent standing ALONE, before these arms existed — on helm v4.3.0:
                                      and `rather than a boolean`
   platform.operators.create: <null> -> EXIT 0, 197 objects, 165 from the subcharts
   platform.nats.create: "yes" / 0 / {}  -> EXIT 1, the PARENT refuses
-  platform.nats.create: <null>    -> EXIT 0, the broker in, no NetworkPolicy
+  platform.nats.create: <null>    -> EXIT 0, the broker in, nats-ingress in (was: none, until yaadgaar 359)
   platform.nats: <null>           -> EXIT 0, the broker in on upstream defaults
 
 SO THE PRESENT-NON-BOOL BRANCH IS ROOT-ONLY, for arm two's reason exactly: the
@@ -225,6 +225,10 @@ AND IT TAKES ARM TWO'S RESIDUAL WITH IT, WIDENED. A third-party parent carrying
 no refusal of its own now gets the silent fail-open for these shapes as well as
 for arm two's six, which is stated here and measured there rather than left for
 the next reader to work out from the branch condition.
+THE BROKER'S HALF OF THAT RESIDUAL IS CLOSED (yaadgaar 359): `ingress-policies.yaml`
+reads `nats.create` off only on the bool `false`, as helm does, so a present non-bool
+under a bare parent still gets the broker AND its nats-ingress policy.
+`test_a_non_bool_broker_switch_under_a_bare_parent_keeps_the_policy` is the gate.
 
 AND THE DELETED BRANCH IS UNCONDITIONAL, because the parent is STRUCTURALLY blind
 to it. Not blind in arm one's way — a parent probe reads `hasKey
@@ -344,8 +348,7 @@ first `range $operator` in this file, which `test_render_checks.py` reads.
       "dependency condition from. "
       "The broker is a dependency declared `condition: nats.create`, and helm leaves a dependency ENABLED when "
       "the path its condition names does not resolve — so a value in this shape does not turn the broker off, "
-      "it installs one while this chart's own nats-ingress NetworkPolicy reads the same unusable value as false "
-      "and skips, leaving the broker with nothing in front of it. "
+      "it installs one, and this chart's own nats-ingress NetworkPolicy follows helm and renders with it (ADR-0873). "
       "Write `nats.create: false` to leave the broker out, or `nats.create: true` to install it."))
       (kindOf (index .Values.nats "create"))) }}
 {{- end }}
@@ -407,6 +410,21 @@ because `yadgarhq/chart` turns estate toggles on by default.
 `test_the_parent_still_names_a_non_map_block_beside_the_estates_toggles` is the
 gate.
 
+A NON-BOOL REGISTER KEY IS NOT COUNTED EITHER (yaadgaar 367, ledger 1359), for the
+same reason and with the same residual. The helper resolves a present non-bool
+`operators.create` ON, and `yadgarhq/chart` refuses it by the path the adopter
+typed (`platform.operators.create is a <kind> rather than a boolean`) while turning
+estate toggles on by default, so counting it here would run first and shadow that
+refusal. At the root arm one refuses the shape before this guard matters. UNDER A
+BARE PARENT with no refusal of its own, a non-bool register key beside an estate
+toggle is therefore no longer refused as a mixed release, and helm installs the
+operators and the estate in one release (the failure ADR-0787 names, mid-apply).
+Only the register key is skipped: a per-operator sub-key is returned by the helper
+only when it is a bool. The helper is NOT changed, because the vendored CRDs must
+keep following helm (ADR-0873).
+`test_the_parent_still_names_a_non_bool_register_key_beside_the_estates_toggles` is
+the gate.
+
 THE SECOND CONJUNCT IS EVERY OTHER `create` TOGGLE THIS CHART CARRIES, not only the
 ones that render a CRD-backed kind. The rule being enforced is the release SHAPE —
 operators alone, then everything else — and a rule stated over a subset is a rule an
@@ -423,7 +441,7 @@ these two gates keep the LISTS in step, which the helper says nothing about.
 {{- $operatorKeysOn := list }}
 {{- range $operator := (list "argoCd" "certManager" "envoyGateway" "keda" "mariadbOperator" "prometheus") }}
 {{- $key := (include "platform.operator-create" (dict "context" $ "operator" $operator)) }}
-{{- if and $key (kindIs "map" $.Values.operators) }}
+{{- if and $key (kindIs "map" $.Values.operators) (or (ne $key "operators.create") (kindIs "bool" (index $.Values.operators "create"))) }}
 {{- $operatorKeysOn = append $operatorKeysOn $key }}
 {{- end }}
 {{- end }}
@@ -709,7 +727,17 @@ takes effect. The reloader stays on for leaf renewal.
 {{- $verify := index $upMerge "verify" }}
 {{- $caFile := index $upMerge "ca_file" | default "" }}
 {{- $expectedCaFile := printf "%s/ca.crt" (trimSuffix "/" ((index $up "dir") | default "/etc/nats-certs/nats")) }}
-{{- $allowNonTls := not (empty (dig "config" "merge" "allow_non_tls" false .Values.nats)) }}
+{{- /* `nats.config.merge` is mergeOverwritten over the whole rendered config, and
+nats-server reads every top-level key through `switch strings.ToLower(k)`
+(server/opts.go v2.14.6:1143), so `TLS` or `Allow_Non_TLS` there is the same
+setting as the lowercase key. Every read of this map below is by lowercased key. */ -}}
+{{- $natsMerge := dig "config" "merge" dict .Values.nats }}
+{{- $allowNonTls := list }}
+{{- range $key, $value := $natsMerge }}
+{{- if and (eq (lower $key) "allow_non_tls") (not (empty $value)) }}
+{{- $allowNonTls = append $allowNonTls $key }}
+{{- end }}
+{{- end }}
 {{- $natsDisagree := list }}
 {{- if ne $natsEnabled $upEnabled }}
 {{- $natsDisagree = append $natsDisagree (printf "`nats.tls.enabled` is %t and `nats.config.nats.tls.enabled` is %t: the platform switch and the upstream key that renders the listener must agree" $natsEnabled $upEnabled) }}
@@ -727,8 +755,8 @@ takes effect. The reloader stays on for leaf renewal.
 {{- if ne (toString $caFile) $expectedCaFile }}
 {{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.merge.ca_file` is %q rather than %q: the broker verifies clients against the internal CA cert-manager writes beside its leaf, never a public bundle" (toString $caFile) $expectedCaFile) }}
 {{- end }}
-{{- if $allowNonTls }}
-{{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"required\" and `nats.config.merge.allow_non_tls` is true: a plaintext client never reaches the TLS handshake, so `verify` cannot refuse it" }}
+{{- range $key := $allowNonTls }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.tls.clientAuth` is \"required\" and `nats.config.merge.%s` is true: a plaintext client never reaches the TLS handshake, so `verify` cannot refuse it" $key) }}
 {{- end }}
 {{- else if not (empty $verify) }}
 {{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"off\" and `nats.config.nats.tls.merge.verify` is true: the platform mode and the upstream key must agree" }}
@@ -736,8 +764,38 @@ takes effect. The reloader stays on for leaf renewal.
 {{- if not (empty (dig "tlsCA" "enabled" false .Values.nats)) }}
 {{- $natsDisagree = append $natsDisagree "`nats.tlsCA.enabled` is true: it writes a second `ca_file` from another source; this chart reads the CA through `nats.config.nats.tls.merge.ca_file`" }}
 {{- end }}
-{{- if hasKey (dig "config" "merge" dict .Values.nats) "tls" }}
-{{- $natsDisagree = append $natsDisagree "`nats.config.merge.tls` overrides the `nats.config.nats.tls` keys this check reads; write them under `nats.config.nats.tls.merge`" }}
+{{- /* THE SIDE LISTENERS (yaadgaar 325, ADR-0852). The upstream chart has four more
+listeners, each off by default and each with its own `tls` block that
+`nats.config.nats.tls.merge.verify` does not reach: an enabled one accepts a client
+with no certificate. Under "required" they are REFUSED OUTRIGHT, not offered a TLS
+block of their own (Max's ruling): no consumer exists, and ADR-0852 is satisfied by
+their absence. `nats.config.merge` is mergeOverwritten over the whole rendered
+config, so a listener block written there is the same hole by another key, and it
+is read the way nats-server reads it: lowercased (opts.go v2.14.6:1143), with the
+server's own aliases — :1301 `case "gateway":`, :1306 `case "leaf", "leafnodes":`,
+:1786 `case "websocket", "ws":`, :1791 `case "mqtt":`. The `enabled` keys are the
+upstream CHART's, which it reads by exact name, so they stay exact. Both lists are
+literals: `test_the_side_listener_list_matches_the_upstream_chart` gates the first
+against the vendored chart's `config:` keys, and
+`test_the_template_carries_both_listener_lists` pins both to the test's constants.
+The cluster route listener (6222) and the monitor are NOT here; route TLS is task
+1519's. */ -}}
+{{- if eq $natsMode "required" }}
+{{- range $listener := (list "websocket" "mqtt" "leafnodes" "gateway") }}
+{{- if not (empty (dig "config" $listener "enabled" false $.Values.nats)) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.%s.enabled` is true and `nats.tls.clientAuth` is \"required\": that listener does not verify client certificates, so it is a way past mutual TLS (ADR-0852). Turn it off" $listener) }}
+{{- end }}
+{{- end }}
+{{- range $key, $_ := $natsMerge }}
+{{- if has (lower $key) (list "websocket" "ws" "mqtt" "leafnodes" "leaf" "gateway") }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.merge.%s` adds a listener while `nats.tls.clientAuth` is \"required\": that listener does not verify client certificates (ADR-0852). Remove the block" $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $key, $_ := $natsMerge }}
+{{- if eq (lower $key) "tls" }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.merge.%s` overrides the `nats.config.nats.tls` keys this check reads; write them under `nats.config.nats.tls.merge`" $key) }}
+{{- end }}
 {{- end }}
 {{- if $natsEnabled }}
 {{- $checksum := dig "podTemplate" "configChecksumAnnotation" false .Values.nats }}
