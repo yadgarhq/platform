@@ -1,0 +1,87 @@
+# THE ESTATE PASS FOR THE SHARED TRIVY GATE (yaadgaar #179, ruled 2026-11-01,
+# option (a)). `scripts/trivy_gate.py` (yadgarhq/actions) scans this chart
+# once per CI values file: `ci/values.yaml` is the primary pass, and every
+# `ci/*-values.yaml` is one more pass, rendered ALONE, never layered over
+# `ci/values.yaml`. ONLY the trivy gate reads this file. `helm lint --strict`,
+# `d80_portability.py` and `service_immutable.py` keep `ci/values.yaml`.
+#
+# WHY A SECOND FILE AT ALL: THE MIXED-RELEASE GUARD (`templates/render-checks.yaml`,
+# ADR-0787). `ci/values.yaml` sets `operators.create: true` and nothing else,
+# because a release that installs an operator AND renders one of this chart's
+# own objects refuses at render time. So the primary pass scans the operator
+# subcharts and never this chart's own estate templates. This file is the
+# other release shape: `operators.create: false` and EVERY estate toggle on,
+# so the estate templates and the nats subchart render and are scanned in this
+# repository's own pull request, not only one level up in `yadgarhq/chart`.
+#
+# A RENDERABLE POSTURE, NOT A DEPLOYMENT. The values mirror
+# `example/values.yaml`, with both brokers at the TLS-on posture an adopter
+# runs (`tls.enabled: true`, `clientAuth: "required"`, valkey's plaintext port
+# closed), so the scan sees the certificate mounts too. The hostnames are
+# placeholders under the reserved `.test` TLD. "required" is QUOTED for the
+# same reason "off" is everywhere else in this chart.
+#
+# THE TWO OPERATOR API GROUPS this render needs (`cert-manager.io/v1` for
+# `internalCA`/`certificates`/`edgeTLS`, `gateway.envoyproxy.io/v1alpha1` for
+# `gatewayListener`, `templates/_require_api.tpl`) come from
+# `ci/api-versions.txt`, which every pass reads.
+#
+# NOT A PLACE TO FIX FINDINGS. A securityContext set here would turn the scan
+# green while every adopter's render stays as it is. Upstream findings go in
+# `.trivyignore.yaml` with a reason and an expiry (ADR-0847); a real fix goes
+# in `chart/values.yaml` defaults.
+#
+# Measured 2026-11-01 against this chart's origin/main after `helm dependency
+# update chart`, `helm template platform chart -f chart/ci/estate-values.yaml`
+# with both API versions: rc 0, 44 objects from 18 template files.
+operators:
+  create: false
+
+internalCA:
+  create: true
+
+certificates:
+  create: true
+
+edgeTLS:
+  create: true
+  issuerRef:
+    name: yadgar-internal-ca
+    kind: Issuer
+  commonName: yadgar.example.test
+  dnsNames: [yadgar.example.test]
+
+gatewayListener:
+  create: true
+  hostname: yadgar.example.test
+
+valkey:
+  create: true
+  tls:
+    enabled: true
+    clientAuth: "required"
+    plaintext: false
+
+# The chart's own TLS keys and the upstream keys that do the work, in
+# agreement: `templates/render-checks.yaml` refuses any disagreement (B-N2).
+nats:
+  create: true
+  tls:
+    enabled: true
+    clientAuth: "required"
+  config:
+    nats:
+      tls:
+        enabled: true
+        secretName: nats-tls
+        merge:
+          verify: true
+          ca_file: /etc/nats-certs/nats/ca.crt
+
+bootstrap:
+  create: true
+  adminToken:
+    secretName: admin-bootstrap-token
+
+preflight:
+  enabled: true
