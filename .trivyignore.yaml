@@ -295,3 +295,28 @@ misconfigurations:
       values; not yet done. Not an estate-authored template (ADR-0847;
       upstream glob per plan D-A1).
     expired_at: 2027-01-08
+  - id: KSV-0014
+    paths:
+      - "chart/charts/nats/templates/stateful-set.yaml"
+    statement: >-
+      Upstream nats StatefulSet (nats chart 2.14.6) ships no
+      `readOnlyRootFilesystem: true` on the nats and reloader containers;
+      settable through this chart's nats `container.merge` /
+      `reloader.merge` values, not yet done. Rendered only by the estate
+      pass (`chart/ci/estate-values.yaml`, yaadgaar #179); the same entry
+      covers the same file in `yadgarhq/chart`. Not an estate-authored
+      template (ADR-0847; upstream glob per plan D-A1).
+    expired_at: 2027-01-08
+  - id: KSV-0118
+    paths:
+      - "chart/charts/nats/templates/stateful-set.yaml"
+    statement: >-
+      Upstream nats StatefulSet (nats chart 2.14.6) sets no pod or
+      container securityContext, so the pod and the nats/reloader
+      containers run with the Kubernetes default, which allows root. Not
+      an estate-authored template (ADR-0847; upstream glob per plan D-A1);
+      this chart can close it through the nats chart's
+      `podTemplate.merge` / `container.merge` / `reloader.merge` values and
+      has not yet. Rendered only by the estate pass
+      (`chart/ci/estate-values.yaml`, yaadgaar #179).
+    expired_at: 2027-01-08
