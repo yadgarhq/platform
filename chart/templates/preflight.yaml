@@ -96,30 +96,30 @@ spec:
   # is not running", which does not become "it is running" on the second attempt.
   # More attempts would only multiply the bound before the install is allowed to
   # fail.
-  backoffLimit: {{ $preflight.backoffLimit }}
+  backoffLimit: {{ $preflight.backoffLimit | int }}
   # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AS A BACKSTOP BEHIND THE ONE THE
   # SCRIPT KEEPS ITSELF. It covers everything the script cannot see — a pod that
   # never schedules, an image that never pulls — so the sync fails here instead
   # of waiting on Argo's sync timeout. The script reads the WALL CLOCK (ledger
   # 1235): every loop ends by its own `TIMEOUT_SECONDS` or by the script's
-  # `SCRIPT_BUDGET_SECONDS` of {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s, whichever comes first, so
+  # `SCRIPT_BUDGET_SECONDS` of {{ $loops | int }} bounded loops x {{ $preflight.timeoutSeconds | int }}s, whichever comes first, so
   # on a slow API server the script names the slow operator and cleans up before
   # this fires. The margin covers scheduling, the image pull, the worst overrun
   # past the budget — max(poll + 2 requests, 3 requests), 105s at the 35s request
   # bound — and the cleanup (`test_hook_deadlines.py` checks it):
-  # {{ $loops }} bounded loops x {{ $preflight.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
-  activeDeadlineSeconds: {{ $deadline }}
+  # {{ $loops | int }} bounded loops x {{ $preflight.timeoutSeconds | int }}s + {{ $margin | int }}s margin = {{ $deadline | int }}s.
+  activeDeadlineSeconds: {{ $deadline | int }}
   template:
     metadata:
       labels: { app.kubernetes.io/name: preflight }
     spec:
-      serviceAccountName: {{ $preflight.serviceAccountName }}
+      {{- dict "serviceAccountName" $preflight.serviceAccountName | toYaml | nindent 6 }}
       automountServiceAccountToken: true
       restartPolicy: Never
       # TIME FOR THE TRAP TO CLEAN UP AFTER A KILL. `sh` runs its TERM trap only
-      # once the foreground command returns: {{ $requestMaxTime }}s for the request in flight
-      # + {{ $objects }} objects x {{ $cleanupMaxTime }}s per cleanup DELETE = {{ $grace }}s.
-      terminationGracePeriodSeconds: {{ $grace }}
+      # once the foreground command returns: {{ $requestMaxTime | int }}s for the request in flight
+      # + {{ $objects | int }} objects x {{ $cleanupMaxTime | int }}s per cleanup DELETE = {{ $grace | int }}s.
+      terminationGracePeriodSeconds: {{ $grace | int }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 100
@@ -135,7 +135,7 @@ spec:
           emptyDir: {}
       containers:
         - name: preflight
-          image: {{ $preflight.image }}
+          {{- dict "image" $preflight.image | toYaml | nindent 10 }}
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: scratch
@@ -164,24 +164,24 @@ spec:
               # enables moves the first and not the second, which is the one
               # mutation an object census would never see.
               PROBES="{{ join " " $probes }}"
-              EXPECTED_PROBES={{ len $probes }}
+              EXPECTED_PROBES={{ len $probes | int }}
 
-              TIMEOUT_SECONDS={{ $preflight.timeoutSeconds }}
-              POLL_SECONDS={{ $preflight.pollSeconds }}
+              TIMEOUT_SECONDS={{ $preflight.timeoutSeconds | int }}
+              POLL_SECONDS={{ $preflight.pollSeconds | int }}
               # THE SCRIPT'S OWN WALL-CLOCK BUDGET (ledger 1235): every bounded
               # loop it can run, each at `TIMEOUT_SECONDS`. Read off `date`, never
               # off a counter of sleeps — a counter charged only the sleep let a
               # loop against an API server answering each poll in 34s run 1480s
               # of a 120s bound, and the Job deadline ended it with no operator
               # named. The deadline above is this budget + the margin.
-              SCRIPT_BUDGET_SECONDS={{ mul $loops $preflight.timeoutSeconds }}
+              SCRIPT_BUDGET_SECONDS={{ mul $loops $preflight.timeoutSeconds | int }}
               SCRIPT_DEADLINE=$(( $(date +%s) + SCRIPT_BUDGET_SECONDS ))
               PROBE_NAME={{ $preflight.probeName }}
               # EVERY REQUEST ENDS. `_preflight.tpl` records why each number is
               # what it is; the cleanup swaps in the shorter one.
-              REQUEST_MAX_TIME={{ $requestMaxTime }}
-              CLEANUP_MAX_TIME={{ $cleanupMaxTime }}
-              CONNECT_TIMEOUT={{ include "platform.hookRequest.connectTimeout" . }}
+              REQUEST_MAX_TIME={{ $requestMaxTime | int }}
+              CLEANUP_MAX_TIME={{ $cleanupMaxTime | int }}
+              CONNECT_TIMEOUT={{ include "platform.hookRequest.connectTimeout" . | int }}
 
               # THE PATHS THE CLEANUP WALKS. Appended as each object is created,
               # so a probe that dies half-way still leaves its cleanup a complete

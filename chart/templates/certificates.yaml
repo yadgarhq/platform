@@ -16,7 +16,20 @@ manifests name them and how every consuming chart already mounts them.
 RENAMING `certificates.leaves` SILENTLY EMPTIES THIS RANGE, which is exactly the
 "passes having examined nothing" failure the ladder gate exists to catch — so that
 rename is one of that gate's constructed red cases.
+
+A NAMED TEMPLATE, INCLUDED ONCE BELOW, so the last arm of `render-checks.yaml`
+can render the same objects again and parse them back (yaadgaar 534).
+
+EVERY VALUE IS YAML-ENCODED, NOT PRINTED (yaadgaar 534, 537). A raw
+`{{ $leaf.commonName }}` let a string carrying a newline end the scalar and start
+a sibling key of `spec` — `isCA: true` among them — or, with a line starting
+`---`, a whole new document; helm keeps the last of two equal keys. `toYaml` of a
+one-key map, indented by `nindent`, keeps any string one scalar at the right
+depth; an inline `toYaml` after the key does not, because a block scalar it emits
+lands at the key's own indent. The one-line values arm in `render-checks.yaml`
+also refuses a control character in every one of these values outright.
 */}}
+{{- define "platform.certificates.leaves" }}
 {{- if .Values.certificates.create }}
 {{- $certificates := .Values.certificates }}
 {{- range $name, $leaf := $certificates.leaves }}
@@ -24,29 +37,31 @@ rename is one of that gate's constructed red cases.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ $name }}
+  {{- dict "name" $name | toYaml | nindent 2 }}
 spec:
-  secretName: {{ $name }}
-  commonName: {{ $leaf.commonName }}
+  {{- dict "secretName" $name | toYaml | nindent 2 }}
+  {{- dict "commonName" $leaf.commonName | toYaml | nindent 2 }}
   dnsNames:
-    - {{ $leaf.commonName }}
+    {{- list $leaf.commonName | toYaml | nindent 4 }}
     {{- if $leaf.clusterLocalNames }}
     # THE SERVICE, IN THE RELEASE'S NAMESPACE. A client verifies against the host
     # it asked for, not the address it reached, so a caller in another namespace
     # dialling the long form needs that form named here.
-    - {{ printf "%s.%s" $leaf.commonName $.Release.Namespace }}
-    - {{ printf "%s.%s.svc" $leaf.commonName $.Release.Namespace }}
-    - {{ printf "%s.%s.svc.cluster.local" $leaf.commonName $.Release.Namespace }}
+    {{- list
+          (printf "%s.%s" $leaf.commonName $.Release.Namespace)
+          (printf "%s.%s.svc" $leaf.commonName $.Release.Namespace)
+          (printf "%s.%s.svc.cluster.local" $leaf.commonName $.Release.Namespace)
+        | toYaml | nindent 4 }}
     {{- end }}
-  duration: {{ $certificates.duration }}
+  {{- dict "duration" $certificates.duration | toYaml | nindent 2 }}
   # THE RUNG. Distinct across every leaf in this estate, six hours apart, so at
   # most one service restarts per renewal instant. Read `values.yaml`'s header
   # before moving one.
-  renewBefore: {{ $leaf.renewBefore }}
+  {{- dict "renewBefore" $leaf.renewBefore | toYaml | nindent 2 }}
   privateKey:
-    algorithm: {{ $certificates.privateKey.algorithm }}
-    size: {{ $certificates.privateKey.size }}
-    rotationPolicy: {{ $certificates.privateKey.rotationPolicy }}
+    {{- dict "algorithm" $certificates.privateKey.algorithm | toYaml | nindent 4 }}
+    {{- dict "size" $certificates.privateKey.size | toYaml | nindent 4 }}
+    {{- dict "rotationPolicy" $certificates.privateKey.rotationPolicy | toYaml | nindent 4 }}
   {{- /* YAML-ENCODED, NOT PRINTED. A raw `- {{ . }}` let one string carrying a
   newline render as two list items. `toYaml` keeps every element one scalar; the
   leaf usages arm in `render-checks.yaml` also refuses any element outside
@@ -54,8 +69,10 @@ spec:
   usages:
     {{- toYaml $leaf.usages | nindent 4 }}
   issuerRef:
-    name: {{ $certificates.issuerRef.name }}
-    kind: {{ $certificates.issuerRef.kind }}
+    {{- dict "name" $certificates.issuerRef.name | toYaml | nindent 4 }}
+    {{- dict "kind" $certificates.issuerRef.kind | toYaml | nindent 4 }}
     group: cert-manager.io
 {{- end }}
 {{- end }}
+{{- end }}
+{{- include "platform.certificates.leaves" . }}

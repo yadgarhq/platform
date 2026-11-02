@@ -245,7 +245,7 @@ each failure, capped at six minutes (Kubernetes, "Pod backoff failure policy").
 {{- $total = add $total (min $delay 360) -}}
 {{- $delay = mul $delay 2 -}}
 {{- end -}}
-{{- $total -}}
+{{- $total | int -}}
 {{- end -}}
 
 {{/*

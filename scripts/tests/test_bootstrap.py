@@ -1468,7 +1468,7 @@ def chart_bound_to_cluster_admin(destination: Path) -> Path:
         "roleRef:\n"
         "  apiGroup: rbac.authorization.k8s.io\n"
         "  kind: Role\n"
-        "  name: {{ $bootstrap.serviceAccountName }}\n"
+        '  {{- dict "name" $bootstrap.serviceAccountName | toYaml | nindent 2 }}\n'
     )
     assert reference in text, "the roleRef moved; this red case is now testing nothing"
     template.write_text(

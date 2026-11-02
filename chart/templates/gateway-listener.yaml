@@ -48,7 +48,7 @@ pruned policy returns the edge to no headers timeout and a 1 h idle timeout.
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
-  name: {{ $listener.className }}
+  {{- dict "name" $listener.className | toYaml | nindent 2 }}
   annotations:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
@@ -56,16 +56,16 @@ spec:
   # carries as `config.envoyGateway.gateway.controllerName`, read off
   # `helm show values` at the pinned version. A class naming a controller nothing
   # runs is a class no Gateway can ever be accepted by.
-  controllerName: {{ $listener.controllerName }}
+  {{- dict "controllerName" $listener.controllerName | toYaml | nindent 2 }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
-  name: {{ $listener.gatewayName }}
+  {{- dict "name" $listener.gatewayName | toYaml | nindent 2 }}
   annotations:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
-  gatewayClassName: {{ $listener.className }}
+  {{- dict "gatewayClassName" $listener.className | toYaml | nindent 2 }}
 
   # ATTACHED HERE RATHER THAN ON THE GatewayClass, so the EnvoyProxy lives beside
   # the Gateway it configures instead of a cluster-scoped object reaching into one
@@ -74,7 +74,7 @@ spec:
     parametersRef:
       group: gateway.envoyproxy.io
       kind: EnvoyProxy
-      name: {{ $listener.envoyProxy.name }}
+      {{- dict "name" $listener.envoyProxy.name | toYaml | nindent 6 }}
 
   listeners:
     # ONE LISTENER, HTTPS ONLY. A port-80 listener would exist only to redirect,
@@ -84,8 +84,9 @@ spec:
       protocol: HTTPS
       port: 443
       {{- /* `gatewayListener.hostname`, else `global.hostname` (ADR-0808); see
-      `_hostname.tpl` for the order. */}}
-      hostname: {{ include "platform.hostname" (dict "local" $listener.hostname "context" $) }}
+      `_hostname.tpl` for the order. YAML-encoded, not printed: a newline in it
+      wrote a sibling key into the listener (yaadgaar 537). */}}
+      {{- dict "hostname" (include "platform.hostname" (dict "local" $listener.hostname "context" $)) | toYaml | nindent 6 }}
       tls:
         mode: Terminate
         certificateRefs:
@@ -96,7 +97,7 @@ spec:
           # ReferenceGrant, so both live in the release namespace and there is no
           # grant to forget.
           - kind: Secret
-            name: {{ $listener.certificateSecretName }}
+            {{- dict "name" $listener.certificateSecretName | toYaml | nindent 12 }}
       allowedRoutes:
         namespaces:
           # The release namespace only. Routes are attached by the modules being
@@ -116,7 +117,7 @@ so editing any one of the three is caught.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
-  name: {{ $listener.envoyProxy.name }}
+  {{- dict "name" $listener.envoyProxy.name | toYaml | nindent 2 }}
   annotations:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
@@ -124,7 +125,7 @@ spec:
     type: Kubernetes
     kubernetes:
       envoyDeployment:
-        replicas: {{ $listener.envoyProxy.replicas }}
+        replicas: {{ $listener.envoyProxy.replicas | int }}
         {{- /*
         PLACEMENT, RENDERED ONLY WHEN STATED (ADR-0809). Unset, `pod` is ABSENT
         rather than `{}`, so an install that never sets these keys renders the
@@ -147,7 +148,7 @@ spec:
       envoyService:
         # `LoadBalancer` by default. A cluster without a load-balancer controller
         # (kind, bare metal) sets `NodePort` and pins `httpsNodePort` below.
-        type: {{ $listener.envoyProxy.serviceType }}
+        {{- dict "type" $listener.envoyProxy.serviceType | toYaml | nindent 8 }}
         {{- /*
         THE PATCH IS THE ONLY ROUTE TO A PINNED NODEPORT. Envoy Gateway's
         KubernetesServiceSpec exposes `type` and no nodePort field; `patch` is its
@@ -164,7 +165,7 @@ spec:
             spec:
               ports:
                 - port: 443
-                  nodePort: {{ . }}
+                  nodePort: {{ . | int }}
         {{- end }}
 ---
 {{/*
@@ -191,14 +192,14 @@ against the gateway's bound, which this chart cannot see.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy
 metadata:
-  name: {{ $listener.gatewayName }}-upstream-idle
+  {{- dict "name" (printf "%s-upstream-idle" $listener.gatewayName) | toYaml | nindent 2 }}
   annotations:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: {{ $listener.gatewayName }}
+      {{- dict "name" $listener.gatewayName | toYaml | nindent 6 }}
   timeout:
     http:
       connectionIdleTimeout: {{ printf "%ds" (int64 $idle) | quote }}
@@ -254,14 +255,14 @@ THE VALUES ARE CHECKED HERE, as the upstream idle timeout above is:
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
 metadata:
-  name: {{ $listener.gatewayName }}-request-headers
+  {{- dict "name" (printf "%s-request-headers" $listener.gatewayName) | toYaml | nindent 2 }}
   annotations:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: {{ $listener.gatewayName }}
+      {{- dict "name" $listener.gatewayName | toYaml | nindent 6 }}
   timeout:
     http:
       requestHeadersReceivedTimeout: {{ printf "%ds" (int64 $headers) | quote }}

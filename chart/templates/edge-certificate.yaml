@@ -47,7 +47,14 @@ false` the Secret the listener terminates on stays, and the edge fails when
 that leaf expires; with it set true, the Secret goes with the Certificate and
 the edge fails at once. The listener still renders either way, so no render
 check sees the loss coming. `Delete=false` stays out, same as there.
+
+A NAMED TEMPLATE, INCLUDED ONCE BELOW, for the reason `certificates.yaml` gives:
+the last arm of `render-checks.yaml` parses this object back (yaadgaar 534).
+EVERY VALUE IS YAML-ENCODED for the reason given there too (yaadgaar 534,
+537) — each was printed raw, and a newline in any one of them, or in the
+`global.hostname` the names fall back to, wrote a sibling key into `spec`.
 */}}
+{{- define "platform.certificates.edge" }}
 {{- if .Values.edgeTLS.create }}
 {{- $edge := .Values.edgeTLS }}
 {{- $issuerRef := $edge.issuerRef | default dict }}
@@ -57,33 +64,31 @@ check sees the loss coming. `Delete=false` stays out, same as there.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ $edge.name }}
+  {{- dict "name" $edge.name | toYaml | nindent 2 }}
   annotations:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
-  secretName: {{ $edge.name }}
+  {{- dict "secretName" $edge.name | toYaml | nindent 2 }}
   {{- /* `edgeTLS.commonName` and `edgeTLS.dnsNames`, else `global.hostname`
   (ADR-0808); see `_hostname.tpl` for the order. An empty `dnsNames` becomes a
   list of the one resolved hostname. */}}
-  commonName: {{ include "platform.hostname" (dict "local" $edge.commonName "context" $) }}
+  {{- dict "commonName" (include "platform.hostname" (dict "local" $edge.commonName "context" $)) | toYaml | nindent 2 }}
   dnsNames:
-    {{- range ($edge.dnsNames | default (list (include "platform.hostname" (dict "local" "" "context" $)))) }}
-    - {{ . }}
-    {{- end }}
-  duration: {{ $edge.duration }}
+    {{- $edge.dnsNames | default (list (include "platform.hostname" (dict "local" "" "context" $))) | toYaml | nindent 4 }}
+  {{- dict "duration" $edge.duration | toYaml | nindent 2 }}
   # 720h, THE RUNG HELD OUT OF THE INTERNAL MAP. It is part of the same ladder and
   # no internal leaf may take it. See `values.yaml`'s header.
-  renewBefore: {{ $edge.renewBefore }}
+  {{- dict "renewBefore" $edge.renewBefore | toYaml | nindent 2 }}
   privateKey:
-    algorithm: {{ $edge.privateKey.algorithm }}
-    size: {{ $edge.privateKey.size }}
-    rotationPolicy: {{ $edge.privateKey.rotationPolicy }}
+    {{- dict "algorithm" $edge.privateKey.algorithm | toYaml | nindent 4 }}
+    {{- dict "size" $edge.privateKey.size | toYaml | nindent 4 }}
+    {{- dict "rotationPolicy" $edge.privateKey.rotationPolicy | toYaml | nindent 4 }}
   usages:
-    {{- range $edge.usages }}
-    - {{ . }}
-    {{- end }}
+    {{- toYaml $edge.usages | nindent 4 }}
   issuerRef:
-    name: {{ required "platform: edgeTLS.issuerRef.name has no default here and must be set. edgeTLS.create is true; either name the authority that signs your edge certificate, or turn internalCA.create on and leave edgeTLS.issuerRef empty for this chart's own internal CA." (get $issuerRef "name") }}
-    kind: {{ required "platform: edgeTLS.issuerRef.kind has no default here and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address — and naming only one of the two keys does not qualify for the internal-CA fallback, which applies only when the whole map is left empty." (get $issuerRef "kind") }}
+    {{- dict "name" (required "platform: edgeTLS.issuerRef.name has no default here and must be set. edgeTLS.create is true; either name the authority that signs your edge certificate, or turn internalCA.create on and leave edgeTLS.issuerRef empty for this chart's own internal CA." (get $issuerRef "name")) | toYaml | nindent 4 }}
+    {{- dict "kind" (required "platform: edgeTLS.issuerRef.kind has no default here and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address — and naming only one of the two keys does not qualify for the internal-CA fallback, which applies only when the whole map is left empty." (get $issuerRef "kind")) | toYaml | nindent 4 }}
     group: cert-manager.io
 {{- end }}
+{{- end }}
+{{- include "platform.certificates.edge" . }}

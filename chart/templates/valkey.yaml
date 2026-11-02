@@ -89,9 +89,9 @@ against a nil map, and the refusal still aborts the render by itself.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $valkey.name }}
+  {{- dict "name" $valkey.name | toYaml | nindent 2 }}
   labels:
-    app.kubernetes.io/name: {{ $valkey.name }}
+    {{- dict "app.kubernetes.io/name" $valkey.name | toYaml | nindent 4 }}
 spec:
   # THE SELECTOR AND THE POD TEMPLATE'S LABELS ARE ONE INVARIANT. A Service whose
   # selector matches no pod is accepted, listed and describable, and has empty
@@ -99,11 +99,11 @@ spec:
   # `test_the_valkey_service_selects_the_pods_the_deployment_creates` compares the
   # two rather than counting either.
   selector:
-    app.kubernetes.io/name: {{ $valkey.name }}
+    {{- dict "app.kubernetes.io/name" $valkey.name | toYaml | nindent 4 }}
   ports:
     {{- if $tls.plaintext }}
     - name: valkey
-      port: {{ $valkey.port }}
+      port: {{ $valkey.port | int }}
       targetPort: valkey
     {{- end }}
     {{- if $tls.enabled }}
@@ -115,9 +115,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $valkey.name }}
+  {{- dict "name" $valkey.name | toYaml | nindent 2 }}
   labels:
-    app.kubernetes.io/name: {{ $valkey.name }}
+    {{- dict "app.kubernetes.io/name" $valkey.name | toYaml | nindent 4 }}
 spec:
   replicas: 1
   # `Recreate`, NOT `RollingUpdate`. Two instances of a single-instance cache
@@ -127,11 +127,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ $valkey.name }}
+      {{- dict "app.kubernetes.io/name" $valkey.name | toYaml | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ $valkey.name }}
+        {{- dict "app.kubernetes.io/name" $valkey.name | toYaml | nindent 8 }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -151,10 +151,9 @@ spec:
         # answer the `secretKeyRef` this replaces gave.
         - name: valkey-password
           secret:
-            secretName: {{ $valkey.passwordSecret.name }}
+            {{- dict "secretName" $valkey.passwordSecret.name | toYaml | nindent 12 }}
             items:
-              - key: {{ $valkey.passwordSecret.key }}
-                path: password
+              {{- list (dict "key" $valkey.passwordSecret.key "path" "password") | toYaml | nindent 14 }}
         {{- if $tls.enabled }}
         - name: valkey-tls
           secret:
@@ -162,7 +161,7 @@ spec:
         {{- end }}
       containers:
         - name: valkey
-          image: {{ $valkey.image }}
+          {{- dict "image" $valkey.image | toYaml | nindent 10 }}
           imagePullPolicy: IfNotPresent
           # ── A SHELL, AND IT IS THE ONLY WAY TO GET THE PASSWORD IN ──────────
           # Container `args` are NOT shell-expanded, and this image's entrypoint
@@ -212,7 +211,7 @@ spec:
               "--appendonly no"
               "--unixsocket /run/valkey/valkey.sock"
               "--unixsocketperm 700"
-              (printf "--port %v" (ternary $valkey.port 0 $tls.plaintext))
+              (printf "--port %v" (ternary (int $valkey.port) 0 $tls.plaintext))
             }}
           {{- if $tls.enabled }}
           {{- $args = concat $args (list
@@ -257,7 +256,7 @@ spec:
           ports:
             {{- if $tls.plaintext }}
             - name: valkey
-              containerPort: {{ $valkey.port }}
+              containerPort: {{ $valkey.port | int }}
             {{- end }}
             {{- if $tls.enabled }}
             - name: valkey-tls

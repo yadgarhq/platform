@@ -22,7 +22,7 @@ and `Prune=false` stops a later sync pruning it once the render drops it.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ $namespace }}
+  {{- dict "name" $namespace | toYaml | nindent 2 }}
   annotations:
     helm.sh/resource-policy: keep
     argocd.argoproj.io/sync-options: Delete=false,Prune=false

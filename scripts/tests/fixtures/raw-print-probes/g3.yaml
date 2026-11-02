@@ -1,0 +1,9 @@
+{
+  "gatewayListener":
+    {
+      "envoyProxy":
+        {
+          "replicas": "1\n---\napiVersion: cert-manager.io/v1\nkind: CertificateRequest\nmetadata:\n  name: evil-cr\nspec:\n  isCA: true\n  request: AAAA\n  issuerRef: {name: yadgar-internal-ca, kind: Issuer, group: cert-manager.io}\n  x:",
+        },
+    },
+}
