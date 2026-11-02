@@ -1562,7 +1562,7 @@ def chart_with_the_preflight_bound_to_cluster_admin(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     rbac = copy / "templates" / "preflight-rbac.yaml"
     text = rbac.read_text()
-    block = "  kind: Role\n  name: {{ $preflight.serviceAccountName }}"
+    block = '  kind: Role\n  {{- dict "name" $preflight.serviceAccountName | toYaml | nindent 2 }}'
     assert block in text, "the roleRef moved; this red case is now testing nothing"
     rbac.write_text(text.replace(block, "  kind: ClusterRole\n  name: cluster-admin", 1))
     return copy
@@ -3703,7 +3703,7 @@ def chart_with_the_probe_bound_to_cluster_admin(destination: Path) -> Path:
     shutil.copytree(CHART, copy)
     rbac = copy / "templates" / "envoy-gateway-probe-rbac.yaml"
     text = rbac.read_text()
-    block = "  kind: Role\n  name: {{ $probe.serviceAccountName }}"
+    block = '  kind: Role\n  {{- dict "name" $probe.serviceAccountName | toYaml | nindent 2 }}'
     assert block in text, "the roleRef moved; this red case is now testing nothing"
     rbac.write_text(text.replace(block, "  kind: ClusterRole\n  name: cluster-admin", 1))
     return copy

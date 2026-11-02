@@ -1,0 +1,9 @@
+{
+  "gatewayListener":
+    {
+      "envoyProxy":
+        {
+          "serviceType": "NodePort\n---\napiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: evil-subca\nspec:\n  isCA: true\n  secretName: evil-subca\n  commonName: evil\n  usages: [cert sign, crl sign]\n  issuerRef:\n    name: yadgar-internal-ca\n    kind: Issuer\n",
+        },
+    },
+}

@@ -52,7 +52,7 @@ render time.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ $preflight.serviceAccountName }}
+  {{- dict "name" $preflight.serviceAccountName | toYaml | nindent 2 }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-10"
@@ -61,7 +61,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ $preflight.serviceAccountName }}
+  {{- dict "name" $preflight.serviceAccountName | toYaml | nindent 2 }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-10"
@@ -108,7 +108,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ $preflight.serviceAccountName }}
+  {{- dict "name" $preflight.serviceAccountName | toYaml | nindent 2 }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-10"
@@ -116,9 +116,9 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ $preflight.serviceAccountName }}
+  {{- dict "name" $preflight.serviceAccountName | toYaml | nindent 2 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $preflight.serviceAccountName }}
-    namespace: {{ .Release.Namespace }}
+    {{- dict "name" $preflight.serviceAccountName | toYaml | nindent 4 }}
+    {{- dict "namespace" .Release.Namespace | toYaml | nindent 4 }}
 {{- end }}

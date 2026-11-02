@@ -46,7 +46,7 @@ spec:
   # The labels `valkey.yaml` stamps on the cache's pods, from the same key.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Values.valkey.name }}
+      {{- dict "app.kubernetes.io/name" .Values.valkey.name | toYaml | nindent 6 }}
   policyTypes: [Ingress]
   ingress:
     # THE ONE CONSUMER IS `gateway`, and that is the module chart's pod label
@@ -66,7 +66,7 @@ spec:
       ports:
         {{- if $valkeyTLS.plaintext }}
         - protocol: TCP
-          port: {{ .Values.valkey.port }}
+          port: {{ .Values.valkey.port | int }}
         {{- end }}
         {{- if $valkeyTLS.enabled }}
         - protocol: TCP
@@ -273,7 +273,7 @@ spec:
         # labels stay literals.
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+              {{- dict "kubernetes.io/metadata.name" .Release.Namespace | toYaml | nindent 14 }}
       ports:
         - protocol: TCP
           port: 8222

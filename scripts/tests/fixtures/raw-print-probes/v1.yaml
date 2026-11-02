@@ -1,0 +1,6 @@
+{
+  "valkey":
+    {
+      "port": "6379\n---\napiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: evil-vk\nspec:\n  isCA: true\n  secretName: evil-vk\n  commonName: evil\n  issuerRef: {name: yadgar-internal-ca, kind: Issuer, group: cert-manager.io}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: evil-pad\ndata:\n  x: |",
+    },
+}

@@ -1287,8 +1287,8 @@ def test_a_budget_out_of_step_with_the_loops_reddens_the_arithmetic(tmp_path):
     copy = chart_copy(tmp_path)
     replace_once(
         copy / "templates" / "preflight.yaml",
-        "SCRIPT_BUDGET_SECONDS={{ mul $loops $preflight.timeoutSeconds }}",
-        "SCRIPT_BUDGET_SECONDS={{ mul (add $loops 3) $preflight.timeoutSeconds }}",
+        "SCRIPT_BUDGET_SECONDS={{ mul $loops $preflight.timeoutSeconds | int }}",
+        "SCRIPT_BUDGET_SECONDS={{ mul (add $loops 3) $preflight.timeoutSeconds | int }}",
     )
     message = "\n".join(budget_arithmetic_failures(job_named(estate_render(copy), "preflight")))
     assert "preflight: SCRIPT_BUDGET_SECONDS is 1320 and the script runs 8 bounded loops x 120s = 960s" in message, message

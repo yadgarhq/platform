@@ -147,29 +147,29 @@ spec:
   # transient; here the failure is "Envoy Gateway is not running", which does not
   # become "it is running" on the second attempt. More attempts would only multiply
   # the bound before the release is allowed to fail.
-  backoffLimit: {{ $preflight.backoffLimit }}
+  backoffLimit: {{ $preflight.backoffLimit | int }}
   # THE JOB ENDS ON ITS OWN CLOCK (ledger 1224), AS A BACKSTOP BEHIND THE ONE THE
   # SCRIPT KEEPS ITSELF — for everything the script cannot see: a pod that never
   # schedules, an image that never pulls. The script reads the WALL CLOCK (ledger
   # 1235): every loop ends by its own `TIMEOUT_SECONDS` or by the script's
-  # `SCRIPT_BUDGET_SECONDS` of {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s, whichever comes first, so
+  # `SCRIPT_BUDGET_SECONDS` of {{ $loops | int }} bounded loops x {{ $probe.timeoutSeconds | int }}s, whichever comes first, so
   # on a slow API server the script names Envoy Gateway and deletes its Gateway
   # before this fires. The margin covers scheduling, the image pull, the worst
   # overrun past the budget — max(poll + 2 requests, 3 requests), 105s at the 35s
   # request bound — and the cleanup (`test_hook_deadlines.py` checks it). It still ends inside the documented helm budget, so helm reports a
-  # failure rather than its own timeout: {{ $loops }} bounded loops x {{ $probe.timeoutSeconds }}s + {{ $margin }}s margin = {{ $deadline }}s.
-  activeDeadlineSeconds: {{ $deadline }}
+  # failure rather than its own timeout: {{ $loops | int }} bounded loops x {{ $probe.timeoutSeconds | int }}s + {{ $margin | int }}s margin = {{ $deadline | int }}s.
+  activeDeadlineSeconds: {{ $deadline | int }}
   template:
     metadata:
       labels: { app.kubernetes.io/name: envoy-gateway-probe }
     spec:
-      serviceAccountName: {{ $probe.serviceAccountName }}
+      {{- dict "serviceAccountName" $probe.serviceAccountName | toYaml | nindent 6 }}
       automountServiceAccountToken: true
       restartPolicy: Never
       # TIME FOR THE TRAP TO DELETE THE GATEWAY AFTER A KILL. `sh` runs its TERM
-      # trap only once the foreground command returns: {{ $requestMaxTime }}s for the request
-      # in flight + {{ $objects }} objects x {{ $cleanupMaxTime }}s per cleanup DELETE = {{ $grace }}s.
-      terminationGracePeriodSeconds: {{ $grace }}
+      # trap only once the foreground command returns: {{ $requestMaxTime | int }}s for the request
+      # in flight + {{ $objects | int }} objects x {{ $cleanupMaxTime | int }}s per cleanup DELETE = {{ $grace | int }}s.
+      terminationGracePeriodSeconds: {{ $grace | int }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 100
@@ -186,7 +186,7 @@ spec:
           # same four things of it — a POSIX shell, `curl`, `grep` and `sed`, and a
           # nonroot user at UID/GID 100 — so a second key would be two sources for
           # one decision, and the digest pin would have to be moved twice.
-          image: {{ $preflight.image }}
+          {{- dict "image" $preflight.image | toYaml | nindent 10 }}
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: scratch
@@ -214,24 +214,24 @@ spec:
               # `PROBES` line edited away from the count beside it: a probe added to
               # this Job that no key enables moves the first and not the second.
               PROBES="{{ join " " $probes }}"
-              EXPECTED_PROBES={{ len $probes }}
+              EXPECTED_PROBES={{ len $probes | int }}
 
-              TIMEOUT_SECONDS={{ $probe.timeoutSeconds }}
-              POLL_SECONDS={{ $preflight.pollSeconds }}
+              TIMEOUT_SECONDS={{ $probe.timeoutSeconds | int }}
+              POLL_SECONDS={{ $preflight.pollSeconds | int }}
               # THE SCRIPT'S OWN WALL-CLOCK BUDGET (ledger 1235): every bounded
               # loop it can run, each at `TIMEOUT_SECONDS`. Read off `date`, never
               # off a counter of sleeps — a counter charged only the sleep let a
               # loop against an API server answering each poll in 34s run 3700s
               # of a 300s bound, and the Job deadline ended it with Envoy Gateway
               # never named. The deadline above is this budget + the margin.
-              SCRIPT_BUDGET_SECONDS={{ mul $loops $probe.timeoutSeconds }}
+              SCRIPT_BUDGET_SECONDS={{ mul $loops $probe.timeoutSeconds | int }}
               SCRIPT_DEADLINE=$(( $(date +%s) + SCRIPT_BUDGET_SECONDS ))
               PROBE_NAME={{ $probe.probeName }}
               # EVERY REQUEST ENDS. `_preflight.tpl` records why each number is
               # what it is; the cleanup swaps in the shorter one.
-              REQUEST_MAX_TIME={{ $requestMaxTime }}
-              CLEANUP_MAX_TIME={{ $cleanupMaxTime }}
-              CONNECT_TIMEOUT={{ include "platform.hookRequest.connectTimeout" . }}
+              REQUEST_MAX_TIME={{ $requestMaxTime | int }}
+              CLEANUP_MAX_TIME={{ $cleanupMaxTime | int }}
+              CONNECT_TIMEOUT={{ include "platform.hookRequest.connectTimeout" . | int }}
 
               # THE OPERATOR'S OWN WORDING, REQUIRED ALONGSIDE `Programmed=True`.
               # `squote` rather than bare, as the preflight's three strings are: the

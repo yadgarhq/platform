@@ -4,20 +4,24 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. NINETEEN of the second kind live below — the
+release's own values and nothing else. TWENTY-THREE of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
 arms, the per-operator create arm, the `prometheus.forceNamespace` arm, then the
 mixed-release refusal and the type arm of its toggle list, then the two NATS/valkey
 TLS arms, the two NATS contract arms, the three broker credential-rotation arms
-(ADR-0924), and last the leaf usages arm (yaadgaar 279) — and everything that makes a capability
+(ADR-0924), the leaf usages arm (yaadgaar 279), and last the one-line values arm,
+the whole-number arm (yaadgaar 541),
+the edge usages arm and the rendered certificates arm (yaadgaar 534; the last
+reads the rendered Certificates rather than values) — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all nineteen;
+the mixed-release pair and the count of all twenty-three;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
 `scripts/tests/test_force_namespace.py` owns what the forceNamespace arm does;
 `scripts/tests/test_nats_valkey_tls.py` owns what the four TLS arms do.
-`scripts/tests/test_certificate_usages.py` owns what the leaf usages arm does.
+`scripts/tests/test_certificate_usages.py` owns what the leaf usages arm and the
+three yaadgaar 534 arms do.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the thirteen internal leaves and the edge leaf all come from
@@ -1033,17 +1037,19 @@ UNCONDITIONAL, ROOT AND SUBCHART: no parent carries an equivalent, so standing
 down would defer to nobody (ADR-0794). Every leaf is judged before the one
 `fail`, so all of them are named at once.
 */}}
-{{- if .Values.certificates.create }}
 {{- /* CERT-MANAGER v1.21.1's `KeyUsage` ENUM, all twenty-three values, copied from
 the vendored `charts/cert-manager-v1.21.1.tgz`,
 `templates/crd-cert-manager.io_certificates.yaml` lines 710-733
-(`spec.usages.items.enum`). */ -}}
+(`spec.usages.items.enum`). Declared outside the arm's `if` because the edge
+usages arm below reads it too, and a template variable lives only inside the
+block that declares it. */ -}}
 {{- $keyUsages := list
       "signing" "digital signature" "content commitment" "key encipherment"
       "key agreement" "data encipherment" "cert sign" "crl sign" "encipher only"
       "decipher only" "any" "server auth" "client auth" "code signing"
       "email protection" "s/mime" "ipsec end system" "ipsec tunnel" "ipsec user"
       "timestamping" "ocsp signing" "microsoft sgc" "netscape sgc" }}
+{{- if .Values.certificates.create }}
 {{- $leafUsages := list }}
 {{- range $name, $leaf := .Values.certificates.leaves }}
 {{- $usages := index dict "usages" }}
@@ -1078,6 +1084,368 @@ the vendored `charts/cert-manager-v1.21.1.tgz`,
 {{- fail (printf "platform: a certificates.leaves entry does not name exactly one direction: %s. Name exactly one of `server auth` (a leaf that answers) or `client auth` (a leaf that dials), beside `digital signature` (ADR-0852)." (join "; " $leafUsages)) }}
 {{- end }}
 {{- end }}{{/* end of the leaf usages arm */}}
+
+{{/*
+EVERY VALUE THIS CHART PRINTS IS ONE LINE OF TEXT (yaadgaar 534, 537 and 541,
+ADR-0852).
+
+`certificates.yaml`, `edge-certificate.yaml`, `internal-ca.yaml` and the
+Gateway listener printed their values raw, so a newline ended the scalar and
+wrote a sibling key into `spec` — or, with a line starting `---`, a whole new
+document. Helm keeps the last of two equal keys, so `isCA: true` landed on a
+leaf the internal CA signs: a sub-CA that can mint any leaf in the estate. The
+templates now YAML-encode every one of these values; this arm refuses the
+payload outright, so it never reaches them.
+
+WHAT IS JUDGED. The names — each leaf's `commonName` and the edge's resolved
+`commonName` and `dnsNames` — must also be strings. Every other value is judged
+only when it is a string, since a number (`privateKey.size`) carries no line:
+each leaf's map key and `renewBefore`, `certificates.duration`,
+`certificates.privateKey.*`, `certificates.issuerRef.*`, the edge's `name`,
+`duration`, `renewBefore`, `privateKey.*` and `issuerRef.*`, every
+`internalCA` key the CA templates print, and the Gateway's resolved
+`gatewayListener.hostname`. Since yaadgaar 541 also every other value a template
+prints where `toYaml` cannot go — a shell script, a JSON body, a `squote`d
+string — and the eight numbers printed through `int`, which the whole-number arm
+below also holds to a range; the list is below, and
+`scripts/tests/test_raw_prints.py` is the lint gate that keeps every print in
+`templates/` encoded or on its allowlist.
+
+A CONTROL CHARACTER IS ANY OF `\p{Cc}`, `\p{Zl}` OR `\p{Zp}`. YAML 1.1, which
+helm parses, breaks a line at NEL (U+0085), U+2028 and U+2029 as well as at
+`\n` and `\r`, and no DNS name or common name carries any of them.
+
+THE EDGE IS JUDGED ON WHAT IT RESOLVES TO, not on the two keys alone: an empty
+`edgeTLS.commonName` or `edgeTLS.dnsNames` falls back to `global.hostname`
+(ADR-0808), which reached the same lines.
+
+A name that is not a string is refused here rather than in the schema, because
+types live here (ADR-0847), and `kindIs` comes before `regexMatch`, which would
+otherwise stop on a Go type error rather than this message. UNCONDITIONAL, ROOT
+AND SUBCHART, for the leaf usages arm's reason. Every name is judged before the
+one `fail`.
+*/}}
+{{- $controlCharacter := `[\p{Cc}\p{Zl}\p{Zp}]` }}
+{{- $badNames := list }}
+{{- if .Values.certificates.create }}
+{{- range $name, $leaf := .Values.certificates.leaves }}
+{{- $commonName := "" }}
+{{- if kindIs "map" $leaf }}{{ $commonName = index $leaf "commonName" }}{{ end }}
+{{- if not (kindIs "string" $commonName) }}
+{{- $badNames = append $badNames (printf "`certificates.leaves.%s.commonName` is not a string (it is %s)" $name (kindOf $commonName)) }}
+{{- else if regexMatch $controlCharacter $commonName }}
+{{- $badNames = append $badNames (printf "`certificates.leaves.%s.commonName` carries a control character (%q); it is also every one of that leaf's `dnsNames`" $name $commonName) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.edgeTLS.create }}
+{{- $edgeCommonName := include "platform.hostname" (dict "local" .Values.edgeTLS.commonName "context" $) }}
+{{- if regexMatch $controlCharacter $edgeCommonName }}
+{{- $badNames = append $badNames (printf "`edgeTLS.commonName`, or the `global.hostname` it falls back to, carries a control character (%q)" $edgeCommonName) }}
+{{- end }}
+{{- $edgeDnsNames := .Values.edgeTLS.dnsNames | default (list (include "platform.hostname" (dict "local" "" "context" $))) }}
+{{- if not (kindIs "slice" $edgeDnsNames) }}
+{{- $badNames = append $badNames (printf "`edgeTLS.dnsNames` is not a list (it is %s)" (kindOf $edgeDnsNames)) }}
+{{- else }}
+{{- range $index, $dnsName := $edgeDnsNames }}
+{{- if not (kindIs "string" $dnsName) }}
+{{- $badNames = append $badNames (printf "`edgeTLS.dnsNames` element %d is not a string (it is %s)" $index (kindOf $dnsName)) }}
+{{- else if regexMatch $controlCharacter $dnsName }}
+{{- $badNames = append $badNames (printf "`edgeTLS.dnsNames` element %d, or the `global.hostname` it falls back to, carries a control character (%q)" $index $dnsName) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $lines := list }}
+{{- if .Values.certificates.create }}
+{{- $certificates := .Values.certificates }}
+{{- range $name, $leaf := $certificates.leaves }}
+{{- $lines = append $lines (list (printf "the `certificates.leaves` key %q" $name) $name) }}
+{{- if kindIs "map" $leaf }}
+{{- $lines = append $lines (list (printf "`certificates.leaves.%s.renewBefore`" $name) (index $leaf "renewBefore")) }}
+{{- end }}
+{{- end }}
+{{- $lines = append $lines (list "`certificates.duration`" $certificates.duration) }}
+{{- range $key, $value := ($certificates.privateKey | default dict) }}
+{{- $lines = append $lines (list (printf "`certificates.privateKey.%s`" $key) $value) }}
+{{- end }}
+{{- range $key, $value := ($certificates.issuerRef | default dict) }}
+{{- $lines = append $lines (list (printf "`certificates.issuerRef.%s`" $key) $value) }}
+{{- end }}
+{{- end }}
+{{- if .Values.edgeTLS.create }}
+{{- $edge := .Values.edgeTLS }}
+{{- range $key := list "name" "duration" "renewBefore" }}
+{{- $lines = append $lines (list (printf "`edgeTLS.%s`" $key) (index $edge $key)) }}
+{{- end }}
+{{- range $key, $value := ($edge.privateKey | default dict) }}
+{{- $lines = append $lines (list (printf "`edgeTLS.privateKey.%s`" $key) $value) }}
+{{- end }}
+{{- range $key, $value := ($edge.issuerRef | default dict) }}
+{{- $lines = append $lines (list (printf "`edgeTLS.issuerRef.%s`" $key) $value) }}
+{{- end }}
+{{- end }}
+{{- if or .Values.edgeTLS.create .Values.internalCA.create }}
+{{- $ca := .Values.internalCA }}
+{{- range $key := list "name" "selfSignedIssuerName" "commonName" "duration" "renewBefore" }}
+{{- $lines = append $lines (list (printf "`internalCA.%s`" $key) (index $ca $key)) }}
+{{- end }}
+{{- range $key, $value := ($ca.privateKey | default dict) }}
+{{- $lines = append $lines (list (printf "`internalCA.privateKey.%s`" $key) $value) }}
+{{- end }}
+{{- end }}
+{{- if .Values.gatewayListener.create }}
+{{- $lines = append $lines (list "`gatewayListener.hostname`, or the `global.hostname` it falls back to," (include "platform.hostname" (dict "local" .Values.gatewayListener.hostname "context" $))) }}
+{{- end }}
+{{- /* EVERY OTHER VALUE A TEMPLATE PRINTS WHERE `toYaml` CANNOT GO, or prints
+through `int` (yaadgaar 541): into a shell script, a JSON body or a `squote`d
+string, or as a number. This arm refuses only a control character in them; that
+a number is a whole number in range is the next arm's question. Judged whatever the
+toggles say, because a value nothing renders yet still never needs a line
+break. `scripts/tests/test_raw_prints.py` holds the templates to this list. */ -}}
+{{- range $path := list
+      "gatewayListener.className" "gatewayListener.controllerName"
+      "gatewayListener.gatewayName" "gatewayListener.certificateSecretName"
+      "gatewayListener.envoyProxy.name" "gatewayListener.envoyProxy.serviceType"
+      "gatewayListener.envoyProxy.replicas" "gatewayListener.envoyProxy.httpsNodePort"
+      "valkey.name" "valkey.image" "valkey.port" "valkey.maxmemory" "valkey.maxmemoryPolicy"
+      "valkey.passwordSecret.name" "valkey.passwordSecret.key"
+      "bootstrap.serviceAccountName" "bootstrap.image" "bootstrap.backoffLimit"
+      "bootstrap.adminToken.secretName"
+      "preflight.serviceAccountName" "preflight.image" "preflight.probeName"
+      "preflight.backoffLimit" "preflight.timeoutSeconds" "preflight.pollSeconds"
+      "preflight.certManager.apiVersion" "preflight.keda.apiVersion"
+      "preflight.mariadb.apiVersion" "preflight.mariadb.deniedBy"
+      "preflight.mariadb.validationMessage" "preflight.mariadb.unreachableWebhook"
+      "preflight.prometheus.address" "preflight.prometheus.readyMessage"
+      "preflight.envoyGateway.apiVersion" "preflight.envoyGateway.programmedMessage"
+      "preflight.envoyGateway.serviceAccountName" "preflight.envoyGateway.probeName"
+      "preflight.envoyGateway.timeoutSeconds"
+      "prometheus.forceNamespace" }}
+{{- $node := $.Values }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $node }}{{ $node = index $node $key }}{{ else }}{{ $node = "" }}{{ end }}
+{{- end }}
+{{- $lines = append $lines (list (printf "`%s`" $path) $node) }}
+{{- end }}
+{{- range $line := $lines }}
+{{- $value := index $line 1 }}
+{{- if and (kindIs "string" $value) (regexMatch $controlCharacter $value) }}
+{{- $badNames = append $badNames (printf "%s carries a control character (%q)" (index $line 0) $value) }}
+{{- end }}
+{{- end }}
+{{- if $badNames }}
+{{- fail (printf "platform: a value this chart prints is not one line of text: %s. Each is a string with no newline or other control character in it." (join "; " $badNames)) }}
+{{- end }}{{/* end of the one-line values arm */}}
+
+{{/*
+EVERY NUMBER A TEMPLATE PRINTS THROUGH `int` IS A WHOLE NUMBER IN ITS RANGE
+(yaadgaar 541), in the idiom the module charts use (gateway#174, task#120).
+
+`| int` keeps a value one scalar, and it also turns anything that is not a
+number into 0, or truncates it, at rc=0: `replicas: "abc"`, `null` and `1.5`
+rendered `replicas: 0`, `0` and `1`; `httpsNodePort: "x"` nodePort 0;
+`valkey.port: "x"` port 0 and `--port 0`. Printed raw, the API server used to
+refuse such a value loudly. This arm restores that refusal at render time.
+
+A WHOLE NUMBER is an `int`/`int64`, a `float64` with no fraction (helm reads
+every number in a values file as one), or a string of decimal digits with no
+sign and no leading zero, at most eighteen of them so `int64` cannot overflow.
+`true`, a list, a map and `null` are not, except `httpsNodePort: null`, the
+shipped "let Kubernetes choose".
+
+THESE EIGHT ARE EVERY VALUES PATH BEHIND AN `int` PRINT. Every other `int` print
+is a literal (`platform.hookRequest.*`, `platform.hookDeadline.*`, the request
+counts), a counter the template keeps (`$loops`, `$objects`, `len $probes`), or
+arithmetic on these eight (`$deadline`, `$grace`, `$backoff`, `$total`, the
+`add`/`mul` prints). `scripts/tests/test_raw_prints.py` owns what this arm does.
+*/}}
+{{- $badNumbers := list }}
+{{- range $rule := list
+      (list "gatewayListener.envoyProxy.replicas" 1 -1 false)
+      (list "gatewayListener.envoyProxy.httpsNodePort" 30000 32767 true)
+      (list "valkey.port" 1 65535 false)
+      (list "bootstrap.backoffLimit" 0 -1 false)
+      (list "preflight.backoffLimit" 0 -1 false)
+      (list "preflight.timeoutSeconds" 1 -1 false)
+      (list "preflight.pollSeconds" 1 -1 false)
+      (list "preflight.envoyGateway.timeoutSeconds" 1 -1 false) }}
+{{- $path := index $rule 0 }}
+{{- $minimum := index $rule 1 }}
+{{- $maximum := index $rule 2 }}
+{{- $value := $.Values }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = nil }}{{ end }}
+{{- end }}
+{{- if not (and (index $rule 3) (kindIs "invalid" $value)) }}
+{{- $whole := or (kindIs "int" $value) (kindIs "int64" $value)
+      (and (kindIs "float64" $value) (eq (float64 (int64 $value)) $value))
+      (and (kindIs "string" $value) (regexMatch `^(0|[1-9][0-9]{0,17})$` $value)) }}
+{{- $range := ternary (printf "%d or more" $minimum) (printf "%d..%d" $minimum $maximum) (lt $maximum 0) }}
+{{- if not $whole }}
+{{- $badNumbers = append $badNumbers (printf "`%s` is %s (%s), not a whole number" $path (toJson $value) (ternary "null" (kindOf $value) (kindIs "invalid" $value))) }}
+{{- else if or (lt (int64 $value) (int64 $minimum)) (and (ge $maximum 0) (gt (int64 $value) (int64 $maximum))) }}
+{{- $badNumbers = append $badNumbers (printf "`%s` is %d, outside %s" $path (int64 $value) $range) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $badNumbers }}
+{{- fail (printf "platform: a number this chart prints is not a whole number in its range: %s. Each is printed through `int`, which would render it as 0 or truncate it rather than refuse it." (join "; " $badNumbers)) }}
+{{- end }}{{/* end of the whole-number arm */}}
+
+{{/*
+THE EDGE LEAF SERVES, AND ONLY SERVES (yaadgaar 534, ADR-0852).
+
+`edge-certificate.yaml` printed each `edgeTLS.usages` element raw, so
+`"digital signature\n    - client auth"` rendered as two list items, the second
+a direction nothing judged — the same hole yaadgaar 279 closed for the internal
+leaves. The template now YAML-encodes the list, and this arm holds each element
+to the enum above, as the leaf usages arm does.
+
+STRICTER THAN THE LEAF RULE, ON PURPOSE. A leaf names exactly one direction,
+either one. The edge leaf is the Gateway's serving certificate, so its one
+direction is `server auth`: `[client auth]` names exactly one direction and is
+still a client credential the internal CA signs whenever `edgeTLS.issuerRef`
+falls back to it. `client auth` is refused even beside `server auth`, and `any`
+for the reason it is refused on a leaf.
+*/}}
+{{- if .Values.edgeTLS.create }}
+{{- $edgeUsages := .Values.edgeTLS.usages }}
+{{- $badEdgeUsages := list }}
+{{- if not (kindIs "slice" $edgeUsages) }}
+{{- $kind := kindOf $edgeUsages }}
+{{- if eq $kind "invalid" }}{{ $kind = "absent or null" }}{{ end }}
+{{- $badEdgeUsages = append $badEdgeUsages (printf "it is not a list (it is %s)" $kind) }}
+{{- else }}
+{{- range $index, $usage := $edgeUsages }}
+{{- if not (kindIs "string" $usage) }}
+{{- $elementKind := kindOf $usage }}
+{{- if eq $elementKind "invalid" }}{{ $elementKind = "null" }}{{ end }}
+{{- $badEdgeUsages = append $badEdgeUsages (printf "element %d is not a string (it is %s)" $index $elementKind) }}
+{{- else if not (has $usage $keyUsages) }}
+{{- $badEdgeUsages = append $badEdgeUsages (printf "element %d, %q, is not a cert-manager KeyUsage" $index $usage) }}
+{{- end }}
+{{- end }}
+{{- if has "client auth" $edgeUsages }}
+{{- $badEdgeUsages = append $badEdgeUsages "it names `client auth`, which makes the edge leaf a client credential" }}
+{{- end }}
+{{- if has "any" $edgeUsages }}
+{{- $badEdgeUsages = append $badEdgeUsages "it names `any`, which every verifier accepts in both directions" }}
+{{- end }}
+{{- if not (has "server auth" $edgeUsages) }}
+{{- $badEdgeUsages = append $badEdgeUsages (printf "it does not name `server auth` (it is %v)" $edgeUsages) }}
+{{- end }}
+{{- end }}
+{{- if $badEdgeUsages }}
+{{- fail (printf "platform: `edgeTLS.usages` does not name the one direction an edge leaf serves: %s. Name `server auth`, and neither `client auth` nor `any` (ADR-0852)." (join "; " $badEdgeUsages)) }}
+{{- end }}
+{{- end }}{{/* end of the edge usages arm */}}
+
+{{/*
+EVERY CERTIFICATE THIS CHART RENDERS, PARSED BACK AND JUDGED (yaadgaar 534).
+
+THE ARMS ABOVE JUDGE VALUES; THIS ONE JUDGES OBJECTS. It is the second wall
+behind the encoding and the one-line values arm, for a template edit or a value
+path neither of them anticipated. Before yaadgaar 537 every other scalar under
+`spec` printed raw: `certificates.issuerRef.name` prints AFTER `usages`, so a
+newline there wrote a second `usages` that won over the one the leaf usages arm
+judged, and a line starting `---` in any of them started a whole new document.
+So this arm renders the three named templates the Certificates come from,
+splits each into documents, parses every one with `fromYaml` — last key wins
+there too, as it does in helm — and judges the parsed objects.
+
+THE SPLIT IS EVERY LINE THAT STARTS `---`, as helm's own is. `fromYaml` reads only
+the first document of what it is given, so a narrower split — `---` alone on its
+line — let `--- #`, `--- !!map` or `---\r` carry a second document past this arm
+while helm still emitted it.
+
+EACH SOURCE RENDERS A KNOWN NUMBER OF DOCUMENTS OF KNOWN KINDS: `internal-ca.yaml`
+three (two Issuers and the CA Certificate) while `internalCA.create` is on;
+`certificates.yaml` one Certificate per `certificates.leaves` entry while
+`certificates.create` is on; `edge-certificate.yaml` one Certificate while
+`edgeTLS.create` is on; and none while a toggle is off. Any other count, or any
+other kind — a CertificateRequest carries `isCA` as well — is refused, so an
+injected document is caught whatever it is.
+
+`isCA` IS ALLOWED ON EXACTLY ONE OBJECT: the Certificate named `internalCA.name`
+from `internal-ca.yaml`. The allowlist names the SOURCE as well as the name, so
+a leaf keyed `yadgar-internal-ca` is still a leaf; and it counts, so a second
+document by that name in `internal-ca.yaml` is refused too. That CA names
+neither direction — an authority signs; it neither answers nor dials. Every
+other Certificate names exactly one direction and not `any`, and the edge leaf
+names `server auth`: the rules of the two arms above, held on what renders.
+
+A DOCUMENT `fromYaml` CANNOT PARSE IS REFUSED rather than skipped, and so is a
+Certificate whose `spec` is not a map: a check that skipped what it could not
+read would pass having examined nothing. UNCONDITIONAL, ROOT AND SUBCHART, for
+the leaf usages arm's reason; each named template renders nothing while its own
+toggle is off.
+*/}}
+{{- $badRendered := list }}
+{{- $caAllowed := 0 }}
+{{- $leafCount := 0 }}
+{{- if and .Values.certificates.create (kindIs "map" .Values.certificates.leaves) }}{{ $leafCount = len .Values.certificates.leaves }}{{ end }}
+{{- range $source := list
+      (list "templates/internal-ca.yaml" "platform.certificates.internal-ca" (ternary 3 0 (not (not .Values.internalCA.create))) (list "Issuer" "Certificate"))
+      (list "templates/certificates.yaml" "platform.certificates.leaves" $leafCount (list "Certificate"))
+      (list "templates/edge-certificate.yaml" "platform.certificates.edge" (ternary 1 0 (not (not .Values.edgeTLS.create))) (list "Certificate")) }}
+{{- $file := index $source 0 }}
+{{- $documents := 0 }}
+{{- range $index, $text := regexSplit `(?m)^---` (include (index $source 1) $) -1 }}
+{{- $document := fromYaml $text }}
+{{- if hasKey $document "Error" }}
+{{- $documents = add1 $documents }}
+{{- $badRendered = append $badRendered (printf "document %d from `%s` does not parse (%s)" $index $file (index $document "Error")) }}
+{{- else if $document }}
+{{- $documents = add1 $documents }}
+{{- $kind := toString (index $document "kind") }}
+{{- if not (has $kind (index $source 3)) }}
+{{- $badRendered = append $badRendered (printf "document %d from `%s` is a %q, and that template renders only %v" $index $file $kind (index $source 3)) }}
+{{- else if eq $kind "Certificate" }}
+{{- $metadata := index $document "metadata" | default dict }}
+{{- $name := "" }}
+{{- if kindIs "map" $metadata }}{{ $name = toString (index $metadata "name") }}{{ end }}
+{{- $spec := index $document "spec" }}
+{{- if not (kindIs "map" $spec) }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` has no `spec` map" $name $file) }}
+{{- else }}
+{{- $usages := index $spec "usages" }}
+{{- if not (kindIs "slice" $usages) }}{{ $usages = list }}{{ end }}
+{{- $serves := has "server auth" $usages }}
+{{- $dials := has "client auth" $usages }}
+{{- $isCA := and (hasKey $spec "isCA") (not (and (kindIs "bool" (index $spec "isCA")) (not (index $spec "isCA")))) }}
+{{- if $isCA }}
+{{- if and (eq $file "templates/internal-ca.yaml") (eq $name $.Values.internalCA.name) (eq $caAllowed 0) }}
+{{- $caAllowed = 1 }}
+{{- if or $serves $dials (has "any" $usages) }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` is the internal CA and names a direction (%v)" $name $file $usages) }}
+{{- end }}
+{{- else }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` sets `isCA`, and only the one Certificate named `internalCA.name` in `templates/internal-ca.yaml` may" $name $file) }}
+{{- end }}
+{{- else }}
+{{- if has "any" $usages }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` names `any`" $name $file) }}
+{{- end }}
+{{- if and $serves $dials }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` names both `server auth` and `client auth`" $name $file) }}
+{{- else if not (or $serves $dials) }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` names neither `server auth` nor `client auth` (%v)" $name $file $usages) }}
+{{- else if and (eq $file "templates/edge-certificate.yaml") (not $serves) }}
+{{- $badRendered = append $badRendered (printf "`%s` from `%s` is the edge leaf and does not name `server auth`" $name $file) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if ne $documents (int (index $source 2)) }}
+{{- $badRendered = append $badRendered (printf "`%s` renders %d documents where %d are declared" $file $documents (int (index $source 2))) }}
+{{- end }}
+{{- end }}
+{{- if $badRendered }}
+{{- fail (printf "platform: a Certificate this chart renders breaks the trust rules once it is parsed back: %s. A value or a template edit carried a key or a document of its own into what this chart renders (yaadgaar 534, 537)." (join "; " $badRendered)) }}
+{{- end }}{{/* end of the rendered certificates arm */}}
 {{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}
 {{- include "platform.require-api" (dict
       "context" $

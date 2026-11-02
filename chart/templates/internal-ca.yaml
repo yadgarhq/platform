@@ -15,47 +15,56 @@ THE THREE ARE ONE TOGGLE BECAUSE THEY ARE ONE CHAIN. A CA Issuer without its
 Certificate is an Issuer that never goes Ready, and a CA Certificate without the
 self-signed Issuer above it is a Certificate that is never signed. There is no
 useful install that has one and not the others.
+
+A NAMED TEMPLATE, INCLUDED ONCE BELOW: the last arm of `render-checks.yaml`
+parses these objects back, and the Certificate here is the ONE object this
+chart renders with `isCA` on purpose (yaadgaar 534). Every value is
+YAML-encoded for the reason `certificates.yaml` gives (yaadgaar 537);
+`commonName` was already quoted.
 */}}
+{{- define "platform.certificates.internal-ca" }}
 {{- if .Values.internalCA.create }}
 {{- $ca := .Values.internalCA }}
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: {{ $ca.selfSignedIssuerName }}
+  {{- dict "name" $ca.selfSignedIssuerName | toYaml | nindent 2 }}
 spec:
   selfSigned: {}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ $ca.name }}
+  {{- dict "name" $ca.name | toYaml | nindent 2 }}
 spec:
   isCA: true
   # THE SAME NAME AS THE CERTIFICATE, because the Issuer below reads this Secret
   # by that name. The three agreeing is the whole of the chain.
-  secretName: {{ $ca.name }}
+  {{- dict "secretName" $ca.name | toYaml | nindent 2 }}
   commonName: {{ $ca.commonName | quote }}
-  duration: {{ $ca.duration }}
-  renewBefore: {{ $ca.renewBefore }}
+  {{- dict "duration" $ca.duration | toYaml | nindent 2 }}
+  {{- dict "renewBefore" $ca.renewBefore | toYaml | nindent 2 }}
   privateKey:
-    algorithm: {{ $ca.privateKey.algorithm }}
-    size: {{ $ca.privateKey.size }}
+    {{- dict "algorithm" $ca.privateKey.algorithm | toYaml | nindent 4 }}
+    {{- dict "size" $ca.privateKey.size | toYaml | nindent 4 }}
     # `Never`. A CA that rotated its key on renewal would invalidate every leaf it
     # has already issued.
-    rotationPolicy: {{ $ca.privateKey.rotationPolicy }}
+    {{- dict "rotationPolicy" $ca.privateKey.rotationPolicy | toYaml | nindent 4 }}
   usages:
     - cert sign
     - crl sign
   issuerRef:
-    name: {{ $ca.selfSignedIssuerName }}
+    {{- dict "name" $ca.selfSignedIssuerName | toYaml | nindent 4 }}
     kind: Issuer
     group: cert-manager.io
 ---
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: {{ $ca.name }}
+  {{- dict "name" $ca.name | toYaml | nindent 2 }}
 spec:
   ca:
-    secretName: {{ $ca.name }}
+    {{- dict "secretName" $ca.name | toYaml | nindent 4 }}
 {{- end }}
+{{- end }}
+{{- include "platform.certificates.internal-ca" . }}

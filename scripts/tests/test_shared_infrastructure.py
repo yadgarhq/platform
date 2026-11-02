@@ -590,7 +590,7 @@ def test_a_gateway_naming_another_class_reddens_the_reference(tmp_path):
         tmp_path,
         "templates/gateway-listener.yaml",
         lambda text: text.replace(
-            "gatewayClassName: {{ $listener.className }}",
+            '{{- dict "gatewayClassName" $listener.className | toYaml | nindent 2 }}',
             "gatewayClassName: some-other-class",
         ),
     )
@@ -642,8 +642,8 @@ def test_a_parametersRef_naming_nothing_reddens_the_gate(tmp_path):
         tmp_path,
         "templates/gateway-listener.yaml",
         lambda text: text.replace(
-            "      name: {{ $listener.envoyProxy.name }}",
-            "      name: no-such-envoyproxy",
+            '      {{- dict "name" $listener.envoyProxy.name | toYaml | nindent 6 }}',
+            "\n      name: no-such-envoyproxy",
             1,
         ),
     )
@@ -1222,8 +1222,8 @@ def test_a_from_less_rule_added_to_a_policy_reddens_the_allow_all_census(tmp_pat
         tmp_path,
         "templates/ingress-policies.yaml",
         lambda text: text.replace(
-            "          port: {{ .Values.valkey.port }}\n",
-            "          port: {{ .Values.valkey.port }}\n"
+            "          port: {{ .Values.valkey.port | int }}\n",
+            "          port: {{ .Values.valkey.port | int }}\n"
             "    - ports:\n"
             "        - protocol: TCP\n"
             "          port: 9121\n",
@@ -1258,8 +1258,8 @@ def test_a_from_less_rule_written_as_an_empty_list_is_seen_too(tmp_path):
         tmp_path,
         "templates/ingress-policies.yaml",
         lambda text: text.replace(
-            "          port: {{ .Values.valkey.port }}\n",
-            "          port: {{ .Values.valkey.port }}\n"
+            "          port: {{ .Values.valkey.port | int }}\n",
+            "          port: {{ .Values.valkey.port | int }}\n"
             "    - from: []\n"
             "      ports:\n"
             "        - protocol: TCP\n"
@@ -1774,7 +1774,7 @@ def test_a_moved_valkey_pod_label_reddens_the_policy_and_service_gates(tmp_path)
         tmp_path,
         "templates/valkey.yaml",
         lambda text: text.replace(
-            "    metadata:\n      labels:\n        app.kubernetes.io/name: {{ $valkey.name }}",
+            '    metadata:\n      labels:\n        {{- dict "app.kubernetes.io/name" $valkey.name | toYaml | nindent 8 }}',
             "    metadata:\n      labels:\n        app.kubernetes.io/name: relabelled",
             1,
         ),
