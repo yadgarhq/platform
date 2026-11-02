@@ -4,18 +4,20 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. FOURTEEN of the second kind live below — the
+release's own values and nothing else. NINETEEN of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
 arms, the per-operator create arm, the `prometheus.forceNamespace` arm, then the
 mixed-release refusal and the type arm of its toggle list, then the two NATS/valkey
-TLS arms, and last the two NATS contract arms — and everything that makes a capability
+TLS arms, the two NATS contract arms, the three broker credential-rotation arms
+(ADR-0924), and last the leaf usages arm (yaadgaar 279) — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all fourteen;
+the mixed-release pair and the count of all nineteen;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
 `scripts/tests/test_force_namespace.py` owns what the forceNamespace arm does;
 `scripts/tests/test_nats_valkey_tls.py` owns what the four TLS arms do.
+`scripts/tests/test_certificate_usages.py` owns what the leaf usages arm does.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the thirteen internal leaves and the edge leaf all come from
@@ -343,6 +345,10 @@ first `range $operator` in this file, which `test_render_checks.py` reads.
       "To accept the chart's default, omit the key entirely.")) }}
 {{- else if not (contains "/charts/" .Template.BasePath) }}
 {{- if not (kindIs "bool" (index .Values.nats "create")) }}
+{{- /* `kindOf` answers Go's `invalid` for a nil; the adopter wrote `null`, and the
+sibling arms already say so (yaadgaar 369). */ -}}
+{{- $natsCreateKind := kindOf (index .Values.nats "create") }}
+{{- if eq $natsCreateKind "invalid" }}{{ $natsCreateKind = "null" }}{{ end }}
 {{- fail (printf (join "" (list
       "platform: nats.create is a %s rather than true or false, which is not a value helm can resolve a "
       "dependency condition from. "
@@ -350,7 +356,7 @@ first `range $operator` in this file, which `test_render_checks.py` reads.
       "the path its condition names does not resolve — so a value in this shape does not turn the broker off, "
       "it installs one, and this chart's own nats-ingress NetworkPolicy follows helm and renders with it (ADR-0873). "
       "Write `nats.create: false` to leave the broker out, or `nats.create: true` to install it."))
-      (kindOf (index .Values.nats "create"))) }}
+      $natsCreateKind) }}
 {{- end }}
 {{- end }}
 {{- end }}{{/* end of the nats register-key arm */}}
@@ -797,7 +803,43 @@ The cluster route listener (6222) and the monitor are NOT here; route TLS is tas
 {{- $natsDisagree = append $natsDisagree (printf "`nats.config.merge.%s` overrides the `nats.config.nats.tls` keys this check reads; write them under `nats.config.nats.tls.merge`" $key) }}
 {{- end }}
 {{- end }}
+{{- /* THE CLIENT TLS BLOCK IS READ THE WAY nats-server READS IT (yaadgaar 490).
+`parseTLS` lowercases every key of a TLS block (server/opts.go v2.14.6 :5115,
+:5128), so `Verify: false` beside `verify: true` is one setting written twice,
+and the server keeps whichever its unordered map loop reaches last. The reads
+above are by exact lowercase key, so every key here that is not lowercase is
+refused: what is left is exactly what they read. */ -}}
+{{- range $key, $_ := $upMerge }}
+{{- if ne $key (lower $key) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.merge.%s` is not lowercase: nats-server lowercases every key of a TLS block, so it is the same setting as `%s` and could override what this check read. Write it lowercase" $key (lower $key)) }}
+{{- end }}
+{{- end }}
 {{- if $natsEnabled }}
+{{- /* THE CONFIGMAP ITSELF (yaadgaar 489). The upstream chart renders `nats.conf`
+into a ConfigMap through `nats.loadMergePatch`: `nats.configMap.merge` is
+mergeOverwritten over the WHOLE object and `nats.configMap.patch` runs after it,
+so either can take the rendered `nats.conf` away from the broker. `data` and
+`binaryData` replace it outright. `metadata.name` renames the object, so a
+ConfigMap added under `nats.extraResources` can take the name the pod mounts.
+`kind: Secret` turns it into an object the pod's ConfigMap volume does not read.
+So the merge is an ALLOWLIST, matched by exact key: `metadata.labels` and
+`metadata.annotations`, and nothing else. */ -}}
+{{- range $key, $value := (dig "configMap" "merge" dict .Values.nats) }}
+{{- if ne $key "metadata" }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.%s` is set while `nats.tls.enabled` is true: only `metadata.labels` and `metadata.annotations` may be merged into the ConfigMap that carries `nats.conf`, so the broker runs the TLS settings this check read" $key) }}
+{{- else if not (kindIs "map" $value) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.metadata` is not a map (it is %s) while `nats.tls.enabled` is true: only its `labels` and `annotations` may be merged" (kindOf $value)) }}
+{{- else }}
+{{- range $metaKey, $_ := $value }}
+{{- if not (has $metaKey (list "labels" "annotations")) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.metadata.%s` is set while `nats.tls.enabled` is true: only `metadata.labels` and `metadata.annotations` may be merged into the ConfigMap that carries `nats.conf`, so the broker runs the TLS settings this check read" $metaKey) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not (empty (dig "configMap" "patch" list .Values.nats)) }}
+{{- $natsDisagree = append $natsDisagree "`nats.configMap.patch` is not empty while `nats.tls.enabled` is true: a JSON patch on the ConfigMap can rewrite the rendered `nats.conf` this check read" }}
+{{- end }}
 {{- $checksum := dig "podTemplate" "configChecksumAnnotation" false .Values.nats }}
 {{- if not (and (kindIs "bool" $checksum) $checksum) }}
 {{- $natsDisagree = append $natsDisagree "`nats.podTemplate.configChecksumAnnotation` is not true while `nats.tls.enabled` is true: `allow_non_tls` is not hot-reloadable, so without the roll a step that changes it leaves the old listener running while the values say otherwise" }}
@@ -856,9 +898,17 @@ entries by `op`, `path` and volume name; the tests lock their full content.
 {{- else }}
 {{- $imageRef = printf "%s:%s" (toString $image.repository) (toString $image.tag) }}
 {{- end }}
-{{- if not (contains "alpine" $imageRef) }}
+{{- /* THE FLAVOUR IS THE TAG'S, AND ONLY THE TAG'S (yaadgaar 366). `contains`
+over the whole reference let `alpine/nats:2.14.6` or a registry named for alpine
+vouch for a scratch tag. The tag is what follows the last `:` of the last path
+segment, with any `@digest` dropped first, so a registry port is never read as one;
+it must END in `alpine`, bare or after a `-`, optionally with an alpine version. */ -}}
+{{- $imageName := regexReplaceAll "@.*$" $imageRef "" }}
+{{- $lastSegment := regexReplaceAll "^.*/" $imageName "" }}
+{{- $imageTag := ternary (regexReplaceAll "^[^:]*:" $lastSegment "") "" (contains ":" $lastSegment) }}
+{{- if not (regexMatch "(^|-)alpine[0-9.]*$" $imageTag) }}
 {{- fail (printf (join "" (list
-      "platform: the broker image resolves to %q, which is not an alpine image. "
+      "platform: the broker image resolves to %q, whose tag does not name the alpine flavour. "
       "The credential-rotation wrapper (ADR-0924) runs in the nats container and needs a shell; the default nats image is scratch-based and has none. "
       "Use an alpine tag such as `2.14.6-alpine`, or pin a digest as `fullImageName: nats:2.14.6-alpine@sha256:...` — a digest-only pin drops the tag, so its flavour cannot be checked."))
       $imageRef) }}
@@ -957,6 +1007,77 @@ unix socket aside.
 {{- fail "platform: valkey.tls.enabled: false and valkey.tls.plaintext: false together leave the cache with no network listener at all but the unix socket: turn one on." }}
 {{- end }}
 {{- end }}{{/* end of the valkey contract arms */}}
+
+{{/*
+EVERY INTERNAL LEAF NAMES EXACTLY ONE DIRECTION (yaadgaar 279, ADR-0852).
+
+`templates/certificates.yaml` renders each `certificates.leaves.<name>.usages`
+verbatim. One authority signs every leaf here and every server requires a
+client leaf, so the extended key usage is the only thing that stops a stolen
+serving leaf being presented as a client, or the reverse. A leaf that names
+NEITHER `server auth` nor `client auth` is issued with no extended key usage,
+which webpki accepts in BOTH directions; one naming BOTH is the same hole by
+another route; `any` (anyExtendedKeyUsage) grants both whatever else is named.
+`scripts/tests/test_certificate_usages.py` holds the same rule over this
+repository's own values; this arm holds it over an adopter's. A `usages` that is
+not a list is refused here and not in the schema, because types live here
+(ADR-0847). Matching is exact: cert-manager's enum is lowercase.
+
+EVERY ELEMENT IS A STRING FROM CERT-MANAGER'S ENUM. The `has` checks below match
+whole elements, so an element that is not one of the enum's values could carry
+a second item: `"digital signature\n    - client auth"` used to render as two
+list items, the second a direction these checks never saw. `certificates.yaml`
+now YAML-encodes the list as well, so such a string stays one scalar.
+
+UNCONDITIONAL, ROOT AND SUBCHART: no parent carries an equivalent, so standing
+down would defer to nobody (ADR-0794). Every leaf is judged before the one
+`fail`, so all of them are named at once.
+*/}}
+{{- if .Values.certificates.create }}
+{{- /* CERT-MANAGER v1.21.1's `KeyUsage` ENUM, all twenty-three values, copied from
+the vendored `charts/cert-manager-v1.21.1.tgz`,
+`templates/crd-cert-manager.io_certificates.yaml` lines 710-733
+(`spec.usages.items.enum`). */ -}}
+{{- $keyUsages := list
+      "signing" "digital signature" "content commitment" "key encipherment"
+      "key agreement" "data encipherment" "cert sign" "crl sign" "encipher only"
+      "decipher only" "any" "server auth" "client auth" "code signing"
+      "email protection" "s/mime" "ipsec end system" "ipsec tunnel" "ipsec user"
+      "timestamping" "ocsp signing" "microsoft sgc" "netscape sgc" }}
+{{- $leafUsages := list }}
+{{- range $name, $leaf := .Values.certificates.leaves }}
+{{- $usages := index dict "usages" }}
+{{- if kindIs "map" $leaf }}{{ $usages = index $leaf "usages" }}{{ end }}
+{{- if not (kindIs "slice" $usages) }}
+{{- $kind := kindOf $usages }}
+{{- if eq $kind "invalid" }}{{ $kind = "absent or null" }}{{ end }}
+{{- $leafUsages = append $leafUsages (printf "`certificates.leaves.%s.usages` is not a list (it is %s)" $name $kind) }}
+{{- else }}
+{{- range $index, $usage := $usages }}
+{{- if not (kindIs "string" $usage) }}
+{{- $elementKind := kindOf $usage }}
+{{- if eq $elementKind "invalid" }}{{ $elementKind = "null" }}{{ end }}
+{{- $leafUsages = append $leafUsages (printf "`certificates.leaves.%s.usages` element %d is not a string (it is %s)" $name $index $elementKind) }}
+{{- else if not (has $usage $keyUsages) }}
+{{- $leafUsages = append $leafUsages (printf "`certificates.leaves.%s.usages` element %d, %q, is not a cert-manager KeyUsage" $name $index $usage) }}
+{{- end }}
+{{- end }}
+{{- $serves := has "server auth" $usages }}
+{{- $dials := has "client auth" $usages }}
+{{- if has "any" $usages }}
+{{- $leafUsages = append $leafUsages (printf "`certificates.leaves.%s.usages` names `any`, which every verifier accepts in both directions" $name) }}
+{{- end }}
+{{- if and $serves $dials }}
+{{- $leafUsages = append $leafUsages (printf "`certificates.leaves.%s.usages` names both `server auth` and `client auth`, so the leaf works in both directions" $name) }}
+{{- else if not (or $serves $dials) }}
+{{- $leafUsages = append $leafUsages (printf "`certificates.leaves.%s.usages` names neither `server auth` nor `client auth` (it is %v), so cert-manager issues it with no extended key usage, which is accepted in both directions" $name $usages) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $leafUsages }}
+{{- fail (printf "platform: a certificates.leaves entry does not name exactly one direction: %s. Name exactly one of `server auth` (a leaf that answers) or `client auth` (a leaf that dials), beside `digital signature` (ADR-0852)." (join "; " $leafUsages)) }}
+{{- end }}
+{{- end }}{{/* end of the leaf usages arm */}}
 {{- if or .Values.internalCA.create .Values.certificates.create .Values.edgeTLS.create }}
 {{- include "platform.require-api" (dict
       "context" $

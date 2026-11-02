@@ -1698,6 +1698,29 @@ def test_the_package_carries_every_declared_subchart(tmp_path):
     assert "platform/charts/nats/Chart.yaml" in members, members
 
 
+def test_the_package_carries_no_ci_input(tmp_path):
+    """`chart/ci/` is CI input, not chart content (ADR-0806, yaadgaar 169).
+
+    helm never renders `ci/`, but without a `.helmignore` it ships inside every
+    published tarball, and the CI-only `operators.create: true` file then reads
+    like an adopter-facing values file. Every consumer reads `ci/` from git.
+    Packaged from the already-built `chart/charts/`, so this needs no network.
+    """
+    staged = tmp_path / "chart"
+    shutil.copytree(CHART, staged)
+    packaged = helm("package", str(staged), "--destination", str(tmp_path))
+    assert packaged.returncode == 0, packaged.stderr
+    (archive,) = sorted(tmp_path.glob("platform-*.tgz"))
+    with tarfile.open(archive) as tar:
+        members = tar.getnames()
+    shipped = [member for member in members if member.startswith("platform/ci/")]
+    assert shipped == [], shipped
+    # THE TRIPWIRE: the ignore must not have taken the vendored subcharts or the
+    # templates with it, or this passes on a tarball that ships nothing.
+    assert "platform/templates/render-checks.yaml" in members, members[:20]
+    assert any(member.startswith("platform/charts/nats") for member in members), members[:20]
+
+
 def test_a_declared_dependency_that_is_not_vendored_is_named():
     """The vendoring gate's red case, constructed rather than packaged.
 

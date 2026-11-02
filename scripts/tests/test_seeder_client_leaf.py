@@ -124,4 +124,6 @@ def test_the_seeder_leaf_follows_the_shared_toggle(tmp_path):
     assert LEAF not in names, names
     # THE TRIPWIRE: the same override must leave the CA root and the edge leaf,
     # or it disabled more than the leaves and this case proves nothing about them.
-    assert len(names) == 2, names
+    # BY NAME, NOT BY COUNT (yaadgaar 222): a count of two also passes when the
+    # override drops the CA root and leaves one internal leaf behind.
+    assert sorted(names) == ["gateway-tls", "yadgar-internal-ca"], names

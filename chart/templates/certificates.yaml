@@ -47,10 +47,12 @@ spec:
     algorithm: {{ $certificates.privateKey.algorithm }}
     size: {{ $certificates.privateKey.size }}
     rotationPolicy: {{ $certificates.privateKey.rotationPolicy }}
+  {{- /* YAML-ENCODED, NOT PRINTED. A raw `- {{ . }}` let one string carrying a
+  newline render as two list items. `toYaml` keeps every element one scalar; the
+  leaf usages arm in `render-checks.yaml` also refuses any element outside
+  cert-manager's enum. */}}
   usages:
-    {{- range $leaf.usages }}
-    - {{ . }}
-    {{- end }}
+    {{- toYaml $leaf.usages | nindent 4 }}
   issuerRef:
     name: {{ $certificates.issuerRef.name }}
     kind: {{ $certificates.issuerRef.kind }}
