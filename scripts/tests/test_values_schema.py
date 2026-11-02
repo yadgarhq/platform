@@ -183,7 +183,7 @@ EXTRAS = (
 )
 
 # `certificates.leaves` is a KEYED MAP (§3.5): any leaf NAME is accepted, so
-# the schema declares no per-name path at all, and `values.yaml`'s ten named
+# the schema declares no per-name path at all, and `values.yaml`'s thirteen named
 # leaves must not be walked into when checking "every values.yaml leaf is
 # declared" — they are covered by the wildcard `additionalProperties` schema
 # `test_the_certificates_leaves_are_a_keyed_map_with_closed_values` checks

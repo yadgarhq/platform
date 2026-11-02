@@ -699,3 +699,130 @@ def test_a_disabled_side_listener_under_required_client_auth_renders(tmp_path):
     body = with_changes(NATS_VERIFIED, (("nats", "config", "websocket", "enabled"), False))
     result = contract(tmp_path, body)
     assert result.returncode == 0, result.stderr
+
+
+# THE CONFIGMAP ITSELF (yaadgaar 489, folded into 169). The upstream chart renders
+# `nats.conf` into a ConfigMap through `nats.loadMergePatch`, and
+# `nats.configMap.merge` is mergeOverwritten over that whole object, so a `data`
+# block there REPLACES the rendered `nats.conf`: every key the arms above read is
+# then not what the broker runs. A JSON patch on the object can do the same.
+# Refused while `nats.tls.enabled` is true, the same gate as `nats.config.patch`.
+CONFIG_MAP_REPLACEMENT = {"nats.conf": "port: 4222\nwebsocket { port: 8080, no_tls: true }\n"}
+
+
+@pytest.mark.parametrize("key", ["data", "Data", "binaryData", "BINARYDATA"])
+def test_a_config_map_merge_that_replaces_the_rendered_config_is_refused(tmp_path, key):
+    stderr = contract_refused(
+        tmp_path,
+        with_changes(NATS_VERIFIED, (("nats", "configMap", "merge", key), CONFIG_MAP_REPLACEMENT)),
+    )
+    assert f"`nats.configMap.merge.{key}`" in stderr, stderr
+
+
+def test_the_bypass_this_refuses_is_real(tmp_path):
+    """The red case's premise, measured: with the arm's gate off (`clientAuth: off`,
+    TLS off) the same merge does replace the rendered `nats.conf` wholesale."""
+    body = {"nats": {"configMap": {"merge": {"data": CONFIG_MAP_REPLACEMENT}}}}
+    result = contract(tmp_path, body)
+    assert result.returncode == 0, result.stderr
+    config_map = nats_objects(result.stdout)["ConfigMap/nats-config"]
+    assert config_map["data"]["nats.conf"] == CONFIG_MAP_REPLACEMENT["nats.conf"], config_map
+
+
+def test_a_config_map_patch_is_refused_while_tls_is_on(tmp_path):
+    patch = [{"op": "replace", "path": "/data/nats.conf", "value": "port: 4222\n"}]
+    stderr = contract_refused(
+        tmp_path, with_changes(NATS_VERIFIED, (("nats", "configMap", "patch"), patch))
+    )
+    assert "`nats.configMap.patch` is not empty while `nats.tls.enabled` is true" in stderr, stderr
+
+
+def test_a_config_map_merge_of_labels_and_annotations_only_renders(tmp_path):
+    body = with_changes(
+        NATS_VERIFIED,
+        (
+            ("nats", "configMap", "merge", "metadata"),
+            {"labels": {"team": "a"}, "annotations": {"owner": "a"}},
+        ),
+    )
+    result = contract(tmp_path, body)
+    assert result.returncode == 0, result.stderr
+
+
+# THE REST OF THE OBJECT IS NOT SAFE EITHER (yaadgaar 489, the review of 169).
+# `data` is not the only key that takes the rendered `nats.conf` away from the
+# broker. A `metadata.name` merge renames the rendered ConfigMap, so a ConfigMap
+# the adopter adds under `nats.extraResources` can take the name the pod mounts,
+# carrying a plaintext `nats.conf`. A `kind: Secret` merge turns the rendered
+# object into a Secret, which the pod's ConfigMap volume does not read. Both
+# rendered at rc=0 under NATS_VERIFIED. While TLS is on, `nats.configMap.merge`
+# may carry `metadata.labels` and `metadata.annotations` and nothing else.
+PLAINTEXT_DECOY = {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {"name": "nats-config"},
+    "data": {"nats.conf": "port: 4222\n"},
+}
+
+
+@pytest.mark.parametrize(
+    ("edits", "named"),
+    [
+        (
+            (
+                (("nats", "configMap", "merge", "metadata"), {"name": "decoy"}),
+                (("nats", "extraResources"), [PLAINTEXT_DECOY]),
+            ),
+            "`nats.configMap.merge.metadata.name`",
+        ),
+        (
+            ((("nats", "configMap", "merge", "kind"), "Secret"),),
+            "`nats.configMap.merge.kind`",
+        ),
+        (
+            ((("nats", "configMap", "merge", "metadata"), {"namespace": "elsewhere"}),),
+            "`nats.configMap.merge.metadata.namespace`",
+        ),
+        (
+            ((("nats", "configMap", "merge", "apiVersion"), "v2"),),
+            "`nats.configMap.merge.apiVersion`",
+        ),
+        (
+            ((("nats", "configMap", "merge", "metadata"), "decoy"),),
+            "`nats.configMap.merge.metadata` is not a map",
+        ),
+    ],
+    ids=["metadata-name-decoy", "kind-secret", "metadata-namespace", "api-version", "metadata-scalar"],
+)
+def test_a_config_map_merge_beyond_labels_and_annotations_is_refused(tmp_path, edits, named):
+    stderr = contract_refused(tmp_path, with_changes(NATS_VERIFIED, *edits))
+    assert named in stderr, stderr
+
+
+# THE CLIENT TLS BLOCK'S KEY CASE (yaadgaar 490, folded into 169). nats-server
+# v2.14.6 `parseTLS` reads every key of a TLS block through `strings.ToLower`
+# (server/opts.go :5115, :5128), so `Verify: false` beside `verify: true` is the
+# same setting twice and the server keeps whichever its map loop reaches last.
+# The arm read `verify` and `ca_file` by exact key, so the capitalised twin walked
+# past it. Any key there that is not lowercase is refused.
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("Verify", False),
+        ("VERIFY", False),
+        ("CA_File", "/etc/ssl/certs/ca-certificates.crt"),
+        ("Cert_File", "/tmp/other.crt"),
+    ],
+)
+def test_a_client_tls_merge_key_that_is_not_lowercase_is_refused(tmp_path, key, value):
+    stderr = contract_refused(
+        tmp_path, with_changes(NATS_VERIFIED, ((*UPSTREAM_TLS, "merge", key), value))
+    )
+    assert f"`nats.config.nats.tls.merge.{key}`" in stderr, stderr
+    assert "lowercase" in stderr, stderr
+
+
+def test_the_verified_step_with_only_lowercase_keys_still_renders(tmp_path):
+    body = with_changes(NATS_VERIFIED, ((*UPSTREAM_TLS, "merge", "timeout"), 3))
+    result = contract(tmp_path, body)
+    assert result.returncode == 0, result.stderr

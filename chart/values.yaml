@@ -696,8 +696,11 @@ nats:
     #     (`trim_end_matches(['\n', '\r'])`). A hand-made file can end in `\r\n`,
     #     and two ends that trim differently disagree on the password for ever.
     #   - REFUSE AN EMPTY VALUE rather than start a broker whose account has none.
-    #   - `exec` keeps nats-server PID 1, so the lame-duck `preStop` and the pid
-    #     file still work. It runs in this container, not an init container: an
+    #   - `exec` REPLACES THE SHELL, so nats-server is the container's main
+    #     process: the runtime's SIGTERM reaches it directly, and it writes the
+    #     pid file the lame-duck `preStop` signals. It is NOT PID 1: the upstream
+    #     pod sets `shareProcessNamespace: true` (for the reloader), so the pause
+    #     process is. It runs in this container, not an init container: an
     #     init container does not run again on a liveness restart, so its stored
     #     hash would stay stale and the pod would restart in a loop.
     # The image needs a shell, which is why the render check refuses non-alpine.

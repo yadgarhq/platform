@@ -25,7 +25,8 @@ THE MECHANISM ADR-0924 RULES, the valkey pattern of `platform#42`:
   3. A WRAPPER IN THE NATS CONTAINER hashes both files FIRST, reads them
      SECOND, trims every trailing `\\n` and `\\r` exactly as `iam` and `gateway`
      do (`trim_end_matches(['\\n', '\\r'])`), refuses an empty value, and
-     `exec`s nats-server so it stays PID 1 for the lame-duck `preStop`. Not an
+     `exec`s nats-server so it is the container's main process (not PID 1: the
+     upstream pod shares its process namespace) for the lame-duck `preStop`. Not an
      init container: an init container does not run again on a liveness
      restart, so the stored hash would stay stale and the pod would loop.
   4. LIVENESS RE-CHECKS THE HASH BESIDE `/healthz`, at the upstream 30 s x 3.
@@ -356,13 +357,48 @@ def refused(tmp_path: Path, body: str) -> str:
         "{repository: nats, tag: 2.14.6}",
         "{fullImageName: 'nats:2.14.6-scratch'}",
         "{repository: nats, tag: 2.14.6-alpine, digest: 'sha256:" + "0" * 64 + "'}",
+        # THE NAME MUST NOT VOUCH FOR THE TAG (yaadgaar 366, platform#44 review). The
+        # flavour is the tag's; an "alpine" anywhere else in the reference — the
+        # registry, the repository, a path segment — says nothing about the image.
+        "{repository: alpine/nats, tag: 2.14.6}",
+        "{repository: nats-alpine, tag: 2.14.6}",
+        "{registry: alpine.example.test, repository: nats, tag: 2.14.6}",
+        "{fullImageName: 'registry.alpine.example.test/nats:2.14.6'}",
+        "{fullImageName: 'alpine.example.test:5000/nats@sha256:" + "0" * 64 + "'}",
+        "{repository: nats, tag: 2.14.6-alpine-scratch}",
     ],
-    ids=["scratch-tag", "scratch-full-name", "digest-only"],
+    ids=[
+        "scratch-tag",
+        "scratch-full-name",
+        "digest-only",
+        "alpine-repository-owner",
+        "alpine-repository-suffix",
+        "alpine-registry",
+        "alpine-registry-full-name",
+        "alpine-registry-port-digest",
+        "alpine-not-last",
+    ],
 )
 def test_a_broker_image_without_a_shell_is_refused(tmp_path, image):
     stderr = refused(tmp_path, f"nats:\n  container:\n    image: {image}\n")
     assert "platform: the broker image" in stderr, stderr
     assert "alpine" in stderr, stderr
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "{repository: nats, tag: 2.14.6-alpine}",
+        "{repository: nats, tag: 2.14.6-alpine3.22}",
+        "{repository: nats, tag: alpine}",
+        "{registry: mirror.example.test:5000, repository: library/nats, tag: 2.14-alpine}",
+    ],
+    ids=["chart-default", "alpine-version", "bare-alpine", "mirror-with-port"],
+)
+def test_an_alpine_tag_renders(tmp_path, image):
+    body = f"nats:\n  container:\n    image: {image}\n"
+    result = render_result("-f", overlay(tmp_path, "ok.yaml", body))
+    assert result.returncode == 0, result.stderr
 
 
 def test_an_alpine_image_pinned_by_full_name_and_digest_renders(tmp_path):

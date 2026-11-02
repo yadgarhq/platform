@@ -126,7 +126,7 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and eighteen values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and nineteen values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted. B-N2 added two
 # values checks (nats.create with no nats.tls keys; the NATS/upstream
@@ -136,8 +136,10 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # expands shared, which nothing can trip once both contracts are rendered —
 # moving this from 12 (pre-B-N2/B-V2) to 15. Ledger 1440 (ADR-0924) added three
 # (a broker image with no shell; a monitor the liveness probe cannot reach; an
-# adopter patch list that lost the rotation wiring), moving it to 18.
-EXPECTED_RENDER_CHECKS = 20
+# adopter patch list that lost the rotation wiring), moving it to 18. Yaadgaar 279
+# added one (an internal leaf whose usages do not name exactly one direction),
+# moving it to 21.
+EXPECTED_RENDER_CHECKS = 21
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
@@ -172,12 +174,16 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # liveness probe cannot reach, and an adopter `container.patch` or
 # `podTemplate.patch` that lost the rotation wiring;
 # `scripts/tests/test_nats_password_rotation.py` owns what they do.
+# And the leaf usages arm (yaadgaar 279): a `certificates.leaves` entry whose
+# usages do not name exactly one of `server auth` / `client auth`, or name `any`,
+# while `certificates.create` is true, refused wherever this chart runs;
+# `scripts/tests/test_certificate_usages.py` owns what it does.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 18
+EXPECTED_VALUES_CHECKS = 19
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves

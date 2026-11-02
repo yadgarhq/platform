@@ -236,7 +236,9 @@ THE_DELETED_REGISTER_KEY = ("operators-create-is-null", "")
 # its own to be coalesced against, which is why it gets no such protection and
 # needs arms one and two.
 THE_BROKER_REGISTER_IS_NOT_A_BOOL = (
-    ("nats-create-is-null", "nats:\n  create:\n", "invalid"),
+    # `null`, NOT `invalid` (yaadgaar 369): `kindOf` answers Go's `invalid` for a
+    # nil, and a refusal names what the adopter wrote, as the sibling arms do.
+    ("nats-create-is-null", "nats:\n  create:\n", "null"),
     ("nats-create-is-the-yaml-yes-string", 'nats:\n  create: "yes"\n', "string"),
     ("nats-create-is-zero", "nats:\n  create: 0\n", "float64"),
     ("nats-create-is-an-empty-map", "nats:\n  create: {}\n", "map"),
@@ -411,7 +413,9 @@ THE_PARENT_CLAUSE = """{{- $platform := .Values.platform | default dict }}
 {{- if kindIs "map" $values }}
 {{- if hasKey $values "create" }}
 {{- if not (kindIs "bool" $values.create) }}
-{{- fail (printf "REFUSAL_MARKER: platform.%s.create is a %s rather than a boolean" $block (kindOf $values.create)) }}
+{{- $wrote := kindOf $values.create }}
+{{- if eq $wrote "invalid" }}{{ $wrote = "null" }}{{ end }}
+{{- fail (printf "REFUSAL_MARKER: platform.%s.create is a %s rather than a boolean" $block $wrote) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -1432,6 +1436,9 @@ def test_the_brokers_register_key_must_be_a_bool_too(tmp_path):
         assert f"nats.create is a {kind} rather than true or false" in result.stderr, (
             f"`{name}` refused without naming what the adopter wrote: {result.stderr}"
         )
+        assert "a invalid" not in result.stderr, (
+            f"`{name}` printed Go's internal kind name: {result.stderr}"
+        )
         for raise_text in THE_TEXTS_A_RAISE_LEAVES:
             assert raise_text not in result.stderr, (
                 f"`{name}` RAISED instead of refusing: {result.stderr}"
@@ -2142,7 +2149,7 @@ def test_a_non_bool_broker_switch_under_a_bare_parent_keeps_the_policy(tmp_path)
     non-bool, so it is left out.
     """
     parent = parent_around(tmp_path, with_refusal=False)
-    rows = [row for row in THE_BROKER_REGISTER_IS_NOT_A_BOOL if row[2] != "invalid"]
+    rows = [row for row in THE_BROKER_REGISTER_IS_NOT_A_BOOL if row[2] != "null"]
     assert len(rows) == 3
     for name, body, _kind in rows:
         result = render_under_parent_body(tmp_path, parent, f"policy-{name}", body)

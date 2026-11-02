@@ -61,6 +61,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -243,59 +244,199 @@ def test_disabling_the_internal_leaves_reddens_the_certificate_floor(tmp_path):
     )
 
 
-# ── RED 2: a leaf naming both directions ─────────────────────────────────────────
+# ── RED 2 AND 3: the wall's two leaf arms, judged over a constructed document ───
+#
+# THESE USED TO RENDER THE CHART, and they cannot any more: since yaadgaar 279 the
+# chart's own render check refuses both overrides before a Certificate exists to
+# judge (the render-time cases below). The wall is still this suite's, so its two
+# leaf arms are proved over a document built here, the shape `helm template` emits.
 
 
-def test_a_leaf_naming_both_directions_is_refused_and_named(tmp_path):
-    """`iam-tls` (server-only) widened to name `client auth` too. `judge()`'s first arm.
+def leaf_document(name: str, usages: list[str]) -> dict:
+    return {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "metadata": {"name": name},
+        "spec": {"secretName": name, "usages": usages},
+    }
 
-    `iam-tls` answers under this estate's one authority; a leaf naming both
-    directions is exactly the leaf `judge()` at
-    `hooks/certificate_usages.py:344-349` refuses, because the extended key usage
-    is the only thing that would then stop a stolen serving certificate being
-    replayed as a caller. The override is a single-key map merge onto the values
-    file's own `certificates.leaves.iam-tls`, following `test_ladder.py`'s
-    `COLLISION` override — `usages:` is a list, so Helm replaces it wholesale
-    rather than merging it, and every other key on the leaf (`commonName`,
-    `clusterLocalNames`, `renewBefore`) survives untouched.
-    """
-    override = values_file(
-        tmp_path,
-        "both-directions.yaml",
-        "certificates:\n  leaves:\n    iam-tls:\n      usages: [server auth, client auth]\n",
-    )
-    documents = render(CHART, "-f", str(ADOPTER_VALUES), "-f", str(override))
-    failures = usage_failures(documents)
+
+def test_a_leaf_naming_both_directions_is_refused_and_named():
+    """`judge()`'s first arm: one authority signs both directions here, so a leaf
+    naming both collapses the wall that stops a serving leaf being replayed as a
+    caller."""
+    failures = usage_failures([leaf_document("iam-tls", [SERVER, CLIENT])])
     message = "\n".join(failures)
-
     assert failures, "iam-tls named both server auth and client auth and the wall passed"
     assert "iam-tls" in message and "both" in message, message
 
 
-# ── RED 3: a leaf naming neither direction ───────────────────────────────────────
-
-
-def test_a_leaf_naming_neither_direction_is_refused_and_named(tmp_path):
-    """`iam-tls` stripped to `digital signature` alone. `judge()`'s second arm.
-
-    Omitting both directions is the shape `hooks/certificate_usages.py`'s module
-    docstring calls WORSE than naming both: webpki's `KeyUsage::client_auth()` and
-    `KeyUsage::server_auth()` are `required_if_present`, so a leaf with no extended
-    key usage at all is accepted in BOTH directions by the library that reads it —
-    the exact cert-manager default this wall exists to refuse rather than pass
-    silently.
-    """
-    override = values_file(
-        tmp_path,
-        "neither-direction.yaml",
-        "certificates:\n  leaves:\n    iam-tls:\n      usages: [digital signature]\n",
-    )
-    documents = render(CHART, "-f", str(ADOPTER_VALUES), "-f", str(override))
-    failures = usage_failures(documents)
+def test_a_leaf_naming_neither_direction_is_refused_and_named():
+    """`judge()`'s second arm: webpki accepts a leaf with no extended key usage in
+    BOTH directions, so an omission is wider than naming both."""
+    failures = usage_failures([leaf_document("iam-tls", ["digital signature"])])
     message = "\n".join(failures)
-
     assert failures, "iam-tls named neither direction and the wall passed"
     assert "iam-tls" in message and "neither" in message, message
+
+
+# ── THE SAME RULE AT RENDER TIME, FOR AN ADOPTER'S VALUES (yaadgaar 279) ────────
+#
+# The wall above judges THIS repository's values. An adopter's override of
+# `certificates.leaves.<name>.usages` never reaches it, so `render-checks.yaml`
+# carries the rule too and refuses the render, naming the leaf. It runs as the
+# root AND as a subchart: no parent carries an equivalent (ADR-0794).
+# `any` is refused as well: it is `anyExtendedKeyUsage`, which every verifier
+# accepts for either direction, so `[server auth, any]` names one direction and
+# grants both.
+
+USAGES_REFUSAL = "platform: a certificates.leaves entry does not name exactly one direction"
+
+
+def helm_render_result(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return helm("template", "platform", str(CHART), *API_VERSIONS, *arguments)
+
+
+@pytest.mark.parametrize(
+    ("usages", "named"),
+    [
+        ("[digital signature, key encipherment]", "names neither `server auth` nor `client auth`"),
+        ("[server auth, client auth]", "names both `server auth` and `client auth`"),
+        ("[server auth, digital signature, any]", "names `any`"),
+        ("[]", "names neither `server auth` nor `client auth`"),
+        ("server auth", "is not a list"),
+        ("{server: auth}", "is not a list"),
+        ("null", "is not a list"),
+        ("[Server Auth, digital signature]", "names neither `server auth` nor `client auth`"),
+    ],
+    ids=["neither", "both", "any", "empty", "scalar", "map", "null", "wrong-case"],
+)
+def test_an_adopter_leaf_that_does_not_name_one_direction_is_refused(tmp_path, usages, named):
+    override = values_file(
+        tmp_path,
+        "leaf.yaml",
+        f"certificates:\n  leaves:\n    iam-tls:\n      usages: {usages}\n",
+    )
+    result = helm_render_result("-f", str(ADOPTER_VALUES), "-f", str(override))
+    assert result.returncode != 0, f"rendered instead of refusing: {result.stdout[:400]}"
+    assert USAGES_REFUSAL in result.stderr, result.stderr
+    assert "`certificates.leaves.iam-tls.usages`" in result.stderr, result.stderr
+    assert named in result.stderr, result.stderr
+
+
+# AN ELEMENT OUTSIDE CERT-MANAGER'S ENUM IS REFUSED (the review of 279).
+# `certificates.yaml` used to render each element raw, so one string carrying a
+# newline became two list items: the injected `client auth` below rendered as
+# its own item, a two-way leaf the `has` checks above never saw, at rc=0. Every
+# element must be a string that is exactly one of cert-manager v1.21.1's
+# `KeyUsage` values.
+ESTATE_VALUES = CHART / "ci" / "estate-values.yaml"
+INJECTED_USAGES = (
+    'certificates: {leaves: {nats-tls: {usages: ["server auth", '
+    '"digital signature\\n    - client auth"]}}}\n'
+)
+
+
+def test_a_usages_element_carrying_an_injected_item_is_refused(tmp_path):
+    override = values_file(tmp_path, "injected.yaml", INJECTED_USAGES)
+    assert yaml.safe_load(override.read_text())["certificates"]["leaves"]["nats-tls"][
+        "usages"
+    ] == ["server auth", "digital signature\n    - client auth"]
+    result = helm_render_result("-f", str(ESTATE_VALUES), "-f", str(override))
+    assert result.returncode != 0, f"rendered instead of refusing: {result.stdout[:400]}"
+    assert USAGES_REFUSAL in result.stderr, result.stderr
+    assert "`certificates.leaves.nats-tls.usages`" in result.stderr, result.stderr
+    assert "is not a cert-manager KeyUsage" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("usages", "named"),
+    [
+        ('["server auth", "digital signature\\n    - any"]', "is not a cert-manager KeyUsage"),
+        ("[server auth, serverAuth]", "is not a cert-manager KeyUsage"),
+        ("[server auth, 1]", "is not a string"),
+        ("[server auth, [client auth]]", "is not a string"),
+        ("[server auth, null]", "is not a string"),
+    ],
+    ids=["injected-any", "off-enum", "number", "nested-list", "null-element"],
+)
+def test_a_usages_element_outside_the_enum_is_refused(tmp_path, usages, named):
+    override = values_file(
+        tmp_path,
+        "element.yaml",
+        f"certificates:\n  leaves:\n    iam-tls:\n      usages: {usages}\n",
+    )
+    result = helm_render_result("-f", str(ADOPTER_VALUES), "-f", str(override))
+    assert result.returncode != 0, f"rendered instead of refusing: {result.stdout[:400]}"
+    assert USAGES_REFUSAL in result.stderr, result.stderr
+    assert "`certificates.leaves.iam-tls.usages`" in result.stderr, result.stderr
+    assert named in result.stderr, result.stderr
+
+
+def test_an_adopter_leaf_without_a_usages_key_is_refused(tmp_path):
+    """A NEW leaf with no `usages` at all: cert-manager would issue it with no EKU."""
+    override = values_file(
+        tmp_path,
+        "new-leaf.yaml",
+        "certificates:\n  leaves:\n    extra-tls:\n      commonName: extra\n      renewBefore: 900h\n",
+    )
+    result = helm_render_result("-f", str(ADOPTER_VALUES), "-f", str(override))
+    assert result.returncode != 0, f"rendered instead of refusing: {result.stdout[:400]}"
+    assert "`certificates.leaves.extra-tls.usages`" in result.stderr, result.stderr
+
+
+def test_every_offending_leaf_is_named_in_one_refusal(tmp_path):
+    override = values_file(
+        tmp_path,
+        "two.yaml",
+        "certificates:\n  leaves:\n"
+        "    iam-tls:\n      usages: [digital signature]\n"
+        "    gateway-client-tls:\n      usages: [client auth, server auth]\n",
+    )
+    result = helm_render_result("-f", str(ADOPTER_VALUES), "-f", str(override))
+    assert result.returncode != 0, result.stdout[:400]
+    for leaf in ("iam-tls", "gateway-client-tls"):
+        assert f"`certificates.leaves.{leaf}.usages`" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("usages", ["[client auth, digital signature]", "[server auth]"])
+def test_an_adopter_leaf_naming_exactly_one_direction_renders(tmp_path, usages):
+    override = values_file(
+        tmp_path,
+        "one.yaml",
+        f"certificates:\n  leaves:\n    iam-tls:\n      usages: {usages}\n",
+    )
+    result = helm_render_result("-f", str(ADOPTER_VALUES), "-f", str(override))
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_usages_check_also_refuses_as_a_subchart(tmp_path):
+    """No parent carries this rule, so the arm must not stand down under one
+    (ADR-0794). The parent is the throwaway `test_operators_shape.py` builds."""
+    from test_operators_shape import build_parent
+
+    parent = build_parent(tmp_path / "parent", CHART)
+    override = values_file(
+        tmp_path,
+        "parent.yaml",
+        "platform:\n  certificates:\n    create: true\n"
+        "    leaves:\n      iam-tls:\n        usages: [digital signature]\n",
+    )
+    result = helm("template", "yadgar", str(parent), *API_VERSIONS, "-f", str(override))
+    assert result.returncode != 0, result.stdout[:400]
+    assert "charts/platform/templates/render-checks.yaml" in result.stderr, result.stderr
+    assert "`certificates.leaves.iam-tls.usages`" in result.stderr, result.stderr
+
+
+def test_the_usages_check_stands_down_while_certificates_create_is_false(tmp_path):
+    """No leaf renders, so there is nothing to refuse."""
+    override = values_file(
+        tmp_path,
+        "off.yaml",
+        "certificates:\n  create: false\n  leaves:\n    iam-tls:\n      usages: [digital signature]\n",
+    )
+    result = helm_render_result("-f", str(ADOPTER_VALUES), "-f", str(override))
+    assert result.returncode == 0, result.stderr
 
 
 # ── RED 4: the CA root naming a direction ────────────────────────────────────────
@@ -333,6 +474,94 @@ def test_the_ca_root_naming_a_direction_is_refused_and_named(tmp_path):
 
     assert failures, "the CA root named server auth and the wall passed"
     assert "yadgar-internal-ca" in message and "isCA" in message, message
+
+
+# ── THE OTHER SECURITY-BEARING FIELDS, ASSERTED AS LITERALS (yaadgaar 378) ────
+#
+# `usages` had a wall; the key, the issuer, `isCA` and the CA chain had none. A
+# `values.yaml` edit to `rotationPolicy: Never` on the leaves, an RSA-1024 key, or a
+# leaf `issuerRef` naming another authority rendered clean and nothing read it.
+# LITERALS, not read back from `values.yaml`: a value derived from the thing under
+# test agrees with whatever it says.
+LEAF_KEY = {"algorithm": "ECDSA", "size": 256, "rotationPolicy": "Always"}
+CA_KEY = {"algorithm": "ECDSA", "size": 256, "rotationPolicy": "Never"}
+INTERNAL_ISSUER = {"name": "yadgar-internal-ca", "kind": "Issuer", "group": "cert-manager.io"}
+SELF_SIGN_ISSUER = {"name": "yadgar-internal-selfsign", "kind": "Issuer", "group": "cert-manager.io"}
+CA_NAME = "yadgar-internal-ca"
+EDGE_NAME = "gateway-tls"
+LEAF_DURATION = "2160h"
+CA_DURATION = "87600h"
+CA_USAGES = ["cert sign", "crl sign"]
+EDGE_USAGES = [SERVER]
+
+
+def security_field_failures(documents: list[dict]) -> list[str]:
+    """Every Certificate/Issuer field that carries trust and differs from the literal. PURE."""
+    failures = []
+    found = {}
+    for document in documents:
+        if document.get("kind") in ("Certificate", "Issuer", "ClusterIssuer"):
+            found[(document["kind"], document["metadata"]["name"])] = document.get("spec") or {}
+
+    def expect(key: tuple[str, str], field: str, want: object) -> None:
+        got = found.get(key, {}).get(field)
+        if got != want:
+            failures.append(f"{key[0]}/{key[1]}: `{field}` is {got!r}, expected {want!r}")
+
+    ca = ("Certificate", CA_NAME)
+    if ca not in found:
+        failures.append(f"no Certificate/{CA_NAME} rendered")
+    expect(ca, "isCA", True)
+    expect(ca, "privateKey", CA_KEY)
+    expect(ca, "issuerRef", SELF_SIGN_ISSUER)
+    expect(ca, "usages", CA_USAGES)
+    expect(ca, "duration", CA_DURATION)
+    expect(("Issuer", CA_NAME), "ca", {"secretName": CA_NAME})
+    expect(("Issuer", SELF_SIGN_ISSUER["name"]), "selfSigned", {})
+
+    edge = ("Certificate", EDGE_NAME)
+    expect(edge, "privateKey", LEAF_KEY)
+    expect(edge, "usages", EDGE_USAGES)
+    if found.get(edge, {}).get("isCA"):
+        failures.append(f"Certificate/{EDGE_NAME}: `isCA` is set on the edge leaf")
+
+    for (kind, name), spec in sorted(found.items()):
+        if kind != "Certificate" or name in (CA_NAME, EDGE_NAME):
+            continue
+        if spec.get("isCA"):
+            failures.append(f"Certificate/{name}: `isCA` is set on an internal leaf")
+        expect((kind, name), "privateKey", LEAF_KEY)
+        expect((kind, name), "issuerRef", INTERNAL_ISSUER)
+        expect((kind, name), "duration", LEAF_DURATION)
+    return failures
+
+
+def test_every_certificate_carries_the_security_fields_the_estate_relies_on():
+    documents = render(CHART, "-f", str(ADOPTER_VALUES))
+    leaves = [d for d in certificates(documents) if d["metadata"]["name"] not in (CA_NAME, EDGE_NAME)]
+    assert len(leaves) >= LEAF_FLOOR - 1, len(leaves)
+    failures = security_field_failures(documents)
+    assert failures == [], "\n".join(failures)
+
+
+@pytest.mark.parametrize(
+    ("override", "named"),
+    [
+        ("certificates:\n  privateKey: {rotationPolicy: Never}\n", "`privateKey`"),
+        ("certificates:\n  privateKey: {algorithm: RSA, size: 1024}\n", "`privateKey`"),
+        ("certificates:\n  issuerRef: {name: some-other-ca, kind: ClusterIssuer}\n", "`issuerRef`"),
+        ("certificates:\n  duration: 87600h\n", "`duration`"),
+        ("internalCA:\n  privateKey: {rotationPolicy: Always}\n", "yadgar-internal-ca: `privateKey`"),
+        ("edgeTLS:\n  usages: [server auth, client auth]\n", "gateway-tls: `usages`"),
+        ("edgeTLS:\n  privateKey: {algorithm: RSA, size: 2048}\n", "gateway-tls: `privateKey`"),
+    ],
+    ids=["leaf-no-rotation", "leaf-weak-key", "leaf-other-issuer", "leaf-ten-years", "ca-rotates", "edge-both", "edge-rsa"],
+)
+def test_a_changed_security_field_reddens_the_gate(tmp_path, override, named):
+    path = values_file(tmp_path, "changed.yaml", override)
+    documents = render(CHART, "-f", str(ADOPTER_VALUES), "-f", str(path))
+    message = "\n".join(security_field_failures(documents))
+    assert named in message, message
 
 
 # ── THE GROUPS THIS FILE NAMES ARE THE GROUPS THE CHART DECLARES ────────────────

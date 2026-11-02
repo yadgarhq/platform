@@ -1,0 +1,12 @@
+# WHAT `helm package` LEAVES OUT OF THE PUBLISHED TARBALL (yaadgaar 169).
+#
+# `ci/` is CI input, not chart content (ADR-0806): `ci/values.yaml`,
+# `ci/estate-values.yaml` and `ci/api-versions.txt` are read from the git
+# checkout by the helm-lint hook, the trivy gate and every other consumer, never
+# from the tarball. helm never renders `ci/`, so this changes no render.
+#
+# `charts/` is NOT ignored: the vendored subcharts are the package's content,
+# and `test_the_package_carries_every_declared_subchart` proves they ship.
+ci/
+.git/
+*.tgz.prov
