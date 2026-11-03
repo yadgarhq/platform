@@ -144,8 +144,9 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # Yaadgaar 541 added one (a number printed through `int` that is not a whole
 # number in its range), moving it to 25. Yaadgaar 169 added one (a broker merge
 # key that overrides the wrapper, the volumes or the mounts the chart owns),
-# moving it to 26.
-EXPECTED_RENDER_CHECKS = 26
+# moving it to 26. Yaadgaar 546 added one (a value the upstream nats chart prints
+# unquoted that is not of its kind), moving it to 27.
+EXPECTED_RENDER_CHECKS = 27
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
@@ -196,13 +197,16 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # yaadgaar 169 merge-key arm, while `nats.create` is true: a
 # `nats.container.merge` that changes the wrapper or sets a key off its allowlist,
 # or a `nats.podTemplate.merge` / `nats.statefulSet.merge` that replaces the
-# volume-carrying lists; `test_nats_merge_keys.py` owns what it does.
+# volume-carrying lists; `test_nats_merge_keys.py` owns what it does. And the
+# yaadgaar 546 unquoted-values arm, while `nats.create` is true: a value the
+# upstream nats chart prints unquoted that is not of its kind;
+# `test_nats_unquoted_values.py` owns what it does.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 24
+EXPECTED_VALUES_CHECKS = 25
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves

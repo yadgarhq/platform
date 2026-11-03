@@ -4,24 +4,26 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. TWENTY-THREE of the second kind live below — the
+release's own values and nothing else. TWENTY-FIVE of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
 arms, the per-operator create arm, the `prometheus.forceNamespace` arm, then the
 mixed-release refusal and the type arm of its toggle list, then the two NATS/valkey
 TLS arms, the two NATS contract arms, the three broker credential-rotation arms
-(ADR-0924), the leaf usages arm (yaadgaar 279), and last the one-line values arm,
+(ADR-0924), the broker merge-key arm (yaadgaar 169), the unquoted-values arm
+(yaadgaar 546), the leaf usages arm (yaadgaar 279), and last the one-line values arm,
 the whole-number arm (yaadgaar 541),
 the edge usages arm and the rendered certificates arm (yaadgaar 534; the last
 reads the rendered Certificates rather than values) — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all twenty-three;
+the mixed-release pair and the count of all twenty-five;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
 `scripts/tests/test_force_namespace.py` owns what the forceNamespace arm does;
 `scripts/tests/test_nats_valkey_tls.py` owns what the four TLS arms do.
 `scripts/tests/test_certificate_usages.py` owns what the leaf usages arm and the
-three yaadgaar 534 arms do.
+three yaadgaar 534 arms do. `scripts/tests/test_nats_merge_keys.py` and
+`scripts/tests/test_nats_unquoted_values.py` own the yaadgaar 169 and 546 arms.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the thirteen internal leaves and the edge leaf all come from
@@ -1163,6 +1165,193 @@ exec nats-server --config /etc/nats-config/nats.conf
 {{- fail (printf "platform: the broker's merge keys override what the chart owns: %s. Put a volume or a mount through the chart's patch keys, after the chart's own entries (ADR-0924, ADR-0852)." (join "; " $mergeRefused)) }}
 {{- end }}
 {{- end }}{{/* end of the broker merge-key arms */}}
+
+{{/*
+THE SCALARS THE UPSTREAM NATS CHART PRINTS UNQUOTED (yaadgaar 546), AND EACH IS
+AN ALLOWLIST OF ITS KIND.
+
+The upstream chart (2.14.6) renders `nats.conf`, the StatefulSet, its pod and
+every other object it ships from `files/**.yaml` through `tpl` and then
+`fromYaml`, and it prints many values raw: `port: {{ .port }}`. A newline in
+such a value ends the scalar and writes a sibling key, which `fromYaml` parses
+as the chart's own: `nats.config.nats.port: "4222\nallow_non_tls: true"`
+rendered rc=0 with TLS required and put `"allow_non_tls": true` into nats.conf,
+past every key-based arm above. YAML flow syntax (`{allow_non_tls: true}`)
+re-types a value with no newline at all. `jetstream.yaml` wraps the three sizes
+in its own `<< >>`, so `maxSize: "1Gi; allow_non_tls: true"` reached nats.conf as
+raw text, where `;` starts another directive. And `nats.reloaderConfig` prints
+every `cert_file`, `key_file` and `ca_file` of the rendered config raw into the
+reloader's arguments, so those keys are judged at any depth under `nats.config`.
+
+So a control-character refusal is not enough, and each value is held to an
+ALLOWLIST instead: a whole number in its range (the whole-number arm's idiom),
+a bool, a DNS-1123 name or label, an absolute path, a file name, an image
+reference, tag, digest or pull policy, or a storage size, which must be a
+string because helm reads a number as a float and the chart prints one of a
+million or more as `1.073741824e+09` (measured). An absent value (null,
+or an empty string) passes, because the upstream chart fills it from a default
+of its own; a bool and a whole number have upstream defaults and must be
+present. `kindIs` comes before `regexMatch`, which would otherwise stop on a Go
+type error rather than this message.
+
+`scripts/tests/test_nats_unquoted_values.py` owns what this arm does. Its
+`SWEEP` is the list of every unquoted print in the vendored chart, by file and
+line, with the paths this arm judges for it or the reason none can reach it;
+the sweep re-runs over the vendored archive, so a chart bump that adds or moves
+a print reddens it, and every path it names must appear in this arm. The
+`reloader.image.*` prints and adopter `$tplYaml` outside `nats.config` are NOT
+here: they are yaadgaar 544 and 545. Runs while `nats.create` is true, after
+the arms above, so an image or a monitor port they refuse names itself there.
+*/}}
+{{- if $natsCreate }}
+{{- $unquoted := list }}
+{{- range $rule := list
+      (list "nats.config.nats.port" 1 65535)
+      (list "nats.config.monitor.port" 1 65535)
+      (list "nats.config.profiling.port" 1 65535)
+      (list "nats.config.leafnodes.port" 1 65535)
+      (list "nats.config.websocket.port" 1 65535)
+      (list "nats.config.mqtt.port" 1 65535)
+      (list "nats.config.cluster.port" 1 65535)
+      (list "nats.config.gateway.port" 1 65535)
+      (list "nats.promExporter.port" 1 65535)
+      (list "nats.config.cluster.replicas" 1 -1)
+      (list "nats.podTemplate.terminationGracePeriodSeconds" 0 -1) }}
+{{- $path := index $rule 0 }}
+{{- $minimum := index $rule 1 }}
+{{- $maximum := index $rule 2 }}
+{{- $value := $.Values }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = index (dict) "absent" }}{{ end }}
+{{- end }}
+{{- $whole := or (kindIs "int" $value) (kindIs "int64" $value)
+      (and (kindIs "float64" $value) (eq (float64 (int64 $value)) $value))
+      (and (kindIs "string" $value) (regexMatch `^(0|[1-9][0-9]{0,17})$` $value)) }}
+{{- $range := ternary (printf "%d or more" $minimum) (printf "%d..%d" $minimum $maximum) (lt $maximum 0) }}
+{{- if not $whole }}
+{{- $unquoted = append $unquoted (printf "`%s` is %s, not a whole number in %s" $path (toJson $value) $range) }}
+{{- else if or (lt (int64 $value) (int64 $minimum)) (and (ge $maximum 0) (gt (int64 $value) (int64 $maximum))) }}
+{{- $unquoted = append $unquoted (printf "`%s` is %d, outside %s" $path (int64 $value) $range) }}
+{{- end }}
+{{- end }}
+{{- $kinds := dict
+      "name" `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+      "label" `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`
+      "host" `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?(\.[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*$`
+      "path" `^/[A-Za-z0-9._/-]*$`
+      "file" `^[A-Za-z0-9._][A-Za-z0-9._/-]*$`
+      "image" `^[A-Za-z0-9]([A-Za-z0-9._/:@-]*[A-Za-z0-9])?$`
+      "tag" `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`
+      "digest" `^[a-z0-9]+([+._-][a-z0-9]+)*:[A-Fa-f0-9]{32,}$`
+      "pullPolicy" `^(Always|IfNotPresent|Never)$`
+      "size" `^(0|[1-9][0-9]{0,17})([KMGTPEkmgtpe](i?[Bb])?|[KMGTPEkmgtpe]i)?$` }}
+{{- $described := dict
+      "bool" "a bool (`true` or `false`, unquoted)"
+      "name" "a DNS-1123 name (lowercase letters, digits, `-` and `.`)"
+      "label" "a DNS-1123 label (lowercase letters, digits and `-`, at most 63)"
+      "host" "a host name or an IPv4 address"
+      "path" "an absolute path of letters, digits, `.`, `_`, `-` and `/`"
+      "file" "a file name of letters, digits, `.`, `_`, `-` and `/`"
+      "image" "an image reference of letters, digits, `.`, `_`, `-`, `/`, `:` and `@`"
+      "tag" "an image tag (letters, digits, `_`, `.` and `-`, at most 128)"
+      "digest" "an image digest such as `sha256:` and its hex"
+      "pullPolicy" "`Always`, `IfNotPresent` or `Never`"
+      "size" "a quoted size such as `\"10Gi\"`, `\"512M\"` or `\"1073741824\"` (a number of a million or more prints as `1.073741824e+09`)" }}
+{{- range $rule := list
+      (list "nats.config.cluster.noAdvertise" "bool")
+      (list "nats.config.jetstream.memoryStore.maxSize" "size")
+      (list "nats.config.jetstream.fileStore.maxSize" "size")
+      (list "nats.config.jetstream.fileStore.pvc.size" "size")
+      (list "nats.config.jetstream.fileStore.dir" "path")
+      (list "nats.config.resolver.dir" "path")
+      (list "nats.config.nats.tls.dir" "path") (list "nats.config.nats.tls.cert" "file") (list "nats.config.nats.tls.key" "file")
+      (list "nats.config.leafnodes.tls.dir" "path") (list "nats.config.leafnodes.tls.cert" "file") (list "nats.config.leafnodes.tls.key" "file")
+      (list "nats.config.websocket.tls.dir" "path") (list "nats.config.websocket.tls.cert" "file") (list "nats.config.websocket.tls.key" "file")
+      (list "nats.config.mqtt.tls.dir" "path") (list "nats.config.mqtt.tls.cert" "file") (list "nats.config.mqtt.tls.key" "file")
+      (list "nats.config.cluster.tls.dir" "path") (list "nats.config.cluster.tls.cert" "file") (list "nats.config.cluster.tls.key" "file")
+      (list "nats.config.gateway.tls.dir" "path") (list "nats.config.gateway.tls.cert" "file") (list "nats.config.gateway.tls.key" "file")
+      (list "nats.tlsCA.dir" "path") (list "nats.tlsCA.key" "file")
+      (list "nats.configMap.name" "name")
+      (list "nats.headlessService.name" "name")
+      (list "nats.service.name" "name")
+      (list "nats.statefulSet.name" "name")
+      (list "nats.serviceAccount.name" "name")
+      (list "nats.podDisruptionBudget.name" "name")
+      (list "nats.promExporter.podMonitor.name" "name")
+      (list "nats.config.websocket.ingress.name" "name")
+      (list "nats.config.jetstream.fileStore.pvc.name" "name")
+      (list "nats.config.resolver.pvc.name" "name")
+      (list "nats.natsBox.contentsSecret.name" "name")
+      (list "nats.natsBox.contextsSecret.name" "name")
+      (list "nats.natsBox.deployment.name" "name")
+      (list "nats.natsBox.serviceAccount.name" "name")
+      (list "nats.config.cluster.routeURLs.k8sClusterDomain" "name")
+      (list "nats.nameOverride" "label")
+      (list "nats.fullnameOverride" "label")
+      (list "nats.namespaceOverride" "label")
+      (list "nats.promExporter.monitorDomain" "host")
+      (list "nats.container.image.repository" "image") (list "nats.container.image.registry" "image")
+      (list "nats.container.image.fullImageName" "image") (list "nats.container.image.tag" "tag")
+      (list "nats.container.image.digest" "digest") (list "nats.container.image.pullPolicy" "pullPolicy")
+      (list "nats.promExporter.image.repository" "image") (list "nats.promExporter.image.registry" "image")
+      (list "nats.promExporter.image.fullImageName" "image") (list "nats.promExporter.image.tag" "tag")
+      (list "nats.promExporter.image.digest" "digest") (list "nats.promExporter.image.pullPolicy" "pullPolicy")
+      (list "nats.natsBox.container.image.repository" "image") (list "nats.natsBox.container.image.registry" "image")
+      (list "nats.natsBox.container.image.fullImageName" "image") (list "nats.natsBox.container.image.tag" "tag")
+      (list "nats.natsBox.container.image.digest" "digest") (list "nats.natsBox.container.image.pullPolicy" "pullPolicy")
+      (list "global.image.registry" "image") (list "global.image.pullPolicy" "pullPolicy")
+      (list "nats.global.image.registry" "image") (list "nats.global.image.pullPolicy" "pullPolicy") }}
+{{- $path := index $rule 0 }}
+{{- $kind := index $rule 1 }}
+{{- $value := $.Values }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = index (dict) "absent" }}{{ end }}
+{{- end }}
+{{- if eq $kind "bool" }}
+{{- if not (kindIs "bool" $value) }}
+{{- $unquoted = append $unquoted (printf "`%s` is %s, not %s" $path (toJson $value) (index $described $kind)) }}
+{{- end }}
+{{- else if or (kindIs "invalid" $value) (and (kindIs "string" $value) (eq $value "")) }}
+{{- /* absent: the upstream chart fills it from its own default */ -}}
+{{- else if not (and (kindIs "string" $value) (regexMatch (index $kinds $kind) $value)) }}
+{{- $unquoted = append $unquoted (printf "`%s` is %s, not %s" $path (toJson $value) (index $described $kind)) }}
+{{- end }}
+{{- end }}
+{{- $contexts := $.Values }}
+{{- range $key := splitList "." "nats.natsBox.contexts" }}
+{{- if kindIs "map" $contexts }}{{ $contexts = index $contexts $key }}{{ else }}{{ $contexts = index (dict) "absent" }}{{ end }}
+{{- end }}
+{{- if kindIs "map" $contexts }}
+{{- range $key, $_ := $contexts }}
+{{- if not (regexMatch `^[-._a-zA-Z0-9]+$` $key) }}
+{{- $unquoted = append $unquoted (printf "`nats.natsBox.contexts` key %s is not a Secret key (letters, digits, `-`, `.` and `_`)" (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- else if not (kindIs "invalid" $contexts) }}
+{{- $unquoted = append $unquoted (printf "`nats.natsBox.contexts` is %s, not a map" (kindOf $contexts)) }}
+{{- end }}
+{{- /* cert_file|key_file|ca_file AT ANY DEPTH. `nats.reloaderConfig` matches each
+key by exact name and prints its value raw, so each must be a string that is an
+absolute path. They are read off `toRawJson`, where a key is a quoted string
+followed by a colon: every such key, and those of them whose value is a string,
+are counted, and a difference is a key whose value is not a string. */ -}}
+{{- $configJson := toRawJson (dig "config" dict .Values.nats) }}
+{{- $fileKeys := regexFindAll `"(?:cert_file|key_file|ca_file)":` $configJson -1 }}
+{{- $fileStrings := regexFindAll `"(?:cert_file|key_file|ca_file)":"(?:[^"\\]|\\.)*"` $configJson -1 }}
+{{- if ne (len $fileKeys) (len $fileStrings) }}
+{{- $unquoted = append $unquoted "`nats.config` holds a `cert_file`, `key_file` or `ca_file` that is not a string" }}
+{{- end }}
+{{- range $found := $fileStrings }}
+{{- range $key, $file := fromJson (printf "{%s}" $found) }}
+{{- if not (regexMatch (index $kinds "path") $file) }}
+{{- $unquoted = append $unquoted (printf "`nats.config` holds a `%s` of %s, not %s" $key (toJson $file) (index $described "path")) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $unquoted }}
+{{- fail (printf "platform: a value the upstream nats chart prints unquoted is not of its kind: %s. The chart prints each one raw into YAML it parses back, so a newline, a `;` inside its own `<< >>` or YAML flow syntax writes a key of its own into nats.conf or the broker's objects, past every check here (yaadgaar 546)." (join "; " $unquoted)) }}
+{{- end }}
+{{- end }}{{/* end of the unquoted-values arm */}}
 
 {{/*
 VALKEY'S OWN GUARD (B-V2, ADR-0852), MIRRORING NATS'S ABSENCE ARM ABOVE.
