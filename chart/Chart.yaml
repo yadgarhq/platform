@@ -43,12 +43,15 @@ sources:
 # `helm install` does NOT resolve dependencies — an adopter with no helm
 # repositories configured gets a broker only if the published artifact carries one.
 #
-# LICENCE, AND AN OBSERVATION RATHER THAN A CLAIM. The upstream project is
-# Apache-2.0, and its PACKAGED chart tree carries no LICENSE and no NOTICE file —
-# measured 2026-09-23 over the 54 members of `nats-2.14.6.tgz`. Nothing is
-# redistributed from this repository, since nothing is vendored here; the
-# obligation, if there is one, attaches to the published `platform` artifact that
-# the release pipeline builds, and it is filed rather than answered here.
+# LICENCES (yaadgaar 377). No packaged upstream chart below carries its own
+# LICENSE or NOTICE file — measured first over the 54 members of
+# `nats-2.14.6.tgz` on 2026-09-23, then over all seven on 2026-11-03. The
+# obligation attaches to the published `platform` artifact, which vendors them,
+# so `chart/LICENSES/<name>-LICENSE` holds each upstream text at the tag that
+# matches the pinned version, and `chart/NOTICE` lists them. Both ship in the
+# package. `scripts/tests/test_licenses.py` fails when a dependency declared here
+# has no licence file, or when NOTICE disagrees with this file or with the
+# vendored charts — so a version bump below needs the new text and digest too.
 dependencies:
   - name: nats
     version: 2.14.6

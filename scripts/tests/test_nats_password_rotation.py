@@ -170,6 +170,14 @@ LIVENESS = (
     f"sha256sum -c -s {HASH_FILE} && "
     "wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"
 )
+# yaadgaar 169: with TLS on the monitor serves HTTPS, so the probe does too. The
+# alpine `wget` verifies the certificate and the leaf names no 127.0.0.1
+# (measured), so it skips verification on loopback.
+LIVENESS_TLS = (
+    f"sha256sum -c -s {HASH_FILE} && "
+    "wget --no-check-certificate -q -O /dev/null 'https://127.0.0.1:8222/healthz?js-enabled-only=true'"
+)
+LIVENESS_BY_POSTURE = {"off": LIVENESS, "required": LIVENESS_TLS}
 
 
 def nats_statefulset(documents: list[dict]) -> dict:
@@ -313,13 +321,262 @@ def test_liveness_rechecks_the_hash_beside_healthz_at_upstream_timing(tmp_path, 
 
     handlers = {key for key in ("exec", "httpGet", "tcpSocket", "grpc") if key in liveness}
     assert handlers == {"exec"}, f"liveness must carry one exec handler, found {handlers}"
-    assert liveness["exec"]["command"] == ["/bin/sh", "-c", LIVENESS], liveness
+    assert liveness["exec"]["command"] == ["/bin/sh", "-c", LIVENESS_BY_POSTURE[posture]], liveness
     assert (liveness["periodSeconds"], liveness["failureThreshold"]) == (30, 3), liveness
     assert liveness["timeoutSeconds"] == 5, liveness
 
-    # Readiness and startup stay the upstream httpGet probes.
+    # Readiness and startup stay the upstream httpGet probes, over HTTPS with TLS on.
     assert nats["readinessProbe"]["httpGet"]["path"] == "/healthz?js-server-only=true"
     assert nats["startupProbe"]["httpGet"]["path"] == "/healthz"
+    scheme = {"off": None, "required": "HTTPS"}[posture]
+    for probe_name in ("readinessProbe", "startupProbe"):
+        assert nats[probe_name]["httpGet"].get("scheme") == scheme, nats[probe_name]
+
+
+# ── THE MONITOR SERVES HTTPS WHENEVER TLS IS ON (yaadgaar 169, ADR-0852) ─────
+
+
+def monitor_shape(documents: list[dict]) -> dict:
+    conf = nats_conf(documents)
+    (headless,) = [d for d in of_kind(documents, "Service") if name_of(d) == "nats-headless"]
+    (port,) = [p for p in headless["spec"]["ports"] if p["name"] == "monitor"]
+    nats = container(pod_spec(documents), BROKER_CONTAINER_NAME)
+    (container_port,) = [p for p in nats["ports"] if p["name"] == "monitor"]
+    return {
+        "https_port": '"https_port": 8222' in conf,
+        "http_port": '"http_port"' in conf,
+        "appProtocol": port["appProtocol"],
+        "port": (port["port"], container_port["containerPort"]),
+    }
+
+
+@POSTURES
+def test_the_monitor_serves_https_exactly_when_tls_is_on(tmp_path, posture):
+    """The chart derives it from the client listener: no adopter key is written
+    in `TLS_REQUIRED`. The Service's `appProtocol` stays `http`, which is
+    cosmetic: the upstream chart derives it from the key the chart leaves alone."""
+    documents = adopter_render(tmp_path, posture)
+    shape = monitor_shape(documents)
+    nats = container(pod_spec(documents), BROKER_CONTAINER_NAME)
+    schemes = [nats[name]["httpGet"].get("scheme") for name in ("startupProbe", "readinessProbe")]
+    if posture == "required":
+        expected = {"https_port": True, "http_port": False, "appProtocol": "http", "port": (8222, 8222)}
+        assert schemes == ["HTTPS", "HTTPS"], schemes
+    else:
+        expected = {"https_port": False, "http_port": True, "appProtocol": "http", "port": (8222, 8222)}
+        assert schemes == [None, None], schemes
+    assert shape == expected, shape
+
+
+def literal(name: str) -> str:
+    text = (CHART / "templates" / "render-checks.yaml").read_text()
+    found = re.findall(r"\{\{- \$" + name + r" := `(.*?)` \}\}", text, flags=re.DOTALL)
+    assert len(found) == 1, f"expected one `${name}` literal, found {len(found)}"
+    return found[0]
+
+
+def test_the_tplyaml_literals_match_values_yaml():
+    """Each `$tplYaml` literal in `templates/render-checks.yaml` is its `values.yaml` text, byte for byte."""
+    nats = yaml.safe_load((CHART / "values.yaml").read_text())["nats"]
+    assert nats["config"]["patch"] == [{"$tplYaml": literal("natsMonitorPatch")}], nats["config"]["patch"]
+    patch = nats["container"]["patch"]
+    (probe,) = [op for op in patch if op.get("path") == "/livenessProbe/exec"]
+    assert probe["value"] == {"command": ["/bin/sh", "-c", {"$tplYaml": literal("natsLiveness")}]}, probe
+    assert {"$tplYaml": literal("natsStartupScheme")} in patch, patch
+    assert {"$tplYaml": literal("natsReadinessScheme")} in patch, patch
+
+
+def tls_arguments(tmp_path: Path, posture: str, body: str) -> list[str]:
+    arguments = ["-f", overlay(tmp_path, "case.yaml", body)]
+    if posture == "required":
+        arguments = ["-f", overlay(tmp_path, "tls.yaml", TLS_REQUIRED), *arguments]
+    return arguments
+
+
+@POSTURES
+@pytest.mark.parametrize("monitor", ["{tls: {enabled: true}}"], ids=["true"])
+def test_an_adopter_monitor_tls_key_is_refused(tmp_path, posture, monitor):
+    result = render_result(*tls_arguments(tmp_path, posture, f"nats:\n  config:\n    monitor: {monitor}\n"))
+    assert result.returncode != 0, result.stdout[:200]
+    assert "platform: the NATS TLS keys disagree" in result.stderr, result.stderr
+    assert "`nats.config.monitor.tls.enabled` is set" in result.stderr, result.stderr
+
+
+@POSTURES
+def test_an_explicit_false_monitor_tls_key_renders_as_the_default(tmp_path, posture):
+    result = render_result(*tls_arguments(tmp_path, posture, "nats:\n  config:\n    monitor: {tls: {enabled: false}}\n"))
+    assert result.returncode == 0, result.stderr
+
+
+def test_an_adopter_config_patch_under_tls_is_refused(tmp_path):
+    body = "nats:\n  config:\n    patch: [{op: add, path: /http_port, value: 8223}]\n"
+    result = render_result(*tls_arguments(tmp_path, "required", body))
+    assert result.returncode != 0, result.stdout[:200]
+    assert "`nats.config.patch` is not the chart's own entry while `nats.tls.enabled` is true" in result.stderr, result.stderr
+
+
+def test_an_adopter_config_patch_with_tls_off_still_renders(tmp_path):
+    """Unchanged from `main`: at the off posture nothing reads the config patch."""
+    body = "nats:\n  config:\n    patch: [{op: add, path: /max_payload, value: 1048576}]\n"
+    result = render_result(*tls_arguments(tmp_path, "off", body))
+    assert result.returncode == 0, result.stderr
+
+
+INCLUDES = {
+    "top-level": "nats:\n  config:\n    merge:\n      zz$include: /etc/extra.conf\n",
+    "nested-tls": "nats:\n  config:\n    nats:\n      tls:\n        merge:\n          zz$include: /etc/extra.conf\n",
+    "bare": "nats:\n  config:\n    merge:\n      $include: /etc/extra.conf\n",
+    "in-a-list": "nats:\n  config:\n    merge:\n      authorization:\n        users:\n          - {user: x, a$include: /etc/extra.conf}\n",
+}
+
+
+@POSTURES
+@pytest.mark.parametrize("case", sorted(INCLUDES))
+def test_an_include_directive_anywhere_under_the_config_is_refused(tmp_path, posture, case):
+    result = render_result(*tls_arguments(tmp_path, posture, INCLUDES[case]))
+    assert result.returncode != 0, result.stdout[:200]
+    assert "platform: the NATS TLS keys disagree" in result.stderr, result.stderr
+    assert "ending in `$include` into an `include` directive" in result.stderr, result.stderr
+
+
+@POSTURES
+def test_a_key_that_only_contains_include_renders(tmp_path, posture):
+    """The rule is the suffix nats.formatConfig reads, so a key or value that merely
+    contains `$include` is not refused."""
+    body = "nats:\n  config:\n    merge:\n      max_payload$includex: 1\n      server_tags: [\"a$include\"]\n"
+    result = render_result(*tls_arguments(tmp_path, posture, body))
+    assert result.returncode == 0, result.stderr
+
+
+# THE RAW-TEXT ROUTE (yaadgaar 169). Upstream `nats.formatConfig` copies a
+# `"<< X >>"` string into nats.conf unquoted, and nats-server reads `;`-separated
+# directives in it. Measured against nats-server 2.14.6: the first value below
+# rendered rc=0 on `main` and the broker started with TLS "available", not
+# "required".
+RAW_STRINGS = {
+    "value-with-directives": "nats:\n  config:\n    merge:\n      debug: \"<< false; allow_non_tls: true >>\"\n",
+    "value-with-include": "nats:\n  config:\n    merge:\n      debug: \"<< false; include ../extra/m.conf; debug: false >>\"\n",
+    "key-form": "nats:\n  config:\n    merge:\n      \"<< include ../extra/m.conf >>\": 1\n",
+    "nested-tls-merge": "nats:\n  config:\n    nats:\n      tls:\n        merge:\n          timeout: \"<< 2; verify: false >>\"\n",
+    "nested-cluster-merge": "nats:\n  config:\n    cluster:\n      merge:\n        name: \"<< x; allow_non_tls: true >>\"\n",
+    "an-own-reference-elsewhere": "nats:\n  config:\n    merge:\n      max_payload: \"<< $NATS_PASSWORD >>x\"\n",
+    # THE SPLIT FORM: the upstream regex matches across a key and its value on one
+    # pretty-JSON line, so neither string needs both markers (measured: TLS "available").
+    "split-key-and-value": "nats:\n  config:\n    merge:\n      \"<< debug: false; allow_non_tls: true #\": \" >>\"\n",
+    "opening-marker-only": "nats:\n  config:\n    merge:\n      server_tags: [\"<< x\"]\n",
+    "closing-marker-only": "nats:\n  config:\n    nats:\n      tls:\n        merge:\n          cipher_suites: [\"x >>\"]\n",
+}
+
+
+# AN ADOPTER'S `$tplYaml` is resolved by the upstream chart after this chart's
+# checks, so it can assemble what they refuse. Both routes measured at rc=0 on the
+# previous head, and nats-server 2.14.6 obeyed them.
+TPL_YAML = {
+    "builds-a-raw-string": (
+        "nats:\n  config:\n    merge:\n      debug:\n        $tplYaml: "
+        "'{{ printf \"%s%s false; allow_non_tls: true %s%s\" \"<\" \"<\" \">\" \">\" | toJson }}'\n"
+    ),
+    "builds-an-include-in-a-block": (
+        "nats:\n  config:\n    merge:\n      jetstream:\n        $tplYaml: "
+        "'{{ dict (printf \"zz%sinclude\" \"$\") \"../extra/m.conf\" | toJson }}'\n"
+    ),
+    "spread-under-tls-merge": (
+        "nats:\n  config:\n    nats:\n      tls:\n        merge:\n          $tplYamlSpread: '{verify: false}'\n"
+    ),
+    "a-second-config-patch-entry": (
+        "nats:\n  config:\n    patch:\n"
+        "      - $tplYaml: '{op: test, path: /pid_file, value: /var/run/nats/nats.pid}'\n"
+    ),
+}
+
+
+@POSTURES
+@pytest.mark.parametrize("case", sorted(TPL_YAML))
+def test_an_adopter_tplyaml_under_the_config_is_refused(tmp_path, posture, case):
+    result = render_result(*tls_arguments(tmp_path, posture, TPL_YAML[case]))
+    assert result.returncode != 0, result.stdout[:200]
+    assert "platform: the NATS TLS keys disagree" in result.stderr, result.stderr
+    assert "`$tplYaml` or `$tplYamlSpread` key(s) that are not the chart's own" in result.stderr, result.stderr
+
+
+@POSTURES
+def test_the_charts_own_config_patch_entry_is_the_one_tplyaml_allowed(tmp_path, posture):
+    result = render_result(*tls_arguments(tmp_path, posture, "nats:\n  create: true\n"))
+    assert result.returncode == 0, result.stderr
+
+
+@POSTURES
+@pytest.mark.parametrize("case", sorted(RAW_STRINGS))
+def test_a_raw_string_under_the_config_is_refused(tmp_path, posture, case):
+    result = render_result(*tls_arguments(tmp_path, posture, RAW_STRINGS[case]))
+    assert result.returncode != 0, result.stdout[:200]
+    assert "platform: the NATS TLS keys disagree" in result.stderr, result.stderr
+    assert "copies a `<< >>` string into nats.conf as raw text" in result.stderr, result.stderr
+
+
+OWN_RAW_STRINGS = ("<< $NATS_PASSWORD >>", "<< $NATS_PASSWORD_GATEWAY >>")
+
+
+def raw_strings_in(node) -> list[str]:
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found += raw_strings_in(key) + raw_strings_in(value)
+    elif isinstance(node, list):
+        for item in node:
+            found += raw_strings_in(item)
+    elif isinstance(node, str) and "<<" in node and ">>" in node:
+        found.append(node)
+    return found
+
+
+def test_the_raw_string_allowlist_matches_values_yaml():
+    """`$natsRawStrings` is every `<< >>` string `values.yaml` writes under `nats.config`, and no other."""
+    config = yaml.safe_load((CHART / "values.yaml").read_text())["nats"]["config"]
+    assert sorted(set(raw_strings_in(config))) == sorted(OWN_RAW_STRINGS), raw_strings_in(config)
+    text = (CHART / "templates" / "render-checks.yaml").read_text()
+    (line,) = [l for l in text.splitlines() if l.startswith("{{- $natsRawStrings := list ")]
+    assert re.findall(r'"\\"(.*?)\\""', line) == list(OWN_RAW_STRINGS), line
+
+
+@POSTURES
+@pytest.mark.parametrize("own", OWN_RAW_STRINGS)
+def test_each_own_raw_string_renders_unquoted(tmp_path, posture, own):
+    conf = nats_conf(adopter_render(tmp_path, posture))
+    variable = own.removeprefix("<< ").removesuffix(" >>")
+    assert f'"password": {variable},' in conf or f'"password": {variable}\n' in conf, conf
+
+
+@pytest.mark.parametrize("probe_name", ["startupProbe", "readinessProbe"])
+def test_an_adopter_patch_that_drops_a_probe_scheme_entry_is_refused(tmp_path, probe_name):
+    patch = yaml.safe_load((CHART / "values.yaml").read_text())["nats"]["container"]["patch"]
+    patch = [op for op in patch if f"/{probe_name}/" not in str(op.get("$tplYaml", ""))]
+    stderr = refused(tmp_path, yaml.safe_dump({"nats": {"container": {"patch": patch}}}))
+    name = probe_name.replace("Probe", "")
+    assert f"carry the chart's entry that moves the {name} probe to HTTPS" in stderr, stderr
+
+
+@POSTURES
+@pytest.mark.parametrize("key", ["http_port", "HTTP_PORT", "monitor_port", "https_port", "http", "https", "http_base_path"])
+def test_a_monitor_listener_set_through_the_config_merge_is_refused(tmp_path, posture, key):
+    arguments = ["-f", overlay(tmp_path, "case.yaml", f"nats:\n  config:\n    merge:\n      {key}: 8223\n")]
+    if posture == "required":
+        arguments = ["-f", overlay(tmp_path, "tls.yaml", TLS_REQUIRED), *arguments]
+    result = render_result(*arguments)
+    assert result.returncode != 0, result.stdout[:200]
+    assert f'`nats.config.merge` sets the key "{key}", a monitor listener' in result.stderr, result.stderr
+
+
+def test_an_adopter_probe_command_that_is_not_the_charts_is_refused(tmp_path):
+    """A copy of the old plain-http probe, written as a literal string, fails for
+    ever once the monitor serves HTTPS, so the rotation arm reads the whole value."""
+    patch = yaml.safe_load((CHART / "values.yaml").read_text())["nats"]["container"]["patch"]
+    for op in patch:
+        if op.get("path") == "/livenessProbe/exec":
+            op["value"]["command"][2] = LIVENESS
+    body = yaml.safe_dump({"nats": {"container": {"patch": patch}}})
+    stderr = refused(tmp_path, body)
+    assert "does not swap the liveness probe for the hash-checking exec probe" in stderr, stderr
 
 
 def test_lame_duck_and_termination_grace_stay_at_chart_defaults(tmp_path):
@@ -426,6 +683,13 @@ def test_a_monitor_the_liveness_probe_cannot_reach_is_refused(tmp_path, monitor)
             "platform: the broker's liveness probe" in stderr
             or "key livenessProbe does not exist" in stderr
         ), stderr
+        return
+    if monitor == "{tls: {enabled: true}}":
+        # yaadgaar 169 MOVED this refusal rather than dropping it: the chart now
+        # derives the monitor's HTTPS itself, so the NATS TLS contract refuses an
+        # adopter's `monitor.tls.enabled` at every posture, and the rotation arm
+        # no longer needs to.
+        assert "`nats.config.monitor.tls.enabled` is set" in stderr, stderr
         return
     assert "platform: the broker's liveness probe" in stderr, stderr
 
@@ -639,6 +903,64 @@ def test_the_rendered_wrapper_refuses_to_start_without_a_password(tmp_path, cont
         started = broker.exec("sh", "-c", script, env=POD_ENV)
         assert started.returncode != 0, f"the wrapper started nats-server with a {contents} password file"
         assert broker.exec("sh", "-c", "pgrep nats-server").returncode != 0, "a broker is running"
+
+
+# ── THE TLS POSTURE AGAINST A REAL BROKER (yaadgaar 169) ────────────────────
+
+TLS_DIR = "/etc/nats-certs/nats"
+
+
+def openssl(*arguments: str, cwd: Path) -> None:
+    binary = shutil.which("openssl")
+    assert binary, (
+        "openssl is not on PATH. This gate issues a throwaway CA and leaf for the "
+        "broker and does not skip without them (ADR-0650); GitHub's ubuntu runners ship it."
+    )
+    result = subprocess.run([binary, *arguments], cwd=cwd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def throwaway_pki(directory: Path) -> dict[str, str]:
+    """A CA and a `server auth` leaf for `nats`, as cert-manager issues `nats-tls`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    ec = ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes")
+    openssl("req", "-x509", *ec, "-keyout", "ca.key", "-out", "ca.crt", "-subj", "/CN=w169 test CA", "-days", "1", cwd=directory)
+    openssl("req", *ec, "-keyout", "tls.key", "-out", "tls.csr", "-subj", "/CN=nats", cwd=directory)
+    (directory / "ext").write_text("subjectAltName=DNS:nats,DNS:nats-headless\nextendedKeyUsage=serverAuth\n")
+    openssl(
+        "x509", "-req", "-in", "tls.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial",
+        "-out", "tls.crt", "-days", "1", "-extfile", "ext", cwd=directory,
+    )
+    return {name: (directory / name).read_text() for name in ("ca.crt", "tls.crt", "tls.key")}
+
+
+def seed_tls(broker: Broker, pki: dict[str, str]) -> None:
+    for name, body in pki.items():
+        result = broker.exec("sh", "-c", f"mkdir -p {TLS_DIR} && cat > {TLS_DIR}/{name} <<'EOF'\n{body}EOF")
+        assert result.returncode == 0, result.stderr
+
+
+def test_the_rendered_tls_probe_passes_and_plain_http_is_gone_against_a_real_broker(tmp_path):
+    """The TLS posture's rendered conf, wrapper and probe, run in the pinned image.
+    The probe passes over HTTPS under `verify: true` (nats-server asks a monitor
+    client for no certificate), and the plain-http probe and URL both fail,
+    because no plain-HTTP listener is left on 8222."""
+    documents = adopter_render(tmp_path, "required")
+    spec = pod_spec(documents)
+    liveness = container(spec, BROKER_CONTAINER_NAME)["livenessProbe"]["exec"]["command"][2]
+    assert liveness == LIVENESS_TLS, liveness
+    conf = nats_conf(documents)
+    pod_env_covers_the_config(conf)
+    with Broker(rendered_image(documents)) as broker:
+        seed(broker, conf)
+        seed_tls(broker, throwaway_pki(tmp_path / "pki"))
+        write_password(broker, IAM_FILE, "iam-pw")
+        write_password(broker, GATEWAY_FILE, "gateway-pw")
+        launch(broker, wrapper_script(spec))
+        wait_live(broker, liveness)
+        assert probe(broker, LIVENESS) != 0, "the plain-http probe passed: a plain-HTTP monitor is still listening"
+        plain = "wget -q -O /dev/null 'http://127.0.0.1:8222/varz'"
+        assert probe(broker, plain) != 0, "/varz answered over plain HTTP on 8222"
 
 
 def test_the_image_under_test_is_the_one_the_chart_renders(tmp_path):

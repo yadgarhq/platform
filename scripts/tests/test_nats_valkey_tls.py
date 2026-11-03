@@ -523,7 +523,7 @@ UPSTREAM_TLS = ("nats", "config", "nats", "tls")
                 NATS_TLS_ONLY,
                 (("nats", "config", "patch"), [{"op": "remove", "path": "/tls"}]),
             ),
-            "`nats.config.patch` is not empty while `nats.tls.enabled` is true",
+            "`nats.config.patch` is not the chart's own entry while `nats.tls.enabled` is true",
         ),
         (
             with_changes(
@@ -628,8 +628,9 @@ def test_tls_off_without_the_checksum_annotation_renders(tmp_path):
 # THE SIDE LISTENERS (yaadgaar 325, ADR-0852). Each upstream listener below has its
 # own `enabled` and `tls` and none of them sees `nats.config.nats.tls.merge.verify`,
 # so under `clientAuth: "required"` an enabled one is a way past mutual TLS.
-# `cluster` (6222, task 1519) and `monitor` (8222, plain HTTP) carry the same two
-# keys and are NOT in this list on purpose.
+# `cluster` (6222, task 1519) and `monitor` (8222) carry the same two keys and are
+# NOT in this list on purpose: the monitor asks no client certificate at any
+# posture, and the chart serves it over HTTPS whenever TLS is on (yaadgaar 169).
 SIDE_LISTENERS = ("websocket", "mqtt", "leafnodes", "gateway")
 # What nats-server itself accepts as a top-level key for those four, read off
 # server/opts.go at v2.14.6 (the vendored chart's appVersion and image tag):

@@ -7,6 +7,10 @@
 #
 # `charts/` is NOT ignored: the vendored subcharts are the package's content,
 # and `test_the_package_carries_every_declared_subchart` proves they ship.
+#
+# `LICENSES/` and `NOTICE` are NOT ignored either: they are the licence texts
+# of those vendored subcharts, so they must ship beside them (yaadgaar 377).
+# `test_the_package_carries_the_licences_and_the_notice` proves they do.
 ci/
 .git/
 *.tgz.prov

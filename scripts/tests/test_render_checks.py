@@ -126,7 +126,7 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and twenty-three values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and twenty-four values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted. B-N2 added two
 # values checks (nats.create with no nats.tls keys; the NATS/upstream
@@ -142,8 +142,10 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # control character; an edge usages list that does not serve one way; a rendered
 # Certificate that breaks the trust rules once parsed back), moving it to 24.
 # Yaadgaar 541 added one (a number printed through `int` that is not a whole
-# number in its range), moving it to 25.
-EXPECTED_RENDER_CHECKS = 25
+# number in its range), moving it to 25. Yaadgaar 169 added one (a broker merge
+# key that overrides the wrapper, the volumes or the mounts the chart owns),
+# moving it to 26.
+EXPECTED_RENDER_CHECKS = 26
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
@@ -190,13 +192,17 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # document, sets `isCA` anywhere but the internal CA, or names other than one
 # direction. `test_certificate_usages.py` owns what they do. And the yaadgaar 541
 # whole-number arm: one of the eight values printed through `int` that is not a
-# whole number in its range; `test_raw_prints.py` owns what it does.
+# whole number in its range; `test_raw_prints.py` owns what it does. And the
+# yaadgaar 169 merge-key arm, while `nats.create` is true: a
+# `nats.container.merge` that changes the wrapper or sets a key off its allowlist,
+# or a `nats.podTemplate.merge` / `nats.statefulSet.merge` that replaces the
+# volume-carrying lists; `test_nats_merge_keys.py` owns what it does.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 23
+EXPECTED_VALUES_CHECKS = 24
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves
