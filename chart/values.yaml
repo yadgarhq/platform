@@ -571,11 +571,37 @@ nats:
   # revocation loudly — it makes every revocation late, with nothing in the
   # publisher's log to say so.
   #
-  # THE MONITORING PORT IS UNAFFECTED: `config.monitor` serves plain HTTP on 8222
-  # with no client authorization, so the chart's own startup, readiness and
-  # liveness probes keep working. An authorization block that broke them would
-  # take the broker down rather than secure it.
+  # THE MONITORING PORT IS UNAFFECTED by this block: `config.monitor` asks for no
+  # client authorization, so the chart's own startup, readiness and liveness
+  # probes keep working. An authorization block that broke them would take the
+  # broker down rather than secure it.
+  #
+  # ── THE MONITOR SERVES HTTPS WHENEVER THE CLIENT LISTENER HAS TLS (ADR-0852,
+  #    yaadgaar 169) ──────────────────────────────────────────────────────────
+  # DERIVED FROM THE CLIENT LISTENER, WITH NO ADOPTER KEY. `config.patch` below
+  # is one chart-owned JSON-patch entry, resolved by the upstream chart's own
+  # `$tplYaml` after every values file is merged: with `config.nats.tls.enabled`
+  # on (and `config.monitor.tls.enabled` unset, which the render check requires,
+  # so that check and not an upstream patch error names the mistake) it MOVES `/http_port` to `/https_port`, and with it off it only TESTS the
+  # upstream chart's fixed `pid_file`, which changes nothing, so the TLS-off
+  # render is unchanged and the render checks still name every refusal there. With TLS on, the
+  # monitor serves the `nats-tls` leaf, because nats-server's HTTPS monitor uses
+  # the client listener's TLS block, and no plain-HTTP listener is left.
+  # nats-server asks a monitor client for NO certificate (`getMonitoringTLSConfig`
+  # sets `NoClientCert`, server.go v2.14.6), so kubelet's HTTPS probes and the
+  # liveness `wget` work under `clientAuth: "required"`. The port number does
+  # not change. `container.patch` below moves the startup and readiness probes to
+  # HTTPS the same way, and the liveness probe's scheme follows too.
+  #
+  # `config.monitor.tls.enabled` IS NOT THE SWITCH, and the render check refuses
+  # it set: a patch list replaces rather than coalesces, so this costs no helm
+  # warning, where a `$tplYaml` on that bool key warns on every render (measured
+  # on helm 3.20.2 and 4.3.0). While TLS is on, the render check refuses a
+  # `config.patch` other than the chart's own entry.
   config:
+    patch:
+      - $tplYaml: >-
+          {{- if and .Values.config.nats.tls.enabled (not .Values.config.monitor.tls.enabled) }}{op: move, from: /http_port, path: /https_port}{{- else }}{op: test, path: /pid_file, value: /var/run/nats/nats.pid}{{- end }}
     merge:
       authorization:
         users:
@@ -744,8 +770,15 @@ nats:
           readOnly: true
       # The upstream `/healthz` check, kept, AND the hash. `httpGet` is removed
       # first because Kubernetes rejects a probe with two handlers. The URL is
-      # fixed at plain http on 127.0.0.1:8222; the render check refuses a
-      # `config.monitor` that moves it.
+      # fixed at 127.0.0.1:8222; the render check refuses a `config.monitor`
+      # that moves it. Its SCHEME FOLLOWS THE MONITOR, through the upstream
+      # chart's own `$tplYaml` reading `config.nats.tls.enabled` after every
+      # values file is merged, as `config.patch` above does: https with TLS on,
+      # http with it off. A patch list replaces rather than coalesces, so this
+      # `$tplYaml` costs no helm warning. `--no-check-certificate` is there because the alpine
+      # `wget` VERIFIES the certificate, and the leaf names no 127.0.0.1
+      # (measured against nats:2.14.6-alpine). The probe dials loopback inside
+      # the container, so no network peer can sit in the path it skips.
       - op: remove
         path: /livenessProbe/httpGet
       - op: add
@@ -754,7 +787,15 @@ nats:
           command:
             - /bin/sh
             - -c
-            - sha256sum -c -s /var/run/nats/auth.sha256 && wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true'
+            - $tplYaml: >-
+                {{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && wget %s-q -O /dev/null '%s://127.0.0.1:8222/healthz?js-enabled-only=true'" (ternary "--no-check-certificate " "" $tls) (ternary "https" "http" $tls) | toJson }}
+      # THE STARTUP AND READINESS PROBES MOVE TO HTTPS WITH TLS ON, by the same
+      # `$tplYaml` reading. With TLS off each entry is a `test` of the container
+      # name, which changes nothing, so the TLS-off render stays byte-identical.
+      - $tplYaml: >-
+          {{- if .Values.config.nats.tls.enabled }}{op: add, path: /startupProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}
+      - $tplYaml: >-
+          {{- if .Values.config.nats.tls.enabled }}{op: add, path: /readinessProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}
 
 # ── THE OPERATORS, WHICH THIS CHART MAY INSTALL AND OWNS THE CRDS OF ────────
 # ONE KEY GATES ALL FIVE (ADR-0787): cert-manager, KEDA, mariadb-operator, Envoy

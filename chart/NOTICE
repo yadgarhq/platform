@@ -1,0 +1,80 @@
+The yadgarhq `platform` Helm chart. The chart's own licence is the Apache
+License, Version 2.0, in the LICENSE file of github.com/yadgarhq/platform.
+
+THIRD-PARTY CHARTS REDISTRIBUTED IN THIS PACKAGE
+
+`helm package -u` vendors each chart dependency that `Chart.yaml` declares into
+`charts/`, so every published `platform-<version>.tgz` carries their source. No
+packaged upstream chart includes its own LICENSE file, so each licence text is
+copied into `LICENSES/<name>-LICENSE` from the upstream repository at the tag
+that matches the pinned version. No upstream repository has a NOTICE file at
+that tag (checked 2026-11-03).
+
+Each entry below gives the chart name, the pinned version, the licence, the
+source of the licence text, the file that holds it and the SHA-256 of that file.
+`includes` names the charts vendored inside that chart that come from the same
+upstream repository and so are under the same licence. `inside` names the
+chart that vendors an entry with a licence of its own.
+`scripts/tests/test_licenses.py` fails when this file, `Chart.yaml`,
+`LICENSES/` and the vendored charts disagree.
+
+name: nats
+version: 2.14.6
+license: Apache-2.0
+source: https://github.com/nats-io/k8s/blob/nats-2.14.6/LICENSE
+file: LICENSES/nats-LICENSE
+sha256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+name: cert-manager
+version: v1.21.1
+license: Apache-2.0
+source: https://github.com/cert-manager/cert-manager/blob/v1.21.1/LICENSE
+file: LICENSES/cert-manager-LICENSE
+sha256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+name: keda
+version: 2.20.2
+license: Apache-2.0
+source: https://github.com/kedacore/charts/blob/v2.20.2/LICENSE
+file: LICENSES/keda-LICENSE
+sha256: 56531aa6d5a0ae8aae14b050f6aafe55a068b97c1f57728b547e55bcc0e29036
+
+name: mariadb-operator
+version: 26.6.0
+license: MIT
+source: https://github.com/mariadb-operator/mariadb-operator/blob/mariadb-operator-26.6.0/LICENSE
+file: LICENSES/mariadb-operator-LICENSE
+sha256: 825c895aa26f3a08507f293e2a18919affda7df349d428e26ef0891879142028
+includes: mariadb-operator-crds
+
+name: gateway-helm
+version: v1.9.1
+license: Apache-2.0
+source: https://github.com/envoyproxy/gateway/blob/v1.9.1/LICENSE
+file: LICENSES/gateway-helm-LICENSE
+sha256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+includes: crds
+
+name: argo-cd
+version: 8.6.1
+license: Apache-2.0
+source: https://github.com/argoproj/argo-helm/blob/argo-cd-8.6.1/LICENSE
+file: LICENSES/argo-cd-LICENSE
+sha256: c996fc213c94f4a4a838407d355b081226caa7b103a4f239bb87fb8f1d8e3a60
+
+name: redis-ha
+version: 4.33.7
+license: Apache-2.0
+source: https://github.com/DandyDeveloper/charts/blob/redis-ha-4.33.7/LICENSE
+file: LICENSES/redis-ha-LICENSE
+sha256: 56531aa6d5a0ae8aae14b050f6aafe55a068b97c1f57728b547e55bcc0e29036
+inside: argo-cd
+note: the upstream file has no final newline, and this repository's end-of-file-fixer hook adds one; the text is otherwise unchanged, including its copyright line, which names The KEDA Authors.
+
+name: prometheus
+version: 29.27.0
+license: Apache-2.0
+source: https://github.com/prometheus-community/helm-charts/blob/prometheus-29.27.0/LICENSE
+file: LICENSES/prometheus-LICENSE
+sha256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+includes: alertmanager, kube-state-metrics, prometheus-node-exporter, prometheus-pushgateway

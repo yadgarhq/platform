@@ -696,11 +696,16 @@ ARM TWO, AGREEMENT. Every disagreement is collected and refused in ONE sentence:
   - `clientAuth: "off"` with `verify` set is a disagreement the other way;
   - `clientAuth: "required"` with `allow_non_tls` true refuses: a plaintext
     client never reaches the handshake, so `verify` never sees it;
+  - `nats.config.monitor.tls.enabled` is never set, `nats.config.merge` sets no
+    monitor listener, and no key under `nats.config` ends in `$include`
+    (yaadgaar 169): the chart derives the monitor's HTTPS from the client
+    listener itself, through its own `nats.config.patch` entry;
   - `nats.tlsCA.enabled` must stay false: it writes a second `ca_file` from
     another source;
-  - while TLS is on, `nats.config.patch` and `nats.config.nats.tls.patch` must
-    be empty: a JSON patch runs after `merge` (`nats.loadMergePatch`) and can
-    rewrite any of the above after this check has read it;
+  - while TLS is on, `nats.config.patch` must be exactly the chart's own entry
+    (`$natsMonitorPatch`) and `nats.config.nats.tls.patch` must be empty: a
+    JSON patch runs after `merge` (`nats.loadMergePatch`) and can rewrite any
+    of the above after this check has read it;
   - `nats.config.merge.tls` refuses at any posture: `nats.loadMergePatch`
     mergeOverwrites `nats.config.merge` over the WHOLE rendered config, so a
     `tls` block there replaces the `nats.config.nats.tls` keys read above;
@@ -712,6 +717,18 @@ change to these keys rolls the broker: `allow_non_tls` is not hot-reloadable
 (nats-server's reload rejects the whole change), and a roll is the only way it
 takes effect. The reloader stays on for leaf renewal.
 */}}
+{{- /* THE `$tplYaml` LITERALS `values.yaml` HANDS THE UPSTREAM CHART (yaadgaar 169).
+Each reads `config.nats.tls.enabled` after every values file is merged:
+`$natsMonitorPatch` is the `nats.config.patch` entry that moves the monitor to
+`https_port` with TLS on; `$natsStartupScheme` and `$natsReadinessScheme` are the
+`nats.container.patch` entries that move those probes to HTTPS; `$natsLiveness`
+is the liveness probe's command. Each is a copy of its `values.yaml` text, which
+`test_the_tplyaml_literals_match_values_yaml` pins byte for byte, so the arms
+below can tell the chart's own entries from an adopter's. */ -}}
+{{- $natsMonitorPatch := `{{- if and .Values.config.nats.tls.enabled (not .Values.config.monitor.tls.enabled) }}{op: move, from: /http_port, path: /https_port}{{- else }}{op: test, path: /pid_file, value: /var/run/nats/nats.pid}{{- end }}` }}
+{{- $natsStartupScheme := `{{- if .Values.config.nats.tls.enabled }}{op: add, path: /startupProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}` }}
+{{- $natsReadinessScheme := `{{- if .Values.config.nats.tls.enabled }}{op: add, path: /readinessProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}` }}
+{{- $natsLiveness := `{{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && wget %s-q -O /dev/null '%s://127.0.0.1:8222/healthz?js-enabled-only=true'" (ternary "--no-check-certificate " "" $tls) (ternary "https" "http" $tls) | toJson }}` }}
 {{- $natsCreate := and (kindIs "map" .Values.nats) (kindIs "bool" (index .Values.nats "create")) (index .Values.nats "create") }}
 {{- if $natsCreate }}
 {{- $natsTls := index .Values.nats "tls" | default dict }}
@@ -770,6 +787,69 @@ setting as the lowercase key. Every read of this map below is by lowercased key.
 {{- end }}
 {{- else if not (empty $verify) }}
 {{- $natsDisagree = append $natsDisagree "`nats.tls.clientAuth` is \"off\" and `nats.config.nats.tls.merge.verify` is true: the platform mode and the upstream key must agree" }}
+{{- end }}
+{{- /* THE MONITOR FOLLOWS THE CLIENT LISTENER (yaadgaar 169, ADR-0852), AND THE CHART
+DOES IT. `values.yaml`'s own `nats.config.patch` entry moves `/http_port` to
+`/https_port` whenever `nats.config.nats.tls.enabled` is on, and its
+`nats.container.patch` entries move the probes with it, so no adopter key exists.
+`nats.config.monitor.tls.enabled` set truthy is therefore REFUSED at every
+posture: with TLS off it asks nats-server for an HTTPS monitor with no
+certificate to serve, and with TLS on it makes the upstream chart render the
+monitor by a route this chart does not own (the chart's `move` stands down when
+it is set, so this refusal is what an adopter sees).
+Its `false` is the subchart's own default and reads the same as unset.
+
+THE MONITOR CANNOT BE SET ANOTHER WAY. `nats.config.merge` refuses at every
+posture any top-level monitor alias nats-server reads (opts.go v2.14.6:1271-1293,
+lowercased). That is not every route: the upstream `nats.formatConfig` turns a
+key ending in `$include` into an `include` directive, which loads another
+file that can re-set the monitor, `allow_non_tls` or `tls` after every read
+here (measured at rc=0 with TLS on). So any key ending in `$include`, at any
+depth under `nats.config`, refuses too. It is read off the JSON of the whole
+subtree, where every key is a quoted string followed by a colon. Neither list is
+every route on its own: a `<< >>` raw string can carry the same directives, and
+the raw-text arm below refuses it. */ -}}
+{{- if not (empty (index (dig "config" "monitor" "tls" dict .Values.nats) "enabled")) }}
+{{- $natsDisagree = append $natsDisagree "`nats.config.monitor.tls.enabled` is set: the chart serves the monitor over HTTPS exactly when `nats.config.nats.tls.enabled` is on, through its own `nats.config.patch` entry (ADR-0852). Remove the key" }}
+{{- end }}
+{{- /* RAW TEXT IS THE OTHER ROUTE (yaadgaar 169, measured against nats-server
+2.14.6). The upstream `nats.formatConfig` copies a `"<< X >>"` string, key or
+value, into nats.conf UNQUOTED, and nats-server reads `;`-separated directives in
+that text: `debug: "<< false; allow_non_tls: true >>"` rendered rc=0 and the
+broker started with TLS "available" instead of "required", and the same trick
+reaches an `include`. The upstream regex `"<<\s+(.*?)\s+>>"` also matches ACROSS
+a key and its value on one pretty-JSON line, so a key holding `<<` and a value
+holding `>>` is the same hole split in two (measured). So every string under
+`nats.config`, at any depth, key or value, that holds `<<` OR `>>` refuses
+unless it is exactly one of the chart's own raw strings (`$natsRawStrings`, the two password references
+`values.yaml` writes; `test_the_raw_string_allowlist_matches_values_yaml` pins the
+list). The strings are read off `toRawJson`, which does not escape `<` and `>`. */ -}}
+{{- $natsRawStrings := list "\"<< $NATS_PASSWORD >>\"" "\"<< $NATS_PASSWORD_GATEWAY >>\"" }}
+{{- range $found := regexFindAll `"(?:[^"\\]|\\.)*"` (toRawJson (dig "config" dict .Values.nats)) -1 }}
+{{- if and (or (contains "<<" $found) (contains ">>" $found)) (not (has $found $natsRawStrings)) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config` holds the string %s: the upstream chart copies a `<< >>` string into nats.conf as raw text, where `;` starts another directive that can re-set `allow_non_tls`, `tls`, the monitor or an `include` after this check read them. Only the chart's own password references may use it" $found) }}
+{{- end }}
+{{- end }}
+{{- /* AN ADOPTER'S `$tplYaml` IS RESOLVED AFTER EVERY CHECK HERE (yaadgaar 169). The
+upstream chart templates any `$tplYaml` or `$tplYamlSpread` map in its values
+with `tpl` inside `nats.defaultValues`, so its output never reaches this chart:
+a `printf` can assemble a `<< >>` raw string or an `$include` key that the arms
+above would have refused (both measured at rc=0, and nats-server obeyed them). So
+every such key, at any depth under `nats.config`, refuses. The one exception is
+the chart's own `nats.config.patch` entry, matched by its exact value: when
+`nats.config.patch` is exactly that list, one occurrence is the chart's. */ -}}
+{{- $tplKeys := len (regexFindAll `"\$tplYaml(?:Spread)?":` (toRawJson (dig "config" dict .Values.nats)) -1) }}
+{{- $ownTplKeys := ternary 1 0 (eq (toJson (dig "config" "patch" list .Values.nats)) (toJson (list (dict "$tplYaml" $natsMonitorPatch)))) }}
+{{- if gt $tplKeys $ownTplKeys }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config` holds %d `$tplYaml` or `$tplYamlSpread` key(s) that are not the chart's own: the upstream chart resolves them after this check, so they can build a raw string or an `include` it never sees. Write the value plainly" (sub $tplKeys $ownTplKeys)) }}
+{{- end }}
+{{- range $found := regexFindAll `"(?:[^"\\]|\\.)*\$include":` (toJson (dig "config" dict .Values.nats)) -1 }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config` holds the key %s: the upstream chart turns a key ending in `$include` into an `include` directive, which can re-set the monitor, `allow_non_tls` or `tls` after this check read them. Remove it" (trimSuffix ":" $found)) }}
+{{- end }}
+{{- range $key := keys $natsMerge | sortAlpha }}
+{{- if has (lower $key) (list "http" "https" "http_port" "monitor_port" "https_port" "http_base_path") }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.merge` sets the key %s, a monitor listener outside `nats.config.monitor`: it could serve the monitor over plain HTTP, or move it from the port the probes check. Remove it" (toJson $key)) }}
+{{- end }}
 {{- end }}
 {{- if not (empty (dig "tlsCA" "enabled" false .Values.nats)) }}
 {{- $natsDisagree = append $natsDisagree "`nats.tlsCA.enabled` is true: it writes a second `ca_file` from another source; this chart reads the CA through `nats.config.nats.tls.merge.ca_file`" }}
@@ -848,8 +928,8 @@ So the merge is an ALLOWLIST, matched by exact key: `metadata.labels` and
 {{- if not (and (kindIs "bool" $checksum) $checksum) }}
 {{- $natsDisagree = append $natsDisagree "`nats.podTemplate.configChecksumAnnotation` is not true while `nats.tls.enabled` is true: `allow_non_tls` is not hot-reloadable, so without the roll a step that changes it leaves the old listener running while the values say otherwise" }}
 {{- end }}
-{{- if not (empty (dig "config" "patch" list .Values.nats)) }}
-{{- $natsDisagree = append $natsDisagree "`nats.config.patch` is not empty while `nats.tls.enabled` is true: a JSON patch runs after `merge` and can rewrite the TLS settings this check read" }}
+{{- if ne (toJson (dig "config" "patch" list .Values.nats)) (toJson (list (dict "$tplYaml" $natsMonitorPatch))) }}
+{{- $natsDisagree = append $natsDisagree "`nats.config.patch` is not the chart's own entry while `nats.tls.enabled` is true: a JSON patch runs after `merge` and can rewrite the TLS settings this check read, and the chart's entry is what moves the monitor to HTTPS. Leave it unset" }}
 {{- end }}
 {{- if not (empty (index $up "patch")) }}
 {{- $natsDisagree = append $natsDisagree "`nats.config.nats.tls.patch` is not empty while `nats.tls.enabled` is true: a JSON patch runs after `merge` and can rewrite the TLS settings this check read" }}
@@ -876,20 +956,27 @@ resolved as the upstream `nats.image` helper resolves it: `fullImageName`, else
 flavour, because the helper drops the tag, so it refuses too; pin an alpine
 digest through `fullImageName` instead.
 
-ARM TWO, THE MONITOR. The probe is fixed at `http://127.0.0.1:8222`. With
+ARM TWO, THE MONITOR. The probe is fixed at `127.0.0.1:8222`. With
 `config.monitor.enabled` false the upstream chart renders NO liveness probe at
 all, so a rotation never restarts the broker. Measured on helm 3.18.4, that
 case never reaches this arm: helm renders the subchart first, and the chart's
 own `remove /livenessProbe/httpGet` refuses there ("key livenessProbe does not
 exist"). The arm stays for a renderer that orders templates otherwise. Another
-port, or monitor TLS, makes the probe fail for ever and restart the broker in a
-loop.
+port makes the probe fail for ever and restart the broker in a loop. An adopter's
+`config.monitor.tls.enabled` is refused by the NATS TLS contract above, not here
+(yaadgaar 169): the chart serves the monitor over HTTPS itself whenever the
+client listener has TLS, and the probe's scheme follows the same key.
 
 ARM THREE, THE PATCH LISTS. Helm replaces a list across values files, so an
 adopter `container.patch` or `podTemplate.patch` drops the chart's entries. A
 lost mount fails at startup; a lost probe swap leaves the upstream `/healthz`
 probe, and a rotation then never restarts the broker. The check reads the
-entries by `op`, `path` and volume name; the tests lock their full content.
+entries by `op`, `path` and volume name, and the probe's command by its whole
+value: it must be the chart's own `$tplYaml` command (`$natsLiveness`), because a
+copied plain-http command would fail for ever once the monitor serves HTTPS. The
+two entries that move the startup and readiness probes to HTTPS
+(`$natsStartupScheme`, `$natsReadinessScheme`) must be there too, for the same
+reason. `test_the_tplyaml_literals_match_values_yaml` pins all of them.
 */}}
 {{- if $natsCreate }}
 {{- $rotation := list }}
@@ -924,9 +1011,6 @@ it must END in `alpine`, bare or after a `-`, optionally with an alpine version.
 {{- if ne (toString (dig "port" 8222 $monitor)) "8222" }}
 {{- $rotation = append $rotation (printf "`nats.config.monitor.port` is %v, and the probe checks 127.0.0.1:8222" (dig "port" 8222 $monitor)) }}
 {{- end }}
-{{- if dig "tls" "enabled" false $monitor }}
-{{- $rotation = append $rotation "`nats.config.monitor.tls.enabled` is true, and the probe speaks plain http" }}
-{{- end }}
 {{- if $rotation }}
 {{- fail (printf "platform: the broker's liveness probe cannot work as configured: %s. The probe re-checks the password hash beside `/healthz` (ADR-0924); without it a credential rotation never restarts the broker." (join "; " $rotation)) }}
 {{- end }}
@@ -959,17 +1043,126 @@ it must END in `alpine`, bare or after a `-`, optionally with an alpine version.
 {{- if and (kindIs "map" $op) (eq (toString $op.op) "remove") (eq (toString $op.path) "/livenessProbe/httpGet") }}
 {{- $removesHttpGet = true }}
 {{- end }}
-{{- if and (kindIs "map" $op) (eq (toString $op.op) "add") (eq (toString $op.path) "/livenessProbe/exec") }}
+{{- if and (kindIs "map" $op) (eq (toString $op.op) "add") (eq (toString $op.path) "/livenessProbe/exec") (eq (toJson $op.value) (toJson (dict "command" (list "/bin/sh" "-c" (dict "$tplYaml" $natsLiveness))))) }}
 {{- $addsExec = true }}
 {{- end }}
 {{- end }}
 {{- if not (and $removesHttpGet $addsExec) }}
 {{- $lost = append $lost "`nats.container.patch` does not swap the liveness probe for the hash-checking exec probe" }}
 {{- end }}
+{{- range $scheme := list (list "startup" $natsStartupScheme) (list "readiness" $natsReadinessScheme) }}
+{{- $kept := false }}
+{{- range $op := $containerPatch }}
+{{- if eq (toJson $op) (toJson (dict "$tplYaml" (index $scheme 1))) }}
+{{- $kept = true }}
+{{- end }}
+{{- end }}
+{{- if not $kept }}
+{{- $lost = append $lost (printf "`nats.container.patch` does not carry the chart's entry that moves the %s probe to HTTPS with TLS on" (index $scheme 0)) }}
+{{- end }}
+{{- end }}
 {{- if $lost }}
 {{- fail (printf "platform: the broker's credential-rotation wiring is incomplete: %s. Helm replaces a patch list whole, so copy the chart's own entries from its `values.yaml` into yours (ADR-0924)." (join "; " $lost)) }}
 {{- end }}
 {{- end }}{{/* end of the broker credential-rotation arms */}}
+
+{{/*
+THE BROKER'S MERGE KEYS (yaadgaar 169, ruled by Max 2026-11-02): THE WRAPPER AND
+THE VOLUMES ARE THE CHART'S. The upstream chart mergeOverwrites
+`nats.container.merge`, `nats.podTemplate.merge` and `nats.statefulSet.merge`
+over the objects it renders, AFTER its own helpers have run, and a merge
+REPLACES a list whole. So a merge key can undo every arm above without touching
+a key those arms read. All three arms run while `nats.create` is true, at every
+TLS posture.
+
+ARM ONE, `nats.container.merge.command` AND `.args` ARE THE CHART'S OWN.
+`values.yaml` puts the credential-rotation wrapper (ADR-0924) there, so the keys
+cannot be refused outright: that would refuse every broker render. They must
+equal the chart's own values, compared as JSON. `$natsWrapper` is a literal
+copy of the wrapper, and `test_the_wrapper_literal_matches_values_yaml` pins it
+to `values.yaml`, so the two cannot drift. Any other `command` or `args` starts
+a broker that never hashes the passwords, or never reads `nats.conf`.
+
+ARM TWO, THE REST OF `nats.container.merge` IS AN ALLOWLIST, by exact key
+(Kubernetes field names are case-sensitive): `resources`, `securityContext`,
+`terminationMessagePath` and `terminationMessagePolicy`. Each is harmless to
+the arms above or fails loudly. Everything else is refused, and these are why:
+`image` replaces the image after the `nats.image` helper, so it is past the
+alpine arm; `volumeMounts` replaces the `config`, `pid`, `nats-tls` and
+password mounts; `livenessProbe` drops the hash check; `env`, `envFrom`,
+`ports`, `lifecycle` and the rest have their own upstream keys or belong to the
+chart.
+
+ARM THREE, NO VOLUMES THROUGH THE OTHER TWO MERGES. `nats.podTemplate.merge.spec`
+must not set `volumes`, which replaces the pod's volumes, or `containers`,
+`initContainers` and `ephemeralContainers`, which replace the lists that carry
+the mounts. `nats.statefulSet.merge.spec` must not set `template`, the whole
+pod template (`nats.podTemplate.merge` is the key for it), or
+`volumeClaimTemplates`. The chart's own volumes and mounts go through the patch
+keys, which the rotation arm above reads, so this refuses nothing the chart
+writes.
+*/}}
+{{- if $natsCreate }}
+{{- $natsWrapper := `set -eu
+sha256sum /var/run/secrets/nats-auth/iam/password /var/run/secrets/nats-auth/gateway/password > /var/run/nats/auth.sha256
+cr="$(printf '\r')"
+nl="$(printf '\nx')"
+nl="${nl%x}"
+trimmed() {
+  v="$(cat "$1")"
+  while :; do
+    case "$v" in
+      *"$cr"|*"$nl") v="${v%?}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$v"
+}
+NATS_PASSWORD="$(trimmed "/var/run/secrets/nats-auth/iam/password")"
+NATS_PASSWORD_GATEWAY="$(trimmed "/var/run/secrets/nats-auth/gateway/password")"
+[ -n "$NATS_PASSWORD" ] || { echo "nats: /var/run/secrets/nats-auth/iam/password is empty; refusing to start" >&2; exit 1; }
+[ -n "$NATS_PASSWORD_GATEWAY" ] || { echo "nats: /var/run/secrets/nats-auth/gateway/password is empty; refusing to start" >&2; exit 1; }
+export NATS_PASSWORD NATS_PASSWORD_GATEWAY
+exec nats-server --config /etc/nats-config/nats.conf
+` }}
+{{- $mergeRefused := list }}
+{{- $containerMerge := dig "container" "merge" dict .Values.nats }}
+{{- if not (kindIs "map" $containerMerge) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.container.merge` is not a map (it is %s)" (kindOf $containerMerge)) }}
+{{- else }}
+{{- if ne (toJson (index $containerMerge "command")) (toJson (list "/bin/sh" "-c")) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.container.merge.command` is %s, not the chart's own [\"/bin/sh\",\"-c\"]: it runs the credential-rotation wrapper (ADR-0924)" (toJson (index $containerMerge "command"))) }}
+{{- end }}
+{{- if ne (toJson (index $containerMerge "args")) (toJson (list $natsWrapper)) }}
+{{- $mergeRefused = append $mergeRefused "`nats.container.merge.args` is not the chart's own credential-rotation wrapper (ADR-0924): leave it unset, so the chart's `values.yaml` supplies it" }}
+{{- end }}
+{{- range $key := keys $containerMerge | sortAlpha }}
+{{- if not (has $key (list "command" "args" "resources" "securityContext" "terminationMessagePath" "terminationMessagePolicy")) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.container.merge` sets the key %s: only `resources`, `securityContext`, `terminationMessagePath` and `terminationMessagePolicy` may be merged into the broker container, because a merge runs after the chart's own helpers and replaces a list whole" (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $source := list (list "podTemplate" (list "volumes" "containers" "initContainers" "ephemeralContainers")) (list "statefulSet" (list "template" "volumeClaimTemplates")) }}
+{{- $merge := dig (index $source 0) "merge" dict $.Values.nats }}
+{{- if not (kindIs "map" $merge) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge` is not a map (it is %s)" (index $source 0) (kindOf $merge)) }}
+{{- else if hasKey $merge "spec" }}
+{{- $spec := index $merge "spec" }}
+{{- if not (kindIs "map" $spec) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec` is not a map (it is %s)" (index $source 0) (kindOf $spec)) }}
+{{- else }}
+{{- range $key := index $source 1 }}
+{{- if hasKey $spec $key }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec.%s` is set: a merge replaces that list whole, so it takes away the chart's own volumes or mounts" (index $source 0) $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $mergeRefused }}
+{{- fail (printf "platform: the broker's merge keys override what the chart owns: %s. Put a volume or a mount through the chart's patch keys, after the chart's own entries (ADR-0924, ADR-0852)." (join "; " $mergeRefused)) }}
+{{- end }}
+{{- end }}{{/* end of the broker merge-key arms */}}
 
 {{/*
 VALKEY'S OWN GUARD (B-V2, ADR-0852), MIRRORING NATS'S ABSENCE ARM ABOVE.
