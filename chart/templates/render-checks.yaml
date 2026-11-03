@@ -1199,8 +1199,9 @@ type error rather than this message.
 line, with the paths this arm judges for it or the reason none can reach it;
 the sweep re-runs over the vendored archive, so a chart bump that adds or moves
 a print reddens it, and every path it names must appear in this arm. The
-`reloader.image.*` prints and adopter `$tplYaml` outside `nats.config` are NOT
-here: they are yaadgaar 544 and 545. Runs while `nats.create` is true, after
+`reloader.image.*` prints are judged here too (yaadgaar 544): the reloader's
+image goes through the same `nats.image` helper. A JSON patch and an adopter
+`$tplYaml` are the patch arm's, below. Runs while `nats.create` is true, after
 the arms above, so an image or a monitor port they refuse names itself there.
 */}}
 {{- if $natsCreate }}
@@ -1299,6 +1300,9 @@ the arms above, so an image or a monitor port they refuse names itself there.
       (list "nats.natsBox.container.image.repository" "image") (list "nats.natsBox.container.image.registry" "image")
       (list "nats.natsBox.container.image.fullImageName" "image") (list "nats.natsBox.container.image.tag" "tag")
       (list "nats.natsBox.container.image.digest" "digest") (list "nats.natsBox.container.image.pullPolicy" "pullPolicy")
+      (list "nats.reloader.image.repository" "image") (list "nats.reloader.image.registry" "image")
+      (list "nats.reloader.image.fullImageName" "image") (list "nats.reloader.image.tag" "tag")
+      (list "nats.reloader.image.digest" "digest") (list "nats.reloader.image.pullPolicy" "pullPolicy")
       (list "global.image.registry" "image") (list "global.image.pullPolicy" "pullPolicy")
       (list "nats.global.image.registry" "image") (list "nats.global.image.pullPolicy" "pullPolicy") }}
 {{- $path := index $rule 0 }}
@@ -1352,6 +1356,155 @@ are counted, and a difference is a key whose value is not a string. */ -}}
 {{- fail (printf "platform: a value the upstream nats chart prints unquoted is not of its kind: %s. The chart prints each one raw into YAML it parses back, so a newline, a `;` inside its own `<< >>` or YAML flow syntax writes a key of its own into nats.conf or the broker's objects, past every check here (yaadgaar 546)." (join "; " $unquoted)) }}
 {{- end }}
 {{- end }}{{/* end of the unquoted-values arm */}}
+
+{{/*
+THE BROKER'S JSON PATCHES (yaadgaar 544), ITS `$tplYaml` (yaadgaar 545) AND ITS
+RELOADER: EACH IS THE CHART'S OWN.
+
+The upstream chart (2.14.6) runs `nats.loadMergePatch` for every object it
+renders and for every block of `nats.conf` (`files/config/config.yaml` lines
+17, 28, 38, 48, 58, 68, 100 and 110): it mergeOverwrites the block's `merge`,
+then applies its `patch`, a JSON patch. A patch PATH is a key written as a
+string value, so no key-based arm above reads it. Measured at rc=0 with TLS
+required before this arm: `nats.config.jetstream.patch` adding `/x$include` put
+`include /dev/null; allow_non_tls: true;` into nats.conf; the same block adding
+`/cert_file` with a newline put `- /etc/evil.conf` into the reloader's
+arguments (`nats.reloaderConfig`); `nats.container.patch` with
+`{op: replace, path: /args/0}` after the chart's own entries replaced the
+credential-rotation wrapper (ADR-0924).
+
+ARM ONE, EVERY PATCH LIST IS THE CHART'S OWN OR EMPTY, at both TLS postures.
+`nats.config.patch`, `nats.container.patch` and `nats.podTemplate.patch` must
+equal the chart's own lists, compared as JSON; every other patch the upstream
+chart applies must be empty, the nats-box contexts included (by any name). NO
+ALLOWLIST OF ADOPTER OPS IS OFFERED, and that is the fail-closed choice: a patch
+is a route past the key-based arms that exist, and no adopter op has been shown
+to need one. It does cost adopters something: a JSON patch can `remove` a field
+or edit one list element in place, and a merge cannot. Most merge sites
+(`service`, `headlessService`, `promExporter`, the PVCs, `natsBox.*` and more)
+have no arm of their own, so this closes the patch route there and leaves the
+merge route as it was. The literals below are built from the
+`$tplYaml` literals above. `test_nats_patch_paths.py`'s `shipped` and
+`chart-lists-copied` cases pin them to `values.yaml`: a drift on either side
+refuses the chart's own render. `test_the_arm_judges_every_patch_the_upstream_chart_applies`
+pins the path list to the vendored chart's `values.yaml`, so a chart bump that
+adds a patch reddens it.
+
+ARM TWO, THE RELOADER. `nats.reloader.merge` is held to the allowlist
+`nats.container.merge` uses, minus `command` and `args` (the reloader has its
+own and the chart owns them). `nats.reloader.natsVolumeMountPrefixes` must be
+the upstream default `["/etc/"]`: a wider prefix copies the password mounts into
+the reloader. `nats.reloader.image.*` is judged by the unquoted-values arm
+above. `nats.reloader.env` is printed quoted by the upstream chart and is not
+judged here.
+
+ARM THREE, NO ADOPTER `$tplYaml`. The upstream chart resolves every
+`$tplYaml` / `$tplYamlSpread` map in its values (`nats.defaultValues`, over the
+whole subchart `.Values`, `global` included) after every check here has read
+them, so such a key at any depth under `nats` or `global` refuses. The
+exception is the chart's own four, counted at most once each and only where the
+chart writes them: the one in `nats.config.patch` and the three in
+`nats.container.patch`. The NATS TLS contract arm above refuses one under
+`nats.config` first, in its own words.
+
+Runs while `nats.create` is true, LAST of the broker arms, so a rotation-wiring
+loss, a merge key or an unquoted value names itself first.
+*/}}
+{{- if $natsCreate }}
+{{- $ownLiveness := dict "op" "add" "path" "/livenessProbe/exec" "value" (dict "command" (list "/bin/sh" "-c" (dict "$tplYaml" $natsLiveness))) }}
+{{- $ownStartup := dict "$tplYaml" $natsStartupScheme }}
+{{- $ownReadiness := dict "$tplYaml" $natsReadinessScheme }}
+{{- $ownMonitor := dict "$tplYaml" $natsMonitorPatch }}
+{{- $ownContainerPatch := list
+      (dict "op" "add" "path" "/volumeMounts/-" "value" (dict "name" "nats-auth-iam" "mountPath" "/var/run/secrets/nats-auth/iam" "readOnly" true))
+      (dict "op" "add" "path" "/volumeMounts/-" "value" (dict "name" "nats-auth-gateway" "mountPath" "/var/run/secrets/nats-auth/gateway" "readOnly" true))
+      (dict "op" "remove" "path" "/livenessProbe/httpGet")
+      $ownLiveness $ownStartup $ownReadiness }}
+{{- $ownPodPatch := list
+      (dict "op" "add" "path" "/spec/volumes/-" "value" (dict "name" "nats-auth-iam" "secret" (dict "secretName" "nats-auth" "items" (list (dict "key" "password" "path" "password")))))
+      (dict "op" "add" "path" "/spec/volumes/-" "value" (dict "name" "nats-auth-gateway" "secret" (dict "secretName" "nats-auth-gateway" "items" (list (dict "key" "password" "path" "password"))))) }}
+{{- $patchRefused := list }}
+{{- range $rule := list
+      (list "config.patch" (list $ownMonitor))
+      (list "container.patch" $ownContainerPatch)
+      (list "podTemplate.patch" $ownPodPatch)
+      (list "config.nats.tls.patch" (list))
+      (list "config.leafnodes.patch" (list)) (list "config.leafnodes.tls.patch" (list))
+      (list "config.websocket.patch" (list)) (list "config.websocket.tls.patch" (list)) (list "config.websocket.ingress.patch" (list))
+      (list "config.mqtt.patch" (list)) (list "config.mqtt.tls.patch" (list))
+      (list "config.cluster.patch" (list)) (list "config.cluster.tls.patch" (list))
+      (list "config.gateway.patch" (list)) (list "config.gateway.tls.patch" (list))
+      (list "config.jetstream.patch" (list)) (list "config.jetstream.fileStore.pvc.patch" (list))
+      (list "config.resolver.patch" (list)) (list "config.resolver.pvc.patch" (list))
+      (list "statefulSet.patch" (list))
+      (list "reloader.patch" (list))
+      (list "promExporter.patch" (list)) (list "promExporter.podMonitor.patch" (list))
+      (list "service.patch" (list))
+      (list "headlessService.patch" (list))
+      (list "configMap.patch" (list))
+      (list "serviceAccount.patch" (list))
+      (list "podDisruptionBudget.patch" (list))
+      (list "natsBox.container.patch" (list)) (list "natsBox.deployment.patch" (list)) (list "natsBox.podTemplate.patch" (list))
+      (list "natsBox.contextsSecret.patch" (list)) (list "natsBox.contentsSecret.patch" (list)) (list "natsBox.serviceAccount.patch" (list)) }}
+{{- $path := index $rule 0 }}
+{{- $own := index $rule 1 }}
+{{- $value := $.Values.nats }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = index (dict) "absent" }}{{ end }}
+{{- end }}
+{{- if $own }}
+{{- if ne (toJson $value) (toJson $own) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.%s` is not the chart's own list: leave it unset, so the chart's `values.yaml` supplies it" $path) }}
+{{- end }}
+{{- else if not (empty $value) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.%s` is set" $path) }}
+{{- end }}
+{{- end }}
+{{- $contexts := dig "natsBox" "contexts" dict .Values.nats }}
+{{- if kindIs "map" $contexts }}
+{{- range $name, $context := $contexts }}
+{{- if and (kindIs "map" $context) (not (empty (index $context "patch"))) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.natsBox.contexts.%s.patch` is set" $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $reloaderMerge := dig "reloader" "merge" dict .Values.nats }}
+{{- if not (kindIs "map" $reloaderMerge) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.reloader.merge` is not a map (it is %s)" (kindOf $reloaderMerge)) }}
+{{- else }}
+{{- range $key := keys $reloaderMerge | sortAlpha }}
+{{- if not (has $key (list "resources" "securityContext" "terminationMessagePath" "terminationMessagePolicy")) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.reloader.merge` sets the key %s: only `resources`, `securityContext`, `terminationMessagePath` and `terminationMessagePolicy` may be merged into the reloader, because a merge runs after the upstream chart has written its arguments and mounts" (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $prefixes := dig "reloader" "natsVolumeMountPrefixes" (list "/etc/") .Values.nats }}
+{{- if ne (toJson $prefixes) (toJson (list "/etc/")) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.reloader.natsVolumeMountPrefixes` is %s, not the upstream [\"/etc/\"]: a wider prefix copies the broker's password mounts into the reloader" (toJson $prefixes)) }}
+{{- end }}
+{{- /* Helm copies the parent's `global` into `nats.global` as well, so the two
+are counted apart and the larger counts once: a key in both is one key. */ -}}
+{{- $tplPattern := `"\$tplYaml(?:Spread)?":` }}
+{{- $tplKeys := len (regexFindAll $tplPattern (toRawJson (omit .Values.nats "global")) -1) }}
+{{- $tplKeys = add $tplKeys (max (len (regexFindAll $tplPattern (toRawJson (index .Values.nats "global" | default dict)) -1)) (len (regexFindAll $tplPattern (toRawJson (.Values.global | default dict)) -1))) }}
+{{- $ownTplKeys := 0 }}
+{{- range $own := list (list "config" $ownMonitor 1) (list "container" $ownLiveness 1) (list "container" $ownStartup 1) (list "container" $ownReadiness 1) }}
+{{- $found := false }}
+{{- $list := dig (index $own 0) "patch" list $.Values.nats }}
+{{- if kindIs "slice" $list }}
+{{- range $entry := $list }}
+{{- if eq (toJson $entry) (toJson (index $own 1)) }}{{ $found = true }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if $found }}{{ $ownTplKeys = add $ownTplKeys (index $own 2) }}{{ end }}
+{{- end }}
+{{- if gt $tplKeys $ownTplKeys }}
+{{- $patchRefused = append $patchRefused (printf "`nats` and `global` hold %d `$tplYaml` or `$tplYamlSpread` key(s) that are not the chart's own: the upstream chart resolves them after every check here, so they can build a patch, a mount, an argument or a raw string none of them sees. Write the value plainly" (sub $tplKeys $ownTplKeys)) }}
+{{- end }}
+{{- if $patchRefused }}
+{{- fail (printf "platform: the broker's JSON patches, `$tplYaml` or reloader keys are not the chart's own: %s. A JSON patch path, a `$tplYaml` and a reloader key are each a route past every check here (yaadgaar 544, 545): put a value through its merge key, which the checks read, and leave the chart's own lists as `values.yaml` writes them." (join "; " $patchRefused)) }}
+{{- end }}
+{{- end }}{{/* end of the patch arm */}}
 
 {{/*
 VALKEY'S OWN GUARD (B-V2, ADR-0852), MIRRORING NATS'S ABSENCE ARM ABOVE.

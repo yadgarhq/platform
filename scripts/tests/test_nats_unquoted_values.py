@@ -336,13 +336,16 @@ SWEEP = {
         "nats.container.image.registry", "nats.container.image.fullImageName",
         "nats.promExporter.image.repository", "nats.natsBox.container.image.repository",
         "global.image.registry", "nats.global.image.registry",
+        "nats.reloader.image.repository", "nats.reloader.image.tag", "nats.reloader.image.digest",
+        "nats.reloader.image.registry", "nats.reloader.image.fullImageName",
     ],
     ("templates/_helpers.tpl:164", ".pullPolicy | default .global.image.pullPolicy"): [
         "nats.container.image.pullPolicy", "nats.promExporter.image.pullPolicy",
         "nats.natsBox.container.image.pullPolicy", "global.image.pullPolicy", "nats.global.image.pullPolicy",
+        "nats.reloader.image.pullPolicy",
     ],
     ("templates/_helpers.tpl:263", "$v"): ["cert_file|key_file|ca_file", "nats.config.nats.tls.dir", "nats.config.nats.tls.cert", "nats.tlsCA.dir", "nats.tlsCA.key"],
-    ("templates/_helpers.tpl:266", 'clean (printf "%s/%s" $dir $v)'): "EXCLUDED: an `$include` value; the NATS contract arm refuses every `$include` key under `nats.config` (one a JSON patch adds is yaadgaar 544's)",
+    ("templates/_helpers.tpl:266", 'clean (printf "%s/%s" $dir $v)'): "EXCLUDED: an `$include` value; the NATS contract arm refuses every `$include` key under `nats.config`, and the patch arm every JSON patch that could add one (yaadgaar 544)",
     ("templates/_helpers.tpl:284", r'(regexReplaceAll "\"<<\\s+(.*?)\\s+>>\"" (regexReplaceAll "\".*\\$include\": \"(.*)\",?" (include "toPrettyRawJson" .) "include ${1};") "${1}")'): "EXCLUDED: JSON-encoded config; the raw-text and `$include` arms own its two rewrites",
     ("templates/_toPrettyRawJson.tpl:26", "$s"): "EXCLUDED: the JSON-encoded config `nats.formatConfig` formats",
 }

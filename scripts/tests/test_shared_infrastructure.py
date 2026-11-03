@@ -978,11 +978,13 @@ def test_the_broker_reads_the_secrets_the_bootstrap_job_mints():
 def test_a_broker_secret_nothing_mints_reddens_the_gate(tmp_path):
     """The red case: a values flip that renames one Secret the StatefulSet reads.
 
-    A VALUES FLIP AND NOT A TEMPLATE EDIT, because that is the move an adopter
-    actually makes — `nats.podTemplate.patch` is a documented key of this chart's
-    `values.yaml`, and renaming a Secret there touches no template at all. The
-    adopter copies the chart's list and changes one `secretName`, which is the
-    only way to edit one entry of a list Helm replaces whole.
+    THE VALUES FLIP NOW REFUSES. An adopter used to copy the chart's
+    `nats.podTemplate.patch` and change one `secretName`, the only way to edit one
+    entry of a list Helm replaces whole. Since yaadgaar 544 that list must be the
+    chart's own, so the render refuses the flip, and this test asserts that
+    refusal. The gate keeps its red case on the RENDERED StatefulSet instead: the
+    Secret is renamed there, which is what the gate reads, so a rename that
+    reaches the StatefulSet another way is still caught.
     """
     patch = chart_values()["nats"]["podTemplate"]["patch"]
     for op in patch:
@@ -992,8 +994,18 @@ def test_a_broker_secret_nothing_mints_reddens_the_gate(tmp_path):
         tmp_path / "other-broker-password.yaml",
         yaml.safe_dump({"nats": {"podTemplate": {"patch": patch}}}),
     )
-    rendered = adopter_render(CHART, "-f", str(values))
+    # SINCE YAADGAAR 544 THE RENDER ITSELF REFUSES THIS FLIP: `nats.podTemplate.patch`
+    # must be the chart's own list. The gate is still the one that would catch a
+    # rename that reaches the StatefulSet another way, so its red case renames the
+    # Secret in the RENDERED StatefulSet instead, which is what the gate reads.
+    refused = template(CHART, *api_version_arguments(), "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert refused.returncode != 0, "a renamed broker Secret in `nats.podTemplate.patch` rendered"
+    assert "`nats.podTemplate.patch` is not the chart's own list" in refused.stderr, refused.stderr
+    rendered = adopter_render()
     stateful_set = one(rendered, "StatefulSet")
+    for volume in stateful_set["spec"]["template"]["spec"]["volumes"]:
+        if volume.get("secret", {}).get("secretName") == "nats-auth":
+            volume["secret"]["secretName"] = "nobody-mints-this"
     referenced = broker_password_secrets(stateful_set)
 
     assert "nobody-mints-this" in referenced, referenced

@@ -596,8 +596,8 @@ nats:
   # `config.monitor.tls.enabled` IS NOT THE SWITCH, and the render check refuses
   # it set: a patch list replaces rather than coalesces, so this costs no helm
   # warning, where a `$tplYaml` on that bool key warns on every render (measured
-  # on helm 3.20.2 and 4.3.0). While TLS is on, the render check refuses a
-  # `config.patch` other than the chart's own entry.
+  # on helm 3.20.2 and 4.3.0). At every TLS posture the render check refuses a
+  # `config.patch` other than the chart's own entry (yaadgaar 544).
   config:
     patch:
       - $tplYaml: >-
@@ -671,10 +671,12 @@ nats:
   # result does not depend on the helm version that renders it.
   #
   # AN ADOPTER WHO SETS `container.patch` OR `podTemplate.patch` REPLACES THESE
-  # LISTS WHOLE (helm replaces lists across values files). Copy the chart's
-  # entries into yours. `templates/render-checks.yaml` refuses a render that has
-  # lost any of them, and refuses a broker image with no shell (non-alpine) and a
-  # monitor endpoint the probe below cannot reach.
+  # LISTS WHOLE (helm replaces lists across values files), so leave them unset.
+  # `templates/render-checks.yaml` refuses a render that has lost any of them,
+  # and any list that is not exactly the chart's own (yaadgaar 544): a patch path
+  # is a key no check reads. Put a field through its `merge` key instead. It
+  # also refuses a broker image with no shell (non-alpine) and a monitor
+  # endpoint the probe below cannot reach.
   #
   # TIMING STAYS AT THE CHART'S DEFAULTS, AS RULED: liveness at the upstream
   # 30 s x 3, lame duck and `terminationGracePeriodSeconds` untouched. Clients

@@ -415,11 +415,16 @@ def test_an_adopter_config_patch_under_tls_is_refused(tmp_path):
     assert "`nats.config.patch` is not the chart's own entry while `nats.tls.enabled` is true" in result.stderr, result.stderr
 
 
-def test_an_adopter_config_patch_with_tls_off_still_renders(tmp_path):
-    """Unchanged from `main`: at the off posture nothing reads the config patch."""
+def test_an_adopter_config_patch_with_tls_off_is_refused_too(tmp_path):
+    """INVERTED by yaadgaar 544. This used to render: at the off posture the TLS
+    contract arm does not read the config patch. But a patch PATH is a key no
+    check reads, and `{op: add, path: /cert_file}` with a newline in its value
+    reached the reloader's arguments at rc=0, so the patch arm refuses it at
+    every posture. `test_nats_patch_paths.py` owns what that arm does."""
     body = "nats:\n  config:\n    patch: [{op: add, path: /max_payload, value: 1048576}]\n"
     result = render_result(*tls_arguments(tmp_path, "off", body))
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0, result.stdout[:200]
+    assert "`nats.config.patch` is not the chart's own list" in result.stderr, result.stderr
 
 
 INCLUDES = {
