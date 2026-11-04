@@ -36,9 +36,15 @@ THE TRIPLE IS A HOOK IN THE JOB'S OWN PHASE, AT A WEIGHT BELOW IT. A `post-insta
 Job is admitted after the release's plain resources exist, so a plain ServiceAccount
 would in fact be there — but the triple is annotated anyway, at a lower weight, for
 symmetry with the pre-install triples and because a triple in a different phase from
-the Job it serves is a wiring nobody can read off one file. A `hook-delete-policy`
-that removed this triple between phases would break the Job that follows it, so it
-keeps `before-hook-creation` and nothing else.
+the Job it serves is a wiring nobody can read off one file. The triple keeps
+`before-hook-creation` and nothing else. `hook-succeeded` is not set, and the
+reason is NOT that it would delete this ServiceAccount before the Job finishes: it
+would not. The triple and the Job are hooks of the SAME event, `post-install`, and
+Helm deletes `hook-succeeded` objects only after every hook of the event has run
+(helm v3.18.4 and v4.3.0, `pkg/action/hooks.go`), so the triple, at the lower
+weight, outlives the Job it serves. `templates/bootstrap-rbac.yaml` gives the whole
+argument and the failure cases, and `README.md` states the residual grant. No
+cluster run measured any of this.
 
 IT RENDERS ONLY WHERE THE JOB DOES. `preflight.enabled` defaults TRUE, so a triple
 gated on that key alone would render at this chart's own defaults — where
