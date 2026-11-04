@@ -37,8 +37,15 @@ against that same account.
 THE TRIPLE OUTLIVES THE RELEASE, and that is a consequence rather than a bug. With
 `before-hook-creation` and no `hook-succeeded`, `helm uninstall` leaves this
 ServiceAccount, Role and RoleBinding — and both completed Jobs — in the namespace.
-`hook-succeeded` is not an available fix: it would delete this ServiceAccount
-before the Jobs it serves are finished with it. The residual grant is bounded to
+`hook-succeeded` is not set here, and the reason is NOT that it would delete this
+ServiceAccount before the Jobs finish: it would not. Helm deletes `hook-succeeded`
+objects only after every hook of the event has run (helm v3.18.4 and v4.3.0,
+`pkg/action/hooks.go`), and Argo CD (gitops-engine in Argo CD v3.1.8) deletes them
+only when the whole sync succeeds, so a hook at a lower weight outlives the Job it
+serves. When a hook runs and fails or times out, v3.18.4 deletes no
+`hook-succeeded` object; v4.3.0 deletes the `hook-succeeded` hooks that ran before
+the failed one. Neither deletes anything when a hook fails to build or create. No
+cluster run measured any of this. The residual grant is bounded to
 `create` on Secrets in one namespace, and `README.md` states it for an operator
 rather than leaving it to be discovered.
 
@@ -53,9 +60,10 @@ THE TRIPLE IS A HOOK, AT A WEIGHT BELOW THE JOBS IT SERVES. Helm applies plain
 resources AFTER the pre-install hooks have run, so a ServiceAccount rendered as an
 ordinary object DOES NOT EXIST when a `pre-install` Job tries to use it: the Job is
 admitted against an identity that is not there, and the bootstrap fails on a
-healthy cluster for a reason that has nothing to do with this chart. A
-`hook-delete-policy` that removed this triple between phases would break the Jobs
-that follow it, so it keeps `before-hook-creation` and nothing else.
+healthy cluster for a reason that has nothing to do with this chart. The triple
+keeps `before-hook-creation` and nothing else: Helm deletes the old copy just
+before it creates the new one, on every pre-install and pre-upgrade run, and at no
+other time.
 
 THE WEIGHTS ARE QUOTED. Annotations are `map[string]string`, so an unquoted integer
 is a manifest that does not decode — and the failure arrives at apply time, not at
