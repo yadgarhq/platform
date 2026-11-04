@@ -988,7 +988,8 @@ def test_a_broker_secret_nothing_mints_reddens_the_gate(tmp_path):
     """
     patch = chart_values()["nats"]["podTemplate"]["patch"]
     for op in patch:
-        if op["value"]["secret"]["secretName"] == "nats-auth":
+        # The `$tplYamlSpread` entry (yaadgaar 555) carries no `value`.
+        if "value" in op and op["value"]["secret"]["secretName"] == "nats-auth":
             op["value"]["secret"]["secretName"] = "nobody-mints-this"
     values = overrides(
         tmp_path / "other-broker-password.yaml",

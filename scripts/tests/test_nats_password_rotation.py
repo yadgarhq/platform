@@ -170,13 +170,16 @@ LIVENESS = (
     f"sha256sum -c -s {HASH_FILE} && "
     "wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"
 )
-# yaadgaar 169: with TLS on the monitor serves HTTPS, so the probe does too. The
-# alpine `wget` verifies the certificate and the leaf names no 127.0.0.1
-# (measured), so it skips verification on loopback.
+# yaadgaar 169: with TLS on the monitor serves HTTPS, so the probe does too.
+# yaadgaar 555: the probe VERIFIES the leaf against the internal CA. The alpine
+# `wget` reads its trust from `SSL_CERT_FILE`, and the leaf names `nats`, never
+# 127.0.0.1, so the probe dials `nats`, which the pod's `hostAliases` entry maps
+# to 127.0.0.1 inside the pod.
 LIVENESS_TLS = (
     f"sha256sum -c -s {HASH_FILE} && "
-    "wget --no-check-certificate -q -O /dev/null 'https://127.0.0.1:8222/healthz?js-enabled-only=true'"
+    "SSL_CERT_FILE=/etc/nats-certs/nats/ca.crt wget -q -O /dev/null 'https://nats:8222/healthz?js-enabled-only=true'"
 )
+HOST_ALIASES_BY_POSTURE = {"off": None, "required": [{"ip": "127.0.0.1", "hostnames": ["nats"]}]}
 LIVENESS_BY_POSTURE = {"off": LIVENESS, "required": LIVENESS_TLS}
 
 
@@ -333,6 +336,17 @@ def test_liveness_rechecks_the_hash_beside_healthz_at_upstream_timing(tmp_path, 
         assert nats[probe_name]["httpGet"].get("scheme") == scheme, nats[probe_name]
 
 
+@POSTURES
+def test_the_pod_maps_the_leaf_name_to_loopback_only_with_tls_on(tmp_path, posture):
+    """The probe's `nats` resolves to 127.0.0.1 inside the pod with TLS on (yaadgaar 555).
+
+    With TLS off the probe dials 127.0.0.1 itself and the pod carries no
+    `hostAliases`, so the TLS-off render is unchanged.
+    """
+    spec = pod_spec(adopter_render(tmp_path, posture))
+    assert spec.get("hostAliases") == HOST_ALIASES_BY_POSTURE[posture], spec.get("hostAliases")
+
+
 # ── THE MONITOR SERVES HTTPS WHENEVER TLS IS ON (yaadgaar 169, ADR-0852) ─────
 
 
@@ -384,6 +398,7 @@ def test_the_tplyaml_literals_match_values_yaml():
     assert probe["value"] == {"command": ["/bin/sh", "-c", {"$tplYaml": literal("natsLiveness")}]}, probe
     assert {"$tplYaml": literal("natsStartupScheme")} in patch, patch
     assert {"$tplYaml": literal("natsReadinessScheme")} in patch, patch
+    assert {"$tplYamlSpread": literal("natsHostAliases")} in nats["podTemplate"]["patch"], nats["podTemplate"]["patch"]
 
 
 def tls_arguments(tmp_path: Path, posture: str, body: str) -> list[str]:
@@ -726,13 +741,18 @@ class Broker:
     can be launched, killed and launched again the way kubelet restarts the
     container on a failed liveness check."""
 
-    def __init__(self, image: str) -> None:
+    def __init__(self, image: str, host_aliases: list[dict] | None = None) -> None:
         self.image = image
         self.name = f"nats-rotation-check-{uuid.uuid4().hex[:10]}"
+        # The pod's `hostAliases`, as docker's `--add-host`: kubelet writes the
+        # same lines into the container's /etc/hosts.
+        self.hosts = [
+            f"--add-host={hostname}:{alias['ip']}" for alias in (host_aliases or []) for hostname in alias["hostnames"]
+        ]
 
     def __enter__(self) -> "Broker":
         subprocess.run(
-            ["docker", "run", "-d", "--name", self.name, "--entrypoint", "sh", self.image, "-c", "sleep 3600"],
+            ["docker", "run", "-d", "--name", self.name, *self.hosts, "--entrypoint", "sh", self.image, "-c", "sleep 3600"],
             check=True,
             capture_output=True,
             timeout=60,
@@ -956,13 +976,21 @@ def test_the_rendered_tls_probe_passes_and_plain_http_is_gone_against_a_real_bro
     assert liveness == LIVENESS_TLS, liveness
     conf = nats_conf(documents)
     pod_env_covers_the_config(conf)
-    with Broker(rendered_image(documents)) as broker:
+    with Broker(rendered_image(documents), spec.get("hostAliases")) as broker:
         seed(broker, conf)
         seed_tls(broker, throwaway_pki(tmp_path / "pki"))
         write_password(broker, IAM_FILE, "iam-pw")
         write_password(broker, GATEWAY_FILE, "gateway-pw")
         launch(broker, wrapper_script(spec))
         wait_live(broker, liveness)
+        # THE PROBE VERIFIES (yaadgaar 555): against a trust file without the
+        # internal CA, and by the loopback address the leaf does not name, it fails.
+        untrusted = liveness.replace("SSL_CERT_FILE=/etc/nats-certs/nats/ca.crt", "SSL_CERT_FILE=/etc/nats-certs/nats/tls.crt")
+        assert untrusted != liveness
+        assert probe(broker, untrusted) != 0, "the probe passed without the internal CA: it does not verify"
+        assert probe(broker, liveness.replace("https://nats:", "https://127.0.0.1:")) != 0, (
+            "the probe passed by an address the leaf does not name: it does not check the name"
+        )
         assert probe(broker, LIVENESS) != 0, "the plain-http probe passed: a plain-HTTP monitor is still listening"
         plain = "wget -q -O /dev/null 'http://127.0.0.1:8222/varz'"
         assert probe(broker, plain) != 0, "/varz answered over plain HTTP on 8222"
