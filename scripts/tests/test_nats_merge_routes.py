@@ -68,7 +68,7 @@ PARTLY_JUDGED = {
     "config.nats.tls.merge": "the NATS TLS contract arm reads only verify, ca_file and lowercase keys; any other TLS key passes",
     "configMap.merge": "the NATS TLS contract arm holds it to metadata only while TLS is on; with TLS off it can replace nats.conf",
     "container.merge": "the broker merge-key arm's allowlist; the securityContext it allows is not narrowed (yaadgaar 554)",
-    "podTemplate.merge": "the broker merge-key arm's denylist of volume-carrying spec keys; hostNetwork, serviceAccountName and the rest pass",
+    "podTemplate.merge": "the broker merge-key arm's denylist of volume-carrying spec keys and hostAliases; hostNetwork, serviceAccountName and the rest pass",
     "statefulSet.merge": "the broker merge-key arm's denylist of template and volumeClaimTemplates; replicas, serviceName and the rest pass",
     "reloader.merge": "the patch arm's reloader allowlist; the securityContext it allows is not narrowed (yaadgaar 554)",
 }

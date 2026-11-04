@@ -736,13 +736,16 @@ Each reads `config.nats.tls.enabled` after every values file is merged:
 `$natsMonitorPatch` is the `nats.config.patch` entry that moves the monitor to
 `https_port` with TLS on; `$natsStartupScheme` and `$natsReadinessScheme` are the
 `nats.container.patch` entries that move those probes to HTTPS; `$natsLiveness`
-is the liveness probe's command. Each is a copy of its `values.yaml` text, which
+is the liveness probe's command; `$natsHostAliases` is the `nats.podTemplate.patch`
+`$tplYamlSpread` entry that maps the probe's `nats` to 127.0.0.1 with TLS on and
+spreads nothing with TLS off (yaadgaar 555). Each is a copy of its `values.yaml` text, which
 `test_the_tplyaml_literals_match_values_yaml` pins byte for byte, so the arms
 below can tell the chart's own entries from an adopter's. */ -}}
 {{- $natsMonitorPatch := `{{- if and .Values.config.nats.tls.enabled (not .Values.config.monitor.tls.enabled) }}{op: move, from: /http_port, path: /https_port}{{- else }}{op: test, path: /pid_file, value: /var/run/nats/nats.pid}{{- end }}` }}
 {{- $natsStartupScheme := `{{- if .Values.config.nats.tls.enabled }}{op: add, path: /startupProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}` }}
 {{- $natsReadinessScheme := `{{- if .Values.config.nats.tls.enabled }}{op: add, path: /readinessProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}` }}
-{{- $natsLiveness := `{{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && wget %s-q -O /dev/null '%s://127.0.0.1:8222/healthz?js-enabled-only=true'" (ternary "--no-check-certificate " "" $tls) (ternary "https" "http" $tls) | toJson }}` }}
+{{- $natsHostAliases := `{{- if .Values.config.nats.tls.enabled }}[{op: add, path: /spec/hostAliases, value: [{ip: 127.0.0.1, hostnames: [nats]}]}]{{- end }}` }}
+{{- $natsLiveness := `{{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && %swget -q -O /dev/null '%s://%s:8222/healthz?js-enabled-only=true'" (ternary (printf "SSL_CERT_FILE=%s/ca.crt " (trimSuffix "/" (.Values.config.nats.tls.dir | default "/etc/nats-certs/nats"))) "" $tls) (ternary "https" "http" $tls) (ternary "nats" "127.0.0.1" $tls) | toJson }}` }}
 {{- $natsCreate := and (kindIs "map" .Values.nats) (not (and (kindIs "bool" (index .Values.nats "create")) (not (index .Values.nats "create")))) }}
 {{- if $natsCreate }}
 {{- $natsTls := index .Values.nats "tls" | default dict }}
@@ -970,7 +973,10 @@ resolved as the upstream `nats.image` helper resolves it: `fullImageName`, else
 flavour, because the helper drops the tag, so it refuses too; pin an alpine
 digest through `fullImageName` instead.
 
-ARM TWO, THE MONITOR. The probe is fixed at `127.0.0.1:8222`. With
+ARM TWO, THE MONITOR. The probe is fixed at port 8222 on loopback: `127.0.0.1`
+with TLS off, and with TLS on `nats`, which the chart's `hostAliases` entry maps
+to 127.0.0.1 so the probe can verify the leaf by the name it carries
+(yaadgaar 555). With
 `config.monitor.enabled` false the upstream chart renders NO liveness probe at
 all, so a rotation never restarts the broker. Measured on helm 3.18.4, that
 case never reaches this arm: helm renders the subchart first, and the chart's
@@ -1110,7 +1116,9 @@ chart.
 ARM THREE, NO VOLUMES THROUGH THE OTHER TWO MERGES. `nats.podTemplate.merge.spec`
 must not set `volumes`, which replaces the pod's volumes, or `containers`,
 `initContainers` and `ephemeralContainers`, which replace the lists that carry
-the mounts. `nats.statefulSet.merge.spec` must not set `template`, the whole
+the mounts, or `hostAliases`: with TLS on the chart's own `podTemplate.patch`
+adds the liveness probe's `nats` alias after the merge, so an adopter's list
+would be replaced whole without a word (yaadgaar 555). `nats.statefulSet.merge.spec` must not set `template`, the whole
 pod template (`nats.podTemplate.merge` is the key for it), or
 `volumeClaimTemplates`. The chart's own volumes and mounts go through the patch
 keys, which the rotation arm above reads, so this refuses nothing the chart
@@ -1156,7 +1164,7 @@ exec nats-server --config /etc/nats-config/nats.conf
 {{- end }}
 {{- end }}
 {{- end }}
-{{- range $source := list (list "podTemplate" (list "volumes" "containers" "initContainers" "ephemeralContainers")) (list "statefulSet" (list "template" "volumeClaimTemplates")) }}
+{{- range $source := list (list "podTemplate" (list "volumes" "containers" "initContainers" "ephemeralContainers" "hostAliases")) (list "statefulSet" (list "template" "volumeClaimTemplates")) }}
 {{- $merge := dig (index $source 0) "merge" dict $.Values.nats }}
 {{- if not (kindIs "map" $merge) }}
 {{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge` is not a map (it is %s)" (index $source 0) (kindOf $merge)) }}
@@ -1167,7 +1175,7 @@ exec nats-server --config /etc/nats-config/nats.conf
 {{- else }}
 {{- range $key := index $source 1 }}
 {{- if hasKey $spec $key }}
-{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec.%s` is set: a merge replaces that list whole, so it takes away the chart's own volumes or mounts" (index $source 0) $key) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec.%s` is set: a merge replaces that list whole, so it takes away the chart's own volumes, mounts or host aliases" (index $source 0) $key) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -1406,7 +1414,8 @@ those arms read (the open residual, a task of its own):
   - `nats.config.nats.tls.merge` is read only for `verify`, `ca_file` and
     lowercase keys; any other TLS key passes;
   - `nats.podTemplate.merge.spec` and `nats.statefulSet.merge.spec` are
-    denylists of the volume-carrying keys; `hostNetwork`, `serviceAccountName`,
+    denylists of the volume-carrying keys (and `hostAliases`, for the pod);
+    `hostNetwork`, `serviceAccountName`,
     `replicas`, `serviceName` and the rest pass;
   - `nats.container.merge` and `nats.reloader.merge` are allowlists, but the
     `securityContext` they allow is not narrowed (yaadgaar 554).
@@ -1541,9 +1550,9 @@ ARM THREE, NO ADOPTER `$tplYaml`. The upstream chart resolves every
 `$tplYaml` / `$tplYamlSpread` map in its values (`nats.defaultValues`, over the
 whole subchart `.Values`, `global` included) after every check here has read
 them, so such a key at any depth under `nats` or `global` refuses. The
-exception is the chart's own four, counted at most once each and only where the
-chart writes them: the one in `nats.config.patch` and the three in
-`nats.container.patch`. The NATS TLS contract arm above refuses one under
+exception is the chart's own five, counted at most once each and only where the
+chart writes them: the one in `nats.config.patch`, the three in
+`nats.container.patch` and the one in `nats.podTemplate.patch` (yaadgaar 555). The NATS TLS contract arm above refuses one under
 `nats.config` first, in its own words.
 
 Runs while helm installs the broker, LAST of the broker arms, so a rotation-wiring
@@ -1554,6 +1563,7 @@ loss, a merge key or an unquoted value names itself first.
 {{- $ownStartup := dict "$tplYaml" $natsStartupScheme }}
 {{- $ownReadiness := dict "$tplYaml" $natsReadinessScheme }}
 {{- $ownMonitor := dict "$tplYaml" $natsMonitorPatch }}
+{{- $ownHostAliases := dict "$tplYamlSpread" $natsHostAliases }}
 {{- $ownContainerPatch := list
       (dict "op" "add" "path" "/volumeMounts/-" "value" (dict "name" "nats-auth-iam" "mountPath" "/var/run/secrets/nats-auth/iam" "readOnly" true))
       (dict "op" "add" "path" "/volumeMounts/-" "value" (dict "name" "nats-auth-gateway" "mountPath" "/var/run/secrets/nats-auth/gateway" "readOnly" true))
@@ -1561,7 +1571,8 @@ loss, a merge key or an unquoted value names itself first.
       $ownLiveness $ownStartup $ownReadiness }}
 {{- $ownPodPatch := list
       (dict "op" "add" "path" "/spec/volumes/-" "value" (dict "name" "nats-auth-iam" "secret" (dict "secretName" "nats-auth" "items" (list (dict "key" "password" "path" "password")))))
-      (dict "op" "add" "path" "/spec/volumes/-" "value" (dict "name" "nats-auth-gateway" "secret" (dict "secretName" "nats-auth-gateway" "items" (list (dict "key" "password" "path" "password"))))) }}
+      (dict "op" "add" "path" "/spec/volumes/-" "value" (dict "name" "nats-auth-gateway" "secret" (dict "secretName" "nats-auth-gateway" "items" (list (dict "key" "password" "path" "password")))))
+      $ownHostAliases }}
 {{- $patchRefused := list }}
 {{- range $rule := list
       (list "config.patch" (list $ownMonitor))
@@ -1641,7 +1652,7 @@ are counted apart and the larger counts once: a key in both is one key. */ -}}
 {{- $tplKeys := len (regexFindAll $tplPattern (toRawJson (omit .Values.nats "global")) -1) }}
 {{- $tplKeys = add $tplKeys (max (len (regexFindAll $tplPattern (toRawJson (index .Values.nats "global" | default dict)) -1)) (len (regexFindAll $tplPattern (toRawJson (.Values.global | default dict)) -1))) }}
 {{- $ownTplKeys := 0 }}
-{{- range $own := list (list "config" $ownMonitor 1) (list "container" $ownLiveness 1) (list "container" $ownStartup 1) (list "container" $ownReadiness 1) }}
+{{- range $own := list (list "config" $ownMonitor 1) (list "container" $ownLiveness 1) (list "container" $ownStartup 1) (list "container" $ownReadiness 1) (list "podTemplate" $ownHostAliases 1) }}
 {{- $found := false }}
 {{- $list := dig (index $own 0) "patch" list $.Values.nats }}
 {{- if kindIs "slice" $list }}
