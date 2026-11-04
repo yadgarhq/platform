@@ -244,6 +244,19 @@ THE_BROKER_REGISTER_IS_NOT_A_BOOL = (
     ("nats-create-is-an-empty-map", "nats:\n  create: {}\n", "map"),
 )
 THE_DELETED_BROKER_BLOCK = ("nats-is-null", "nats:\n")
+# The plaintext posture, indented to sit under `nats:`. The broker arms require it
+# whenever helm installs the broker (ADR-0845, yaadgaar 552).
+NATS_PLAINTEXT_TLS = '  tls: {enabled: false, clientAuth: "off"}\n'
+NATS_KEYS_ABSENT = "platform: nats.create is true and"
+# The broker arms' gate, and the gate it replaced (yaadgaar 552).
+NATS_CREATE_GATE = (
+    '{{- $natsCreate := and (kindIs "map" .Values.nats) (not (and (kindIs "bool" '
+    '(index .Values.nats "create")) (not (index .Values.nats "create")))) }}'
+)
+NATS_CREATE_GATE_BEFORE_552 = (
+    '{{- $natsCreate := and (kindIs "map" .Values.nats) (kindIs "bool" '
+    '(index .Values.nats "create")) (index .Values.nats "create") }}'
+)
 
 # The phrases the two register-key refusals write. DIFFERENT FROM EACH OTHER AND
 # FROM BOTH ARMS ABOVE, for the reason `THE_SHAPE_REFUSAL` and
@@ -1495,7 +1508,11 @@ def test_the_parent_is_the_one_that_names_a_non_bool_register_key(tmp_path):
         (f"operators-{name}", f"operators:\n  create: {scalar}\n", "operators", kind)
         for name, scalar, kind in THE_REGISTER_KEY_IS_NOT_A_BOOL
     ] + [
-        (name, body, "nats", kind)
+        # The broker arms run for every value helm installs the broker on (yaadgaar
+        # 552), so the TLS keys they require ride along, as `yadgarhq/chart`'s own
+        # refusal harness layers them (`chart/ci/values.yaml`). Without them this
+        # chart's absence arm would answer first, for a reason the row does not name.
+        (name, body + NATS_PLAINTEXT_TLS, "nats", kind)
         for name, body, kind in THE_BROKER_REGISTER_IS_NOT_A_BOOL
     ]
     for name, body, block, kind in rows:
@@ -1846,6 +1863,13 @@ def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
     The `nats-ingress` NetworkPolicy DOES render in front of them (yaadgaar 359):
     it follows helm's resolution of `condition: nats.create`, which leaves the
     broker on for the deleted key, so the policy is asserted present here.
+
+    AND THE BROKER ARMS NOW REFUSE IT TOO (yaadgaar 552): they follow the same
+    resolution, so with the register arm cut out the deleted block still meets
+    the absence arm. So the harm is measured with the pre-552 gate put back as
+    well (`$natsCreate` true only on the bool `true`), which skips every broker
+    arm: the render then goes through on upstream defaults. What the register
+    arm buys in the shipped chart is the message that names the deletion.
     """
     copy = chart_copy(tmp_path, "no-broker-arm")
     template = copy / "templates" / "render-checks.yaml"
@@ -1875,6 +1899,20 @@ def test_deleting_the_broker_arm_lets_an_unconfigured_broker_through(tmp_path):
         ),
     )
     assert asked.returncode == 0, asked.stderr
+    refused = helm(
+        "template",
+        "platform",
+        str(copy),
+        "-f",
+        str(values_file(tmp_path / "broker-deleted.yaml", "nats:\n")),
+    )
+    assert refused.returncode != 0 and NATS_KEYS_ABSENT in refused.stderr, (
+        f"without the register arm the deleted block no longer meets the absence "
+        f"arm (yaadgaar 552): {refused.stderr or refused.stdout[:400]}"
+    )
+    assert THE_REGISTER_KEY_REFUSAL not in refused.stderr, refused.stderr
+    assert original.count(NATS_CREATE_GATE) == 1, f"the broker arms' gate is no longer {NATS_CREATE_GATE!r}"
+    template.write_text((head + tail).replace(NATS_CREATE_GATE, NATS_CREATE_GATE_BEFORE_552))
     deleted = helm(
         "template",
         "platform",
@@ -2152,7 +2190,7 @@ def test_a_non_bool_broker_switch_under_a_bare_parent_keeps_the_policy(tmp_path)
     rows = [row for row in THE_BROKER_REGISTER_IS_NOT_A_BOOL if row[2] != "null"]
     assert len(rows) == 3
     for name, body, _kind in rows:
-        result = render_under_parent_body(tmp_path, parent, f"policy-{name}", body)
+        result = render_under_parent_body(tmp_path, parent, f"policy-{name}", body + NATS_PLAINTEXT_TLS)
         assert result.returncode == 0, f"`{name}`: {result.stderr}"
         rendered = {(d["kind"], d["metadata"]["name"]) for d in documents(result.stdout)}
         assert ("StatefulSet", "nats") in rendered, (
@@ -2171,6 +2209,55 @@ def test_a_bool_false_broker_switch_renders_neither_broker_nor_policy(tmp_path):
     rendered = {(d["kind"], d["metadata"]["name"]) for d in documents(result.stdout)}
     assert ("StatefulSet", "nats") not in rendered
     assert ("NetworkPolicy", "nats-ingress") not in rendered
+
+
+def test_a_non_bool_broker_switch_under_a_bare_parent_still_runs_the_broker_arms(tmp_path):
+    """The broker arms follow helm too, not a bool `true` (yaadgaar 552, ADR-0873).
+
+    `render-checks.yaml` gated every broker arm on `$natsCreate`, which was true
+    only for the bool `true`. Under a bare parent `nats.create: "yes"`, `0` or `{}`
+    installs the broker and skipped every arm, so a port carrying a newline put
+    `allow_non_tls: true` into nats.conf at rc=0. `$natsCreate` now reads the
+    switch as `ingress-policies.yaml` does: off only on the bool `false`.
+    """
+    parent = parent_around(tmp_path, with_refusal=False)
+    # The STRING "false" is a non-bool too: helm installs the broker for it, so the
+    # arms must run. A gate that compared `toString` against "false" would skip
+    # them; this row is the one that tells the two readings apart.
+    rows = [row for row in THE_BROKER_REGISTER_IS_NOT_A_BOOL if row[2] != "null"] + [
+        ("nats-create-is-the-string-false", 'nats:\n  create: "false"\n', "string"),
+    ]
+    assert len(rows) == 4
+    for name, body, _kind in rows:
+        installed = render_under_parent_body(tmp_path, parent, f"installs-{name}", body + NATS_PLAINTEXT_TLS)
+        assert installed.returncode == 0, f"`{name}`: {installed.stderr}"
+        assert ("StatefulSet", "nats") in {(d["kind"], d["metadata"]["name"]) for d in documents(installed.stdout)}, (
+            f"`{name}`: helm no longer installs the broker for this value, so the row measures nothing"
+        )
+        result = render_under_parent_body(
+            tmp_path, parent, f"arms-{name}",
+            body + '  tls: {enabled: false, clientAuth: "off"}\n'
+            '  config:\n    nats:\n      port: "4222\\nallow_non_tls: true"\n',
+        )
+        assert result.returncode != 0, (
+            f"`{name}`: the broker rendered rc=0 with an unchecked port: {result.stdout[:400]}"
+        )
+        assert "platform: a value the upstream nats chart prints unquoted is not of its kind" in result.stderr, (
+            f"`{name}`: refused, but not by the unquoted-values arm: {result.stderr}"
+        )
+        assert "`nats.config.nats.port`" in result.stderr, result.stderr
+
+
+def test_a_bool_false_broker_switch_under_a_bare_parent_runs_no_broker_arm(tmp_path):
+    """The other half: the bool `false` leaves the broker out, and no arm judges it."""
+    parent = parent_around(tmp_path, with_refusal=False)
+    result = render_under_parent_body(
+        tmp_path, parent, "arms-false",
+        'nats:\n  create: false\n  config:\n    nats:\n      port: "4222\\nallow_non_tls: true"\n',
+    )
+    assert result.returncode == 0, result.stderr
+    rendered = {(d["kind"], d["metadata"]["name"]) for d in documents(result.stdout)}
+    assert ("StatefulSet", "nats") not in rendered
 
 
 # The ONE sanctioned dotted read of the broker switch: off only on the bool `false`

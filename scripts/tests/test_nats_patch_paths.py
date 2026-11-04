@@ -26,7 +26,7 @@ estate posture):
 With TLS off, `nats.config.patch` and `nats.config.nats.tls.patch` passed too.
 
 THE RULE, in `templates/render-checks.yaml`'s patch arm, at both TLS postures
-while `nats.create` is true: every `patch` list the upstream chart applies
+while helm installs the broker: every `patch` list the upstream chart applies
 equals the chart's own list (`values.yaml`'s, matched as JSON) or is empty. NO
 ALLOWLIST OF ADOPTER OPS IS OFFERED: a patch is a route past the key-based arms
 that exist, and no adopter op has been shown to need one. The refusal has a
@@ -207,6 +207,17 @@ REFUSED.update({
         "`nats.reloader.natsVolumeMountPrefixes` is",
     ),
     "reloader-prefixes-root": ("nats:\n  reloader:\n    natsVolumeMountPrefixes: [/]\n", "`nats.reloader.natsVolumeMountPrefixes` is"),
+    # yaadgaar 553: a null deletes the key AND the upstream default with it.
+    "reloader-prefixes-null": ("nats:\n  reloader:\n    natsVolumeMountPrefixes: null\n", "`nats.reloader.natsVolumeMountPrefixes` is null: helm deletes the key"),
+    "reloader-prefixes-empty": ("nats:\n  reloader:\n    natsVolumeMountPrefixes: []\n", "`nats.reloader.natsVolumeMountPrefixes` is []"),
+    "reloader-disabled": ("nats:\n  reloader:\n    enabled: false\n", "`nats.reloader.enabled` is false, not the bool true"),
+    "reloader-enabled-string": ("nats:\n  reloader:\n    enabled: \"true\"\n", "`nats.reloader.enabled` is \"true\", not the bool true"),
+    "reloader-enabled-null": ("nats:\n  reloader:\n    enabled: null\n", "`nats.reloader.enabled` is null, not the bool true"),
+    "reloader-env-plain": ("nats:\n  reloader:\n    env:\n      W553: x\n", "`nats.reloader.env` is set"),
+    "reloader-env-secret": (
+        "nats:\n  reloader:\n    env:\n      W553:\n        valueFrom:\n          secretKeyRef: {name: nats-auth, key: password}\n",
+        "`nats.reloader.env` is set",
+    ),
     # `$tplYaml` outside `nats.config` (yaadgaar 545).
     "tpl-in-container-patch": (
         with_chart_list("container", {"$tplYaml": "{op: replace, path: /args/0, value: x}"}),
@@ -321,6 +332,8 @@ ALLOWED = {
         "readOnlyRootFilesystem: true",
     ),
     "reloader-prefixes-default": ("nats:\n  reloader:\n    natsVolumeMountPrefixes: [/etc/]\n", None),
+    "reloader-enabled-true": ("nats:\n  reloader:\n    enabled: true\n", "nats-server-config-reloader"),
+    "reloader-env-empty": ("nats:\n  reloader:\n    env: {}\n", None),
     "reloader-tag": ("nats:\n  reloader:\n    image:\n      tag: 0.23.1\n", "nats-server-config-reloader:0.23.1"),
     "reloader-full-name": (
         "nats:\n  reloader:\n    image:\n      fullImageName: registry.example/reloader:0.23.0\n",
