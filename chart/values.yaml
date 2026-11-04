@@ -706,6 +706,14 @@ nats:
             items:
               - key: password
                 path: password
+      # THE LIVENESS PROBE'S NAME FOR LOOPBACK, WITH TLS ON (yaadgaar 555). The
+      # probe below verifies the leaf against the internal CA, and the leaf names
+      # `nats`, never 127.0.0.1, so the probe dials `nats` and this entry maps that
+      # name to 127.0.0.1 in the pod's /etc/hosts. The probe still never leaves the
+      # pod. It is a `$tplYamlSpread`, so with TLS off it spreads no entry into
+      # this list at all, and the TLS-off render is unchanged.
+      - $tplYamlSpread: >-
+          {{- if .Values.config.nats.tls.enabled }}[{op: add, path: /spec/hostAliases, value: [{ip: 127.0.0.1, hostnames: [nats]}]}]{{- end }}
 
   container:
     # BOTH SECRETS ARE MINTED BY THE BOOTSTRAP JOB, as the Valkey password is.
@@ -772,15 +780,17 @@ nats:
           readOnly: true
       # The upstream `/healthz` check, kept, AND the hash. `httpGet` is removed
       # first because Kubernetes rejects a probe with two handlers. The URL is
-      # fixed at 127.0.0.1:8222; the render check refuses a `config.monitor`
-      # that moves it. Its SCHEME FOLLOWS THE MONITOR, through the upstream
+      # fixed at port 8222 on loopback; the render check refuses a
+      # `config.monitor` that moves it. Its SCHEME FOLLOWS THE MONITOR, through the upstream
       # chart's own `$tplYaml` reading `config.nats.tls.enabled` after every
       # values file is merged, as `config.patch` above does: https with TLS on,
       # http with it off. A patch list replaces rather than coalesces, so this
-      # `$tplYaml` costs no helm warning. `--no-check-certificate` is there because the alpine
-      # `wget` VERIFIES the certificate, and the leaf names no 127.0.0.1
-      # (measured against nats:2.14.6-alpine). The probe dials loopback inside
-      # the container, so no network peer can sit in the path it skips.
+      # `$tplYaml` costs no helm warning. WITH TLS ON THE PROBE VERIFIES THE LEAF
+      # (yaadgaar 555): the alpine `wget` reads its trust from `SSL_CERT_FILE`,
+      # set to the internal CA beside the leaf (`config.nats.tls.dir`), and it
+      # dials `nats`, the name the leaf carries, which `podTemplate.patch` above
+      # maps to 127.0.0.1. So a leaf the CA did not sign, or one that does not
+      # name `nats`, fails the probe.
       - op: remove
         path: /livenessProbe/httpGet
       - op: add
@@ -790,7 +800,7 @@ nats:
             - /bin/sh
             - -c
             - $tplYaml: >-
-                {{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && wget %s-q -O /dev/null '%s://127.0.0.1:8222/healthz?js-enabled-only=true'" (ternary "--no-check-certificate " "" $tls) (ternary "https" "http" $tls) | toJson }}
+                {{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && %swget -q -O /dev/null '%s://%s:8222/healthz?js-enabled-only=true'" (ternary (printf "SSL_CERT_FILE=%s/ca.crt " (trimSuffix "/" (.Values.config.nats.tls.dir | default "/etc/nats-certs/nats"))) "" $tls) (ternary "https" "http" $tls) (ternary "nats" "127.0.0.1" $tls) | toJson }}
       # THE STARTUP AND READINESS PROBES MOVE TO HTTPS WITH TLS ON, by the same
       # `$tplYaml` reading. With TLS off each entry is a `test` of the container
       # name, which changes nothing, so the TLS-off render stays byte-identical.

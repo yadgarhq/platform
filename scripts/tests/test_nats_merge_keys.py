@@ -124,6 +124,13 @@ REFUSED = {
         "nats:\n  podTemplate:\n    merge:\n      spec:\n        ephemeralContainers: []\n",
         "`nats.podTemplate.merge.spec.ephemeralContainers`",
     ),
+    # yaadgaar 555: with TLS on the chart's own `podTemplate.patch` adds
+    # `hostAliases` after the merge and would replace an adopter's whole list
+    # without a word, so the merge key is refused at both postures.
+    "pod-host-aliases": (
+        "nats:\n  podTemplate:\n    merge:\n      spec:\n        hostAliases: [{ip: 10.0.0.1, hostnames: [x]}]\n",
+        "`nats.podTemplate.merge.spec.hostAliases`",
+    ),
     "pod-spec-not-a-map": ("nats:\n  podTemplate:\n    merge:\n      spec: [x]\n", "`nats.podTemplate.merge.spec` is not a map"),
     "statefulset-template": (
         "nats:\n  statefulSet:\n    merge:\n      spec:\n        template: {spec: {volumes: []}}\n",
