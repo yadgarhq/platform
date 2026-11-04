@@ -126,7 +126,7 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
 #
-# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and twenty-four values
+# THE TOTAL OVER BOTH KINDS OF CHECK — two capability checks and twenty-seven values
 # checks, and the module docstring is where the difference between them lives. It
 # is the number a DELETION reddens, whichever kind was deleted. B-N2 added two
 # values checks (nats.create with no nats.tls keys; the NATS/upstream
@@ -147,8 +147,9 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # moving it to 26. Yaadgaar 546 added one (a value the upstream nats chart prints
 # unquoted that is not of its kind), moving it to 27. Yaadgaar 544 and 545 added
 # one (a broker JSON patch, `$tplYaml` or reloader key that is not the chart's
-# own), moving it to 28.
-EXPECTED_RENDER_CHECKS = 28
+# own), moving it to 28. Yaadgaar 553 added one (a broker object or container
+# merge outside its allowlist), moving it to 29.
+EXPECTED_RENDER_CHECKS = 29
 # The denominator of the `--api-versions` construction, which exercises the
 # capability checks and only those. `EXPECTED_CHECKS` below names them.
 EXPECTED_CAPABILITY_CHECKS = 2
@@ -206,13 +207,16 @@ EXPECTED_CAPABILITY_CHECKS = 2
 # patch arm, while `nats.create` is true: a `patch` list the upstream nats chart
 # applies that is not the chart's own or empty, a reloader merge key, mount
 # prefix list or an adopter `$tplYaml` under `nats` or `global`;
-# `test_nats_patch_paths.py` owns what it does.
+# `test_nats_patch_paths.py` owns what it does. And the yaadgaar 553 object
+# merge arm, while `nats.create` is true: a container or object merge the
+# upstream nats chart applies that sets a key off its allowlist;
+# `test_nats_merge_routes.py` owns what it does.
 # They are counted separately because each is its own `fail`
 # with its own message and its own red case;
 # `scripts/tests/test_operators_shape.py` owns what eight of them DO, and this
 # number is only the count, which is what a deletion moves. Each has a pair of
 # BARE renders.
-EXPECTED_VALUES_CHECKS = 26
+EXPECTED_VALUES_CHECKS = 27
 EXPECTED_CHECKS = {
     "cert-manager.io/v1": "cert-manager",
     # ENVOY GATEWAY'S OWN GROUP, AND NOT THE GATEWAY API'S. The same cluster serves

@@ -4,26 +4,29 @@ EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHIN
 TWO KINDS OF CHECK LIVE HERE. A CAPABILITY check reads
 `.Capabilities.APIVersions.Has` through `platform.require-api` and refuses when the
 target does not carry an API group this render needs. A VALUES check reads the
-release's own values and nothing else. TWENTY-FIVE of the second kind live below — the
+release's own values and nothing else. TWENTY-SEVEN of the second kind live below — the
 two arms of the `operators` shape refusal, two branches each of the two register-key
 arms, the per-operator create arm, the `prometheus.forceNamespace` arm, then the
 mixed-release refusal and the type arm of its toggle list, then the two NATS/valkey
 TLS arms, the two NATS contract arms, the three broker credential-rotation arms
 (ADR-0924), the broker merge-key arm (yaadgaar 169), the unquoted-values arm
-(yaadgaar 546), the leaf usages arm (yaadgaar 279), and last the one-line values arm,
+(yaadgaar 546), the object merge arm (yaadgaar 553), the patch arm (yaadgaar 544,
+545), the leaf usages arm (yaadgaar 279), and last the one-line values arm,
 the whole-number arm (yaadgaar 541),
 the edge usages arm and the rendered certificates arm (yaadgaar 534; the last
 reads the rendered Certificates rather than values) — and everything that makes a capability
 check awkward — `--api-versions`, the offline-render rule, the default-false rule —
 does not apply to any of them. Their red and green cases are BARE renders, and that
 is the design rather than an omission. `scripts/tests/test_render_checks.py` owns
-the mixed-release pair and the count of all twenty-five;
+the mixed-release pair and the count of all twenty-seven;
 `scripts/tests/test_operators_shape.py` owns what the shape and register arms do;
 `scripts/tests/test_force_namespace.py` owns what the forceNamespace arm does;
 `scripts/tests/test_nats_valkey_tls.py` owns what the four TLS arms do.
 `scripts/tests/test_certificate_usages.py` owns what the leaf usages arm and the
 three yaadgaar 534 arms do. `scripts/tests/test_nats_merge_keys.py` and
-`scripts/tests/test_nats_unquoted_values.py` own the yaadgaar 169 and 546 arms.
+`scripts/tests/test_nats_unquoted_values.py` own the yaadgaar 169 and 546 arms;
+`scripts/tests/test_nats_merge_routes.py` and `scripts/tests/test_nats_patch_paths.py`
+own the yaadgaar 553 and 544/545 arms.
 
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. The self-signed Issuer, the CA
 Certificate, the CA Issuer, the thirteen internal leaves and the edge leaf all come from
@@ -679,10 +682,19 @@ override. So ADR-0845's "absent refuses" can live only on a platform-owned key:
 optional mode, ADR-0854). The adopter writes both sources; this check makes them
 say the same thing.
 
-BOTH ARMS RUN ONLY WHILE `nats.create` IS TRUE. With the broker out — the
+BOTH ARMS RUN WHILE HELM INSTALLS THE BROKER. With the broker out — the
 operator Applications pin this chart with `nats.create` false — nothing reads
 these keys and nothing is required. The shape arm above still validates any key
 that is present.
+
+`$natsCreate` IS OFF ONLY ON THE BOOL `false`, the reading `ingress-policies.yaml`
+uses (ADR-0873, yaadgaar 359). helm leaves `condition: nats.create` ENABLED for
+any value that is not a bool, so under a bare parent `nats.create: "yes"`, `0`
+or `{}` installs the broker. A gate that read only a bool `true` skipped every
+broker arm for those values, and a port of `"4222\nallow_non_tls: true"` then put
+`allow_non_tls: true` into nats.conf at rc=0 (yaadgaar 552). At the root the
+register-key arm above refuses a non-bool first, and under `yadgarhq/chart` the
+parent does, so this reading changes no render the estate makes.
 
 ARM ONE, ABSENCE. Either platform key absent refuses, naming each, with the off
 posture to write.
@@ -731,7 +743,7 @@ below can tell the chart's own entries from an adopter's. */ -}}
 {{- $natsStartupScheme := `{{- if .Values.config.nats.tls.enabled }}{op: add, path: /startupProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}` }}
 {{- $natsReadinessScheme := `{{- if .Values.config.nats.tls.enabled }}{op: add, path: /readinessProbe/httpGet/scheme, value: HTTPS}{{- else }}{op: test, path: /name, value: nats}{{- end }}` }}
 {{- $natsLiveness := `{{- $tls := not (empty .Values.config.nats.tls.enabled) }}{{ printf "sha256sum -c -s /var/run/nats/auth.sha256 && wget %s-q -O /dev/null '%s://127.0.0.1:8222/healthz?js-enabled-only=true'" (ternary "--no-check-certificate " "" $tls) (ternary "https" "http" $tls) | toJson }}` }}
-{{- $natsCreate := and (kindIs "map" .Values.nats) (kindIs "bool" (index .Values.nats "create")) (index .Values.nats "create") }}
+{{- $natsCreate := and (kindIs "map" .Values.nats) (not (and (kindIs "bool" (index .Values.nats "create")) (not (index .Values.nats "create")))) }}
 {{- if $natsCreate }}
 {{- $natsTls := index .Values.nats "tls" | default dict }}
 {{- $natsAbsent := list }}
@@ -1358,6 +1370,110 @@ are counted, and a difference is a key whose value is not a string. */ -}}
 {{- end }}{{/* end of the unquoted-values arm */}}
 
 {{/*
+THE BROKER'S REMAINING MERGE ROUTES (yaadgaar 553): EACH IS AN ALLOWLIST.
+
+The upstream chart (2.14.6) runs `nats.loadMergePatch` for every object it
+renders: it mergeOverwrites the object's `merge` over the rendered object, then
+applies its `patch`. The patch arm below refuses every adopter patch, and the
+merge-key arms above hold `container`, `podTemplate` and `statefulSet` to their
+lists, but every other merge reached the object unread. MEASURED rc=0 on main
+abdbcbb with TLS required: `nats.promExporter.enabled: true` with
+`merge.command` and a `volumeMounts` entry for `nats-auth-iam` mounted the broker
+password into a container that runs any command, in a pod with
+`shareProcessNamespace: true`. A `service.merge.spec` can retype the Service or
+change its selector, a PVC merge can add a `dataSource`, and a Secret merge can
+add `data`.
+
+TWO SHAPES, by what the merge lands on, matched by exact key (Kubernetes field
+names are case-sensitive):
+  - A CONTAINER (`promExporter`, `natsBox.container`): the allowlist
+    `nats.container.merge` uses, `resources`, `securityContext`,
+    `terminationMessagePath` and `terminationMessagePolicy`.
+  - AN OBJECT (every other site below, the nats-box pod template included):
+    `metadata.labels` and `metadata.annotations` only, the allowlist
+    `nats.configMap.merge` uses. A label or an annotation changes no field
+    another check reads.
+`nats.natsBox.contexts.<name>.merge` must be empty, by any name: it rewrites a
+nats CLI context, which carries the URL and the credentials.
+
+JUDGED WHATEVER THE OBJECT'S OWN `enabled` SAYS, as the patch arm judges every
+patch: a merge waiting for a later `enabled: true` is the same route. The
+`nats.conf` block merges (`config.<block>.merge` and `config.<block>.tls.merge`)
+are NOT judged here: they write nats.conf rather than an object, and
+`test_every_upstream_merge_is_judged_or_listed` names them as the open residual.
+`test_the_arm_judges_every_object_merge` pins this list to the vendored chart.
+
+Runs while `nats.create` is true, before the patch arm, so a `$tplYaml` inside
+an allowed key still refuses there.
+*/}}
+{{- if $natsCreate }}
+{{- $routeRefused := list }}
+{{- $containerKeys := list "resources" "securityContext" "terminationMessagePath" "terminationMessagePolicy" }}
+{{- range $rule := list
+      (list "promExporter.merge" "container")
+      (list "natsBox.container.merge" "container")
+      (list "promExporter.podMonitor.merge" "object")
+      (list "service.merge" "object")
+      (list "headlessService.merge" "object")
+      (list "serviceAccount.merge" "object")
+      (list "podDisruptionBudget.merge" "object")
+      (list "config.websocket.ingress.merge" "object")
+      (list "config.jetstream.fileStore.pvc.merge" "object")
+      (list "config.resolver.pvc.merge" "object")
+      (list "natsBox.deployment.merge" "object")
+      (list "natsBox.podTemplate.merge" "object")
+      (list "natsBox.contextsSecret.merge" "object")
+      (list "natsBox.contentsSecret.merge" "object")
+      (list "natsBox.serviceAccount.merge" "object") }}
+{{- $path := index $rule 0 }}
+{{- $value := $.Values.nats }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = index (dict) "absent" }}{{ end }}
+{{- end }}
+{{- if not (kindIs "invalid" $value) }}
+{{- if not (kindIs "map" $value) }}
+{{- $routeRefused = append $routeRefused (printf "`nats.%s` is not a map (it is %s)" $path (kindOf $value)) }}
+{{- else if eq (index $rule 1) "container" }}
+{{- range $key := keys $value | sortAlpha }}
+{{- if not (has $key $containerKeys) }}
+{{- $routeRefused = append $routeRefused (printf "`nats.%s` sets the key %s: only `resources`, `securityContext`, `terminationMessagePath` and `terminationMessagePolicy` may be merged into a container" $path (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- else }}
+{{- range $key := keys $value | sortAlpha }}
+{{- if ne $key "metadata" }}
+{{- $routeRefused = append $routeRefused (printf "`nats.%s` sets the key %s: only `metadata.labels` and `metadata.annotations` may be merged into this object" $path (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- $metadata := index $value "metadata" }}
+{{- if not (kindIs "invalid" $metadata) }}
+{{- if not (kindIs "map" $metadata) }}
+{{- $routeRefused = append $routeRefused (printf "`nats.%s.metadata` is not a map (it is %s)" $path (kindOf $metadata)) }}
+{{- else }}
+{{- range $key := keys $metadata | sortAlpha }}
+{{- if not (has $key (list "labels" "annotations")) }}
+{{- $routeRefused = append $routeRefused (printf "`nats.%s.metadata` sets the key %s: only `labels` and `annotations` may be merged" $path (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $contexts := dig "natsBox" "contexts" dict .Values.nats }}
+{{- if kindIs "map" $contexts }}
+{{- range $name, $context := $contexts }}
+{{- if and (kindIs "map" $context) (not (empty (index $context "merge"))) }}
+{{- $routeRefused = append $routeRefused (printf "`nats.natsBox.contexts.%s.merge` is set" $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $routeRefused }}
+{{- fail (printf "platform: the broker's merge keys reach past what the chart checks: %s. A merge runs after the upstream chart has rendered the object and replaces what it names, so only the keys listed may be merged (yaadgaar 553)." (join "; " $routeRefused)) }}
+{{- end }}
+{{- end }}{{/* end of the object merge arm */}}
+
+{{/*
 THE BROKER'S JSON PATCHES (yaadgaar 544), ITS `$tplYaml` (yaadgaar 545) AND ITS
 RELOADER: EACH IS THE CHART'S OWN.
 
@@ -1394,9 +1510,14 @@ ARM TWO, THE RELOADER. `nats.reloader.merge` is held to the allowlist
 `nats.container.merge` uses, minus `command` and `args` (the reloader has its
 own and the chart owns them). `nats.reloader.natsVolumeMountPrefixes` must be
 the upstream default `["/etc/"]`: a wider prefix copies the password mounts into
-the reloader. `nats.reloader.image.*` is judged by the unquoted-values arm
-above. `nats.reloader.env` is printed quoted by the upstream chart and is not
-judged here.
+the reloader. A `null` there is refused too (yaadgaar 553): helm deletes the key
+and the subchart default with it, so the reloader keeps only its `pid` mount,
+loses `/etc/nats-config` and `/etc/nats-certs`, and never reloads a renewed
+leaf. `nats.reloader.enabled` must be the bool `true`, for the same reason: the
+reloader is what picks up a renewed leaf. `nats.reloader.env` must be empty: the
+chart sets none, and an env entry can read any Secret in the namespace into a
+container that shares the broker's process namespace. `nats.reloader.image.*` is
+judged by the unquoted-values arm above.
 
 ARM THREE, NO ADOPTER `$tplYaml`. The upstream chart resolves every
 `$tplYaml` / `$tplYamlSpread` map in its values (`nats.defaultValues`, over the
@@ -1478,9 +1599,23 @@ loss, a merge key or an unquoted value names itself first.
 {{- end }}
 {{- end }}
 {{- end }}
-{{- $prefixes := dig "reloader" "natsVolumeMountPrefixes" (list "/etc/") .Values.nats }}
-{{- if ne (toJson $prefixes) (toJson (list "/etc/")) }}
+{{- $reloader := index .Values.nats "reloader" | default dict }}
+{{- $prefixes := index (dict) "absent" }}
+{{- if kindIs "map" $reloader }}{{ $prefixes = index $reloader "natsVolumeMountPrefixes" }}{{ end }}
+{{- if kindIs "invalid" $prefixes }}
+{{- $patchRefused = append $patchRefused "`nats.reloader.natsVolumeMountPrefixes` is null: helm deletes the key and the upstream default [\"/etc/\"] with it, so the reloader loses the config and certificate mounts and never reloads a renewed leaf. Delete the line instead" }}
+{{- else if ne (toJson $prefixes) (toJson (list "/etc/")) }}
 {{- $patchRefused = append $patchRefused (printf "`nats.reloader.natsVolumeMountPrefixes` is %s, not the upstream [\"/etc/\"]: a wider prefix copies the broker's password mounts into the reloader" (toJson $prefixes)) }}
+{{- end }}
+{{- $reloaderEnabled := index (dict) "absent" }}
+{{- if kindIs "map" $reloader }}{{ $reloaderEnabled = index $reloader "enabled" }}{{ end }}
+{{- if not (and (kindIs "bool" $reloaderEnabled) $reloaderEnabled) }}
+{{- $patchRefused = append $patchRefused (printf "`nats.reloader.enabled` is %s, not the bool true: the reloader is what loads a renewed TLS leaf into the running broker" (ternary "null" (toJson $reloaderEnabled) (kindIs "invalid" $reloaderEnabled))) }}
+{{- end }}
+{{- $reloaderEnv := index (dict) "absent" }}
+{{- if kindIs "map" $reloader }}{{ $reloaderEnv = index $reloader "env" }}{{ end }}
+{{- if not (empty $reloaderEnv) }}
+{{- $patchRefused = append $patchRefused "`nats.reloader.env` is set: the chart sets no reloader environment, and an entry can read a Secret into a container that shares the broker's process namespace" }}
 {{- end }}
 {{- /* Helm copies the parent's `global` into `nats.global` as well, so the two
 are counted apart and the larger counts once: a key in both is one key. */ -}}
@@ -1810,7 +1945,7 @@ arithmetic on these eight (`$deadline`, `$grace`, `$backoff`, `$total`, the
 {{- $maximum := index $rule 2 }}
 {{- $value := $.Values }}
 {{- range $key := splitList "." $path }}
-{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = nil }}{{ end }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = index (dict) "absent" }}{{ end }}
 {{- end }}
 {{- if not (and (index $rule 3) (kindIs "invalid" $value)) }}
 {{- $whole := or (kindIs "int" $value) (kindIs "int64" $value)

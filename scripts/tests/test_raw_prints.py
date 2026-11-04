@@ -403,6 +403,24 @@ def test_a_number_that_is_not_whole_or_out_of_range_is_refused(tmp_path, body, p
     assert NUMBER_REFUSAL in result.stderr and f"`{path}`" in result.stderr, result.stderr
 
 
+# A NULL ON THE WAY TO A JUDGED VALUE (yaadgaar 551). helm deletes a declared key
+# written as `null`, so the walk reaches a missing map. It used to stop on Go's
+# "nil is not a command" there, a template error and not this refusal; the walk now
+# reads the missing value as null and names the path.
+NULL_INTERMEDIATES = [
+    ("gatewayListener: {envoyProxy: null}", "gatewayListener.envoyProxy.replicas"),
+    ("preflight: {envoyGateway: null}", "preflight.envoyGateway.timeoutSeconds"),
+]
+
+
+@pytest.mark.parametrize(("body", "path"), NULL_INTERMEDIATES, ids=[p for _, p in NULL_INTERMEDIATES])
+def test_a_null_on_the_path_to_a_number_gets_the_named_refusal(tmp_path, body, path):
+    result = number_render(tmp_path, body)
+    assert result.returncode != 0, f"rendered instead of refusing: {result.stdout[:400]}"
+    assert "nil is not a command" not in result.stderr, result.stderr
+    assert NUMBER_REFUSAL in result.stderr and f"`{path}` is null (null)" in result.stderr, result.stderr
+
+
 @pytest.mark.parametrize(("body", "path"), GREEN_NUMBERS, ids=[f"{p}={b.split(': ')[-1].rstrip('}')}" for b, p in GREEN_NUMBERS])
 def test_a_whole_number_in_range_renders(tmp_path, body, path):
     result = number_render(tmp_path, body)
