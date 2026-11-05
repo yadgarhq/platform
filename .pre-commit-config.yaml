@@ -9,7 +9,9 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-merge-conflict
+        args: [--assume-in-merge]
       - id: check-added-large-files
+        args: [--enforce-all]
         # `chart/templates/vendored-crds/` is EXCLUDED, and this is the ONLY hook
         # it is excluded from. No `args:` sits here, so the limit is the 500 kB
         # default, and `keda-scaledjobs.yaml` is 614607 bytes — KEDA's `ScaledJob`
