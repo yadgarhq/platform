@@ -915,8 +915,51 @@ refused: what is left is exactly what they read. */ -}}
 {{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.merge.%s` is not lowercase: nats-server lowercases every key of a TLS block, so it is the same setting as `%s` and could override what this check read. Write it lowercase" $key (lower $key)) }}
 {{- end }}
 {{- end }}
-{{- if $natsEnabled }}
-{{- /* THE CONFIGMAP ITSELF (yaadgaar 489). The upstream chart renders `nats.conf`
+{{- /* THE TWO nats.conf MERGES ARE ALLOWLISTS (yaadgaar 597, ruled by Max
+2026-11-05: no merge route is an adopter power). Each is matched by exact key,
+at EVERY TLS posture, and holds only the keys `values.yaml` and the documented
+transport step write:
+  - `nats.config.merge` (`$natsConfigMergeKeys`): `authorization`, the two
+    accounts in `values.yaml`, and `allow_non_tls`, the transport step's key,
+    which the arms above still judge. Every other key reached nats.conf unread:
+    `no_auth_user: iam` made a client with no password `iam` (measured rc=0 on
+    main 1cca4ee with TLS required);
+  - `nats.config.nats.tls.merge` (`$natsTlsMergeKeys`): `verify` and `ca_file`,
+    the two keys the arms above read. `verify_and_map`, `timeout` and the rest
+    of nats-server's TLS block reached it unread.
+The arms above keep their own sentences, so a monitor key, a listener or `tls`
+names its reason; this arm names every key the lists do not carry.
+
+`authorization` MUST BE THE CHART'S OWN BLOCK, EXACTLY (yaadgaar 597, ADR-1160).
+An allowed key is not a judged value: on a real nats-server 2.14.6, at TLS off,
+available and required, `merge: null` and `users: []` left a broker with
+`auth_required:false` that accepted `CONNECT {}`, `users: [{user: anon}]`
+accepted an empty password, and `token`, `user`/`password`, `nkey`,
+`default_permissions` and `auth_callout` all rendered (measured on 624f4a8).
+The bootstrap Job mints both passwords, so a values writer never holds password
+power, and rewriting the accounts would be a new one. So the block must be
+present and its `toRawJson` must equal `$natsAuthorization`, a literal copy of
+`values.yaml`'s (the two accounts, their `<< $NATS_PASSWORD* >>` references and
+their permissions). `toRawJson` sorts map keys and does not escape `<` or `>`;
+`test_the_authorization_literal_matches_values_yaml` pins the literal to
+`values.yaml`, so the two cannot drift. */ -}}
+{{- $natsAuthorization := `{"users":[{"password":"<< $NATS_PASSWORD >>","permissions":{"publish":{"allow":["yadgar.iam.credential.revoked","yadgar.iam.user.teams-changed"]},"subscribe":{"deny":">"}},"user":"iam"},{"password":"<< $NATS_PASSWORD_GATEWAY >>","permissions":{"publish":{"deny":">"},"subscribe":{"allow":["yadgar.iam.credential.revoked","yadgar.iam.user.teams-changed"]}},"user":"gateway"}]}` }}
+{{- if ne (toRawJson (index $natsMerge "authorization")) $natsAuthorization }}
+{{- $natsDisagree = append $natsDisagree "`nats.config.merge.authorization` is not the chart's own block: the broker's two accounts, their password references and their permissions come from `values.yaml` and the bootstrap Job, and an absent, emptied or changed block leaves a broker a client can join with no password or with rights it was never given. Leave `authorization` unset" }}
+{{- end }}
+{{- $natsConfigMergeKeys := list "authorization" "allow_non_tls" }}
+{{- $natsTlsMergeKeys := list "verify" "ca_file" }}
+{{- range $key := keys $natsMerge | sortAlpha }}
+{{- if not (has $key $natsConfigMergeKeys) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.merge` sets the key %s: only `authorization` and `allow_non_tls` may be merged into nats.conf, because every other key reaches the broker unread (`no_auth_user` makes a client with no password an account)" (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- range $key := keys $upMerge | sortAlpha }}
+{{- if not (has $key $natsTlsMergeKeys) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.merge` sets the key %s: only `verify` and `ca_file` may be merged into the client TLS block, the two keys this check reads" (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- /* THE CONFIGMAP ITSELF (yaadgaar 489, 597). The upstream chart renders `nats.conf`
 into a ConfigMap through `nats.loadMergePatch`: `nats.configMap.merge` is
 mergeOverwritten over the WHOLE object and `nats.configMap.patch` runs after it,
 so either can take the rendered `nats.conf` away from the broker. `data` and
@@ -924,20 +967,24 @@ so either can take the rendered `nats.conf` away from the broker. `data` and
 ConfigMap added under `nats.extraResources` can take the name the pod mounts.
 `kind: Secret` turns it into an object the pod's ConfigMap volume does not read.
 So the merge is an ALLOWLIST, matched by exact key: `metadata.labels` and
-`metadata.annotations`, and nothing else. */ -}}
+`metadata.annotations`, and nothing else. It runs at EVERY TLS posture
+(yaadgaar 597): with TLS off, `data` replaced nats.conf with one that carries no
+`authorization`, so any client connected with no password (measured rc=0 on
+main 1cca4ee, at the root and under a bare parent with `create: 0`). */ -}}
 {{- range $key, $value := (dig "configMap" "merge" dict .Values.nats) }}
 {{- if ne $key "metadata" }}
-{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.%s` is set while `nats.tls.enabled` is true: only `metadata.labels` and `metadata.annotations` may be merged into the ConfigMap that carries `nats.conf`, so the broker runs the TLS settings this check read" $key) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.%s` is set: only `metadata.labels` and `metadata.annotations` may be merged into the ConfigMap that carries `nats.conf`, so the broker runs the settings this check read" $key) }}
 {{- else if not (kindIs "map" $value) }}
-{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.metadata` is not a map (it is %s) while `nats.tls.enabled` is true: only its `labels` and `annotations` may be merged" (kindOf $value)) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.metadata` is not a map (it is %s): only its `labels` and `annotations` may be merged" (kindOf $value)) }}
 {{- else }}
 {{- range $metaKey, $_ := $value }}
 {{- if not (has $metaKey (list "labels" "annotations")) }}
-{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.metadata.%s` is set while `nats.tls.enabled` is true: only `metadata.labels` and `metadata.annotations` may be merged into the ConfigMap that carries `nats.conf`, so the broker runs the TLS settings this check read" $metaKey) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.configMap.merge.metadata.%s` is set: only `metadata.labels` and `metadata.annotations` may be merged into the ConfigMap that carries `nats.conf`, so the broker runs the settings this check read" $metaKey) }}
 {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if $natsEnabled }}
 {{- if not (empty (dig "configMap" "patch" list .Values.nats)) }}
 {{- $natsDisagree = append $natsDisagree "`nats.configMap.patch` is not empty while `nats.tls.enabled` is true: a JSON patch on the ConfigMap can rewrite the rendered `nats.conf` this check read" }}
 {{- end }}
@@ -1113,16 +1160,21 @@ password mounts; `livenessProbe` drops the hash check; `env`, `envFrom`,
 `ports`, `lifecycle` and the rest have their own upstream keys or belong to the
 chart.
 
-ARM THREE, NO VOLUMES THROUGH THE OTHER TWO MERGES. `nats.podTemplate.merge.spec`
-must not set `volumes`, which replaces the pod's volumes, or `containers`,
-`initContainers` and `ephemeralContainers`, which replace the lists that carry
-the mounts, or `hostAliases`: with TLS on the chart's own `podTemplate.patch`
-adds the liveness probe's `nats` alias after the merge, so an adopter's list
-would be replaced whole without a word (yaadgaar 555). `nats.statefulSet.merge.spec` must not set `template`, the whole
-pod template (`nats.podTemplate.merge` is the key for it), or
-`volumeClaimTemplates`. The chart's own volumes and mounts go through the patch
-keys, which the rotation arm above reads, so this refuses nothing the chart
-writes.
+ARM THREE, THE OTHER TWO MERGES ARE ALLOWLISTS (yaadgaar 597, ruled by Max
+2026-11-05: no merge route is an adopter power). `nats.podTemplate.merge` and
+`nats.statefulSet.merge` may carry `metadata` and `spec` (`$natsPodMergeKeys`),
+`metadata` may carry `labels` and `annotations` (`$natsPodMergeMetadataKeys`),
+and `spec` may carry NO key (`$natsPodMergeSpecKeys`, empty): neither
+`values.yaml` nor `example/values.yaml` merges one. Matched by exact key. This
+was a denylist of the volume-carrying keys, and these are why it is not:
+`volumes`, `containers`, `initContainers` and `ephemeralContainers` replace the
+lists that carry the mounts; `hostAliases` would be replaced whole by the
+chart's own `podTemplate.patch` with TLS on (yaadgaar 555); `template` and
+`volumeClaimTemplates` replace the pod and its claims; and `hostNetwork`,
+`serviceAccountName`, `replicas` and `serviceName` rendered at rc=0 on main
+1cca4ee, past every arm here. The chart's own volumes and mounts go through the
+patch keys, which the rotation arm above reads, so this refuses nothing the
+chart writes.
 */}}
 {{- if $natsCreate }}
 {{- $natsWrapper := `set -eu
@@ -1164,18 +1216,40 @@ exec nats-server --config /etc/nats-config/nats.conf
 {{- end }}
 {{- end }}
 {{- end }}
-{{- range $source := list (list "podTemplate" (list "volumes" "containers" "initContainers" "ephemeralContainers" "hostAliases")) (list "statefulSet" (list "template" "volumeClaimTemplates")) }}
-{{- $merge := dig (index $source 0) "merge" dict $.Values.nats }}
+{{- $natsPodMergeKeys := list "metadata" "spec" }}
+{{- $natsPodMergeMetadataKeys := list "labels" "annotations" }}
+{{- $natsPodMergeSpecKeys := list }}
+{{- range $source := list "podTemplate" "statefulSet" }}
+{{- $merge := dig $source "merge" dict $.Values.nats }}
 {{- if not (kindIs "map" $merge) }}
-{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge` is not a map (it is %s)" (index $source 0) (kindOf $merge)) }}
-{{- else if hasKey $merge "spec" }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge` is not a map (it is %s)" $source (kindOf $merge)) }}
+{{- else }}
+{{- range $key := keys $merge | sortAlpha }}
+{{- if not (has $key $natsPodMergeKeys) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge` sets the key %s: only `metadata.labels`, `metadata.annotations` and an empty `spec` may be merged" $source (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- $metadata := index $merge "metadata" }}
+{{- if not (kindIs "invalid" $metadata) }}
+{{- if not (kindIs "map" $metadata) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.metadata` is not a map (it is %s)" $source (kindOf $metadata)) }}
+{{- else }}
+{{- range $key := keys $metadata | sortAlpha }}
+{{- if not (has $key $natsPodMergeMetadataKeys) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.metadata` sets the key %s: only `labels` and `annotations` may be merged" $source (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if hasKey $merge "spec" }}
 {{- $spec := index $merge "spec" }}
 {{- if not (kindIs "map" $spec) }}
-{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec` is not a map (it is %s)" (index $source 0) (kindOf $spec)) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec` is not a map (it is %s)" $source (kindOf $spec)) }}
 {{- else }}
-{{- range $key := index $source 1 }}
-{{- if hasKey $spec $key }}
-{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec.%s` is set: a merge replaces that list whole, so it takes away the chart's own volumes, mounts or host aliases" (index $source 0) $key) }}
+{{- range $key := keys $spec | sortAlpha }}
+{{- if not (has $key $natsPodMergeSpecKeys) }}
+{{- $mergeRefused = append $mergeRefused (printf "`nats.%s.merge.spec.%s` is set: no key of `spec` may be merged, because a merge runs after the chart's own helpers and can take away its volumes, mounts or host aliases, or change the pod's identity, network or replica count" $source $key) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -1383,7 +1457,7 @@ THE BROKER'S UNJUDGED OBJECT MERGE ROUTES (yaadgaar 553): EACH IS AN ALLOWLIST.
 The upstream chart (2.14.6) runs `nats.loadMergePatch` for every object it
 renders: it mergeOverwrites the object's `merge` over the rendered object, then
 applies its `patch`. The patch arm below refuses every adopter patch, and other
-arms judge seven merges in part (next paragraph), but every other object merge
+arms judge seven merges (next paragraph), but every other object merge
 reached the object unread. MEASURED rc=0 on main
 abdbcbb with TLS required: `nats.promExporter.enabled: true` with
 `merge.command` and a `volumeMounts` entry for `nats-auth-iam` mounted the broker
@@ -1404,21 +1478,13 @@ names are case-sensitive):
 `nats.natsBox.contexts.<name>.merge` must be empty, by any name: it rewrites a
 nats CLI context, which carries the URL and the credentials.
 
-SEVEN MERGES ARE ONLY PARTLY JUDGED, by other arms, and stay open beyond what
-those arms read (the open residual, a task of its own):
-  - `nats.configMap.merge` is held to `metadata` only while `nats.tls.enabled`
-    is true; with TLS off it can replace the whole `nats.conf`, authorization
-    included;
-  - `nats.config.merge` is read only for the TLS, `allow_non_tls`, monitor,
-    listener and `$include` keys; `no_auth_user` and every other key pass;
-  - `nats.config.nats.tls.merge` is read only for `verify`, `ca_file` and
-    lowercase keys; any other TLS key passes;
-  - `nats.podTemplate.merge.spec` and `nats.statefulSet.merge.spec` are
-    denylists of the volume-carrying keys (and `hostAliases`, for the pod);
-    `hostNetwork`, `serviceAccountName`,
-    `replicas`, `serviceName` and the rest pass;
-  - `nats.container.merge` and `nats.reloader.merge` are allowlists, but the
-    `securityContext` they allow is not narrowed (yaadgaar 554).
+FIVE MERGES ARE ALLOWLISTS IN OTHER ARMS (yaadgaar 597): `nats.configMap.merge`,
+`nats.config.merge` and `nats.config.nats.tls.merge` in the NATS TLS contract
+arm, and `nats.podTemplate.merge` and `nats.statefulSet.merge` in the broker
+merge-key arm; `test_nats_merge_routes.py`'s `ARM_ALLOWLISTS` lists them.
+TWO MERGES ARE ONLY PARTLY JUDGED, by other arms, and stay open beyond what
+those arms read: `nats.container.merge` and `nats.reloader.merge` are
+allowlists, but the `securityContext` they allow is not narrowed (yaadgaar 554).
 `test_nats_merge_routes.py`'s `PARTLY_JUDGED` lists them, and
 `test_a_partly_judged_route_still_renders` pins one open shape of each, so the
 list goes red when an arm closes it.

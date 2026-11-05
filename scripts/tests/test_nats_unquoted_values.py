@@ -130,13 +130,15 @@ REFUSED = {
     "file-tls-key": (nats("config.mqtt.tls.key", '"[tls.key]"'), "`nats.config.mqtt.tls.key`"),
     "dir-tls-ca": (nats("tlsCA.dir", INJECT % "/etc/nats-ca-cert"), "`nats.tlsCA.dir`"),
     "file-tls-ca": (nats("tlsCA.key", INJECT % "ca.crt"), "`nats.tlsCA.key`"),
-    # `nats.reloaderConfig` prints every cert_file / key_file / ca_file raw
+    # `nats.reloaderConfig` prints every cert_file / key_file / ca_file raw. Under a
+    # side-listener block: the client block's merge allows only `verify` and
+    # `ca_file` (yaadgaar 597), and that arm would refuse first.
     "reloader-cert-file": (
-        nats("config.nats.tls.merge.cert_file", r'"/x\n- -pid"'),
+        nats("config.leafnodes.tls.merge.cert_file", r'"/x\n- -pid"'),
         "`nats.config` holds a `cert_file`",
     ),
     "reloader-cert-file-not-string": (
-        nats("config.nats.tls.merge.key_file", "{a: b}"),
+        nats("config.leafnodes.tls.merge.key_file", "{a: b}"),
         "`nats.config` holds a `cert_file`, `key_file` or `ca_file` that is not a string",
     ),
     # names

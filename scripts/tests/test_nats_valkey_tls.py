@@ -707,7 +707,7 @@ def test_a_disabled_side_listener_under_required_client_auth_renders(tmp_path):
 # `nats.configMap.merge` is mergeOverwritten over that whole object, so a `data`
 # block there REPLACES the rendered `nats.conf`: every key the arms above read is
 # then not what the broker runs. A JSON patch on the object can do the same.
-# Refused while `nats.tls.enabled` is true, the same gate as `nats.config.patch`.
+# The merge is refused at every TLS posture (yaadgaar 597); the patch while TLS is on.
 CONFIG_MAP_REPLACEMENT = {"nats.conf": "port: 4222\nwebsocket { port: 8080, no_tls: true }\n"}
 
 
@@ -720,14 +720,13 @@ def test_a_config_map_merge_that_replaces_the_rendered_config_is_refused(tmp_pat
     assert f"`nats.configMap.merge.{key}`" in stderr, stderr
 
 
-def test_the_bypass_this_refuses_is_real(tmp_path):
-    """The red case's premise, measured: with the arm's gate off (`clientAuth: off`,
-    TLS off) the same merge does replace the rendered `nats.conf` wholesale."""
+def test_the_bypass_is_refused_with_tls_off_too(tmp_path):
+    """The red case's premise, at the other posture (yaadgaar 597): with TLS off
+    (`clientAuth: off`) the same merge replaced the rendered `nats.conf` wholesale
+    at rc=0 on main 1cca4ee, dropping `authorization`. It is refused there too."""
     body = {"nats": {"configMap": {"merge": {"data": CONFIG_MAP_REPLACEMENT}}}}
-    result = contract(tmp_path, body)
-    assert result.returncode == 0, result.stderr
-    config_map = nats_objects(result.stdout)["ConfigMap/nats-config"]
-    assert config_map["data"]["nats.conf"] == CONFIG_MAP_REPLACEMENT["nats.conf"], config_map
+    stderr = contract_refused(tmp_path, body)
+    assert "`nats.configMap.merge.data` is set" in stderr, stderr
 
 
 def test_a_config_map_patch_is_refused_while_tls_is_on(tmp_path):
@@ -824,6 +823,6 @@ def test_a_client_tls_merge_key_that_is_not_lowercase_is_refused(tmp_path, key, 
 
 
 def test_the_verified_step_with_only_lowercase_keys_still_renders(tmp_path):
-    body = with_changes(NATS_VERIFIED, ((*UPSTREAM_TLS, "merge", "timeout"), 3))
-    result = contract(tmp_path, body)
+    # `verify` and `ca_file` only: every other key is off the allowlist (yaadgaar 597).
+    result = contract(tmp_path, NATS_VERIFIED)
     assert result.returncode == 0, result.stderr

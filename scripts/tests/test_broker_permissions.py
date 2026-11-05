@@ -84,6 +84,25 @@ def test_red_03_teams_changed_is_in_iams_publish_and_the_gateways_subscribe_allo
     assert missing_teams_changed(broker_users(render(CHART))) == []
 
 
+def with_own_authorization_literal(copy: Path) -> Path:
+    """Rewrite the copy's `$natsAuthorization` from the copy's `values.yaml`.
+
+    The render check refuses an `authorization` block that is not the literal in
+    `render-checks.yaml` (yaadgaar 597), and `test_the_authorization_literal_matches_values_yaml`
+    ties the two together. A chart author who edits the accounts edits both, so
+    each red case below does too: the pin here must catch a widening that a
+    COORDINATED edit carries past the render check.
+    """
+    own = yaml.safe_load((copy / "values.yaml").read_text())["nats"]["config"]["merge"]["authorization"]
+    checks = copy / "templates" / "render-checks.yaml"
+    lines = checks.read_text().splitlines(keepends=True)
+    (index,) = [i for i, line in enumerate(lines) if line.startswith("{{- $natsAuthorization := ")]
+    literal = json.dumps(own, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    lines[index] = "{{- $natsAuthorization := `" + literal + "` }}\n"
+    checks.write_text("".join(lines))
+    return copy
+
+
 def chart_without_entry(destination: Path, occurrence: int) -> Path:
     """A copy of the chart with the `occurrence`-th (0-based) subject line deleted."""
     copy = destination / "chart"
@@ -94,7 +113,7 @@ def chart_without_entry(destination: Path, occurrence: int) -> Path:
     assert len(hits) == 2, f"expected the subject twice in chart/values.yaml, found {len(hits)}"
     del lines[hits[occurrence]]
     values.write_text("".join(lines))
-    return copy
+    return with_own_authorization_literal(copy)
 
 
 @pytest.mark.parametrize(
@@ -143,7 +162,7 @@ def chart_with_values(destination: Path, old: str, new: str) -> Path:
     text = values.read_text()
     assert text.count(old) == 1, f"expected {old!r} once in chart/values.yaml"
     values.write_text(text.replace(old, new))
-    return copy
+    return with_own_authorization_literal(copy)
 
 
 GATEWAY_PUBLISH_DENY = '              publish:\n                deny: ">"\n'
