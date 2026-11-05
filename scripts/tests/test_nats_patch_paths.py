@@ -232,7 +232,7 @@ REFUSED.update({
         "1 `$tplYaml` or `$tplYamlSpread` key(s) that are not the chart's own",
     ),
     "tpl-spread-in-pod-merge": (
-        "nats:\n  podTemplate:\n    merge:\n      spec:\n        tolerations:\n          - $tplYamlSpread: '[{key: x}]'\n",
+        "nats:\n  podTemplate:\n    merge:\n      metadata:\n        labels:\n          $tplYamlSpread: '{x: y}'\n",
         "1 `$tplYaml` or `$tplYamlSpread` key(s) that are not the chart's own",
     ),
     "tpl-in-reloader-merge": (
