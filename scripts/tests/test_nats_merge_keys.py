@@ -15,7 +15,8 @@ file, each of these rendered at rc=0:
 
 THE RULE, in `templates/render-checks.yaml`'s merge-key arms: `command` and
 `args` must equal the chart's own; the rest of `container.merge` is an
-allowlist; the volume-carrying keys of the other two merges are refused. Both
+allowlist; the other two merges are allowlists too (yaadgaar 597): `metadata.labels`,
+`metadata.annotations` and an empty `spec`, so every `spec` key is refused. Both
 directions are tested at both TLS postures: every refused shape names itself,
 and every allowed shape renders.
 
@@ -136,6 +137,16 @@ REFUSED = {
         "nats:\n  statefulSet:\n    merge:\n      spec:\n        template: {spec: {volumes: []}}\n",
         "`nats.statefulSet.merge.spec.template`",
     ),
+    # yaadgaar 597: `spec` is an allowlist with no key on it, so the shapes this
+    # file used to render (`nodeSelector`, `minReadySeconds`) are refused too.
+    "pod-node-selector": (
+        "nats:\n  podTemplate:\n    merge:\n      spec: {nodeSelector: {disk: w169-ssd}}\n",
+        "`nats.podTemplate.merge.spec.nodeSelector`",
+    ),
+    "statefulset-min-ready": (
+        "nats:\n  statefulSet:\n    merge:\n      spec: {minReadySeconds: 7}\n",
+        "`nats.statefulSet.merge.spec.minReadySeconds`",
+    ),
     "statefulset-claims": (
         "nats:\n  statefulSet:\n    merge:\n      spec:\n        volumeClaimTemplates: []\n",
         "`nats.statefulSet.merge.spec.volumeClaimTemplates`",
@@ -174,12 +185,10 @@ ALLOWED = {
         "FallbackToLogsOnError",
     ),
     "pod-labels": ("nats:\n  podTemplate:\n    merge:\n      metadata: {labels: {team: w169}}\n", "team: w169"),
-    "pod-node-selector": ("nats:\n  podTemplate:\n    merge:\n      spec: {nodeSelector: {disk: w169-ssd}}\n", "disk: w169-ssd"),
     "statefulset-annotations": (
         "nats:\n  statefulSet:\n    merge:\n      metadata: {annotations: {w169: kept}}\n",
         "w169: kept",
     ),
-    "statefulset-min-ready": ("nats:\n  statefulSet:\n    merge:\n      spec: {minReadySeconds: 7}\n", "minReadySeconds: 7"),
 }
 
 

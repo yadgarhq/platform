@@ -3,8 +3,8 @@
 THE GAP. The upstream nats chart (2.14.6) runs `nats.loadMergePatch` for every
 object it renders: it mergeOverwrites the object's `merge`, then applies its
 `patch`. The patch arm refuses every adopter patch, and other arms judge seven
-merges in part (`PARTLY_JUDGED` below), but every other object merge reached its
-object unread. MEASURED rc=0 on main abdbcbb at both TLS
+merges (`ARM_ALLOWLISTS` and `PARTLY_JUDGED` below), but every other object merge
+reached its object unread. MEASURED rc=0 on main abdbcbb at both TLS
 postures: `nats.promExporter.enabled: true` with `merge.command` and a
 `volumeMounts` entry for `nats-auth-iam`, which mounts the broker password into a
 container that runs any command, in a pod with `shareProcessNamespace: true`.
@@ -13,7 +13,8 @@ THE RULE, in `templates/render-checks.yaml`'s object merge arm, while
 helm installs the broker (`nats.create` is not the bool `false`): a container merge (`promExporter`, `natsBox.container`)
 holds the `nats.container.merge` allowlist; every other object merge holds
 `metadata.labels` and `metadata.annotations` only; a nats-box context merge must
-be empty. The `nats.conf` block merges are not judged at all, and the seven
+be empty. Five merges are allowlists in other arms (`ARM_ALLOWLISTS`, yaadgaar
+597). The `nats.conf` block merges are not judged at all, and the two
 `PARTLY_JUDGED` merges stay open beyond what their arms read;
 `test_every_upstream_merge_is_judged_or_listed` names both, and
 `test_a_partly_judged_route_still_renders` pins one open shape of each partly
@@ -61,26 +62,26 @@ OBJECT_MERGES = [
     "config.resolver.pvc", "natsBox.deployment", "natsBox.podTemplate",
     "natsBox.contextsSecret", "natsBox.contentsSecret", "natsBox.serviceAccount",
 ]
+# Merges another arm holds to an ALLOWLIST of its own (yaadgaar 597), at every
+# TLS posture; `test_a_key_off_an_arm_allowlist_is_refused_at_every_posture` below
+# covers each.
+ARM_ALLOWLISTS = {
+    "config.merge": "the NATS TLS contract arm: `authorization` and `allow_non_tls`",
+    "config.nats.tls.merge": "the NATS TLS contract arm: `verify` and `ca_file`",
+    "configMap.merge": "the NATS TLS contract arm: `metadata.labels` and `metadata.annotations`",
+    "podTemplate.merge": "the broker merge-key arm: `metadata.labels`, `metadata.annotations` and an empty `spec`",
+    "statefulSet.merge": "the broker merge-key arm: `metadata.labels`, `metadata.annotations` and an empty `spec`",
+}
 # Merges another arm judges IN PART, each with the arm and what it leaves open.
 # NOT FULLY JUDGED: each stays an open route beyond what its arm reads.
 PARTLY_JUDGED = {
-    "config.merge": "the NATS TLS contract arm reads only the TLS, allow_non_tls, monitor, listener and $include keys; no_auth_user and the rest pass",
-    "config.nats.tls.merge": "the NATS TLS contract arm reads only verify, ca_file and lowercase keys; any other TLS key passes",
-    "configMap.merge": "the NATS TLS contract arm holds it to metadata only while TLS is on; with TLS off it can replace nats.conf",
     "container.merge": "the broker merge-key arm's allowlist; the securityContext it allows is not narrowed (yaadgaar 554)",
-    "podTemplate.merge": "the broker merge-key arm's denylist of volume-carrying spec keys and hostAliases; hostNetwork, serviceAccountName and the rest pass",
-    "statefulSet.merge": "the broker merge-key arm's denylist of template and volumeClaimTemplates; replicas, serviceName and the rest pass",
     "reloader.merge": "the patch arm's reloader allowlist; the securityContext it allows is not narrowed (yaadgaar 554)",
 }
 # ONE OPEN SHAPE PER PARTLY JUDGED MERGE, with the posture it is open at. Each
 # renders today; an arm that closes one reddens `test_a_partly_judged_route_still_renders`.
 PARTLY_JUDGED_OPEN = {
-    "configMap.merge": ("off", "nats:\n  configMap:\n    merge:\n      data:\n        nats.conf: \"port: 4222\\n\"\n", "port: 4222"),
-    "config.merge": ("required", "nats:\n  config:\n    merge:\n      no_auth_user: iam\n", "no_auth_user"),
-    "config.nats.tls.merge": ("required", "nats:\n  config:\n    nats:\n      tls:\n        merge:\n          timeout: 7\n", '"timeout": 7'),
     "container.merge": ("required", "nats:\n  container:\n    merge:\n      securityContext: {privileged: true}\n", "privileged: true"),
-    "podTemplate.merge": ("required", "nats:\n  podTemplate:\n    merge:\n      spec: {hostNetwork: true}\n", "hostNetwork: true"),
-    "statefulSet.merge": ("required", "nats:\n  statefulSet:\n    merge:\n      spec: {replicas: 3}\n", "replicas: 3"),
     "reloader.merge": ("required", "nats:\n  reloader:\n    merge:\n      securityContext: {privileged: true}\n", "privileged: true"),
 }
 # THE OPEN RESIDUAL. These merges write a `nats.conf` block rather than an
@@ -258,7 +259,7 @@ def test_every_upstream_merge_is_judged_or_listed():
     """A chart bump that adds a merge reddens here until an arm judges it or it is listed."""
     upstream = upstream_merge_paths()
     upstream.discard("natsBox.contexts.default.merge")
-    named = {f"{p}.merge" for p in CONTAINER_MERGES + OBJECT_MERGES} | set(PARTLY_JUDGED) | NOT_JUDGED
+    named = {f"{p}.merge" for p in CONTAINER_MERGES + OBJECT_MERGES} | set(ARM_ALLOWLISTS) | set(PARTLY_JUDGED) | NOT_JUDGED
     assert upstream - named == set(), "the upstream chart has a merge nothing judges or lists"
     assert named - upstream == set(), "a merge is named that the upstream chart no longer has"
 
@@ -276,3 +277,199 @@ def test_a_partly_judged_route_still_renders(tmp_path, route):
     result = render(tmp_path, posture, body)
     assert result.returncode == 0, f"`nats.{route}` is now refused for this shape; update PARTLY_JUDGED: {result.stderr}"
     assert marker in result.stdout, f"{marker!r} did not reach the rendered objects"
+
+
+# ── THE FIVE ARMS THAT WERE PARTLY JUDGED ARE ALLOWLISTS (yaadgaar 597) ──────
+#
+# RULED by Max 2026-11-05: "Allowlist every arm. No merge route is an adopter
+# power." Each case below rendered rc=0 on main 1cca4ee. Every list holds only
+# the keys `values.yaml`, `example/values.yaml` and the documented transport
+# step use, matched by exact key, and each arm runs at EVERY TLS posture:
+#   - `nats.configMap.merge`: `metadata.labels` and `metadata.annotations`;
+#   - `nats.config.merge`: `authorization` and `allow_non_tls`;
+#   - `nats.config.nats.tls.merge`: `verify` and `ca_file`;
+#   - `nats.podTemplate.merge` and `nats.statefulSet.merge`: `metadata.labels`,
+#     `metadata.annotations` and `spec`, and NO key of `spec`.
+ARM_REFUSAL = {
+    "configMap": "platform: the NATS TLS keys disagree",
+    "config": "platform: the NATS TLS keys disagree",
+    "tls": "platform: the NATS TLS keys disagree",
+    "pod": "platform: the broker's merge keys override what the chart owns",
+}
+ALLOWLIST_REFUSED: dict[str, tuple[str, str, str]] = {
+    # The headline: with TLS off, `data` replaced nats.conf with no `authorization`.
+    "config-map-data": ("configMap", merge_at("configMap", {"data": {"nats.conf": "port: 4222\n"}}), "`nats.configMap.merge.data`"),
+    "config-map-kind": ("configMap", merge_at("configMap", {"kind": "Secret"}), "`nats.configMap.merge.kind`"),
+    "config-map-metadata-name": ("configMap", merge_at("configMap", {"metadata": {"name": "decoy"}}), "`nats.configMap.merge.metadata.name`"),
+    "config-no-auth-user": ("config", merge_at("config", {"no_auth_user": "iam"}), '`nats.config.merge` sets the key "no_auth_user"'),
+    "config-debug": ("config", merge_at("config", {"debug": True}), '`nats.config.merge` sets the key "debug"'),
+    "config-authorization-case": ("config", merge_at("config", {"Authorization": {"token": "x"}}), '`nats.config.merge` sets the key "Authorization"'),
+    "tls-verify-and-map": ("tls", merge_at("config.nats.tls", {"verify_and_map": True}), '`nats.config.nats.tls.merge` sets the key "verify_and_map"'),
+    "tls-timeout": ("tls", merge_at("config.nats.tls", {"timeout": 7}), '`nats.config.nats.tls.merge` sets the key "timeout"'),
+    "pod-host-network": ("pod", merge_at("podTemplate", {"spec": {"hostNetwork": True}}), "`nats.podTemplate.merge.spec.hostNetwork`"),
+    "pod-service-account": ("pod", merge_at("podTemplate", {"spec": {"serviceAccountName": "evil"}}), "`nats.podTemplate.merge.spec.serviceAccountName`"),
+    "pod-node-selector": ("pod", merge_at("podTemplate", {"spec": {"nodeSelector": {"disk": "ssd"}}}), "`nats.podTemplate.merge.spec.nodeSelector`"),
+    "pod-top-level": ("pod", merge_at("podTemplate", {"kind": "Pod"}), '`nats.podTemplate.merge` sets the key "kind"'),
+    "pod-metadata-name": ("pod", merge_at("podTemplate", {"metadata": {"name": "x"}}), '`nats.podTemplate.merge.metadata` sets the key "name"'),
+    "statefulset-replicas": ("pod", merge_at("statefulSet", {"spec": {"replicas": 3}}), "`nats.statefulSet.merge.spec.replicas`"),
+    "statefulset-service-name": ("pod", merge_at("statefulSet", {"spec": {"serviceName": "evil"}}), "`nats.statefulSet.merge.spec.serviceName`"),
+    "statefulset-min-ready": ("pod", merge_at("statefulSet", {"spec": {"minReadySeconds": 7}}), "`nats.statefulSet.merge.spec.minReadySeconds`"),
+    "statefulset-top-level": ("pod", merge_at("statefulSet", {"apiVersion": "apps/v2"}), '`nats.statefulSet.merge` sets the key "apiVersion"'),
+    "statefulset-metadata-namespace": ("pod", merge_at("statefulSet", {"metadata": {"namespace": "x"}}), '`nats.statefulSet.merge.metadata` sets the key "namespace"'),
+    "statefulset-metadata-not-a-map": ("pod", merge_at("statefulSet", {"metadata": "x"}), "`nats.statefulSet.merge.metadata` is not a map"),
+}
+# MEASURED: the upstream chart's own `merge` fails on a value of the wrong kind
+# before the parent's arm runs. Either refusal is a refusal; a pass is not.
+ALLOWLIST_SUBCHART_REFUSES_FIRST = {"statefulset-metadata-not-a-map": "wrong type for value"}
+
+
+@POSTURES
+@pytest.mark.parametrize("case", sorted(ALLOWLIST_REFUSED))
+def test_a_key_off_an_arm_allowlist_is_refused_at_every_posture(tmp_path, posture, case):
+    arm, body, named = ALLOWLIST_REFUSED[case]
+    result = render(tmp_path, posture, body)
+    assert result.returncode != 0, f"the render passed for:\n{body}"
+    if ALLOWLIST_SUBCHART_REFUSES_FIRST.get(case, "\0") in result.stderr:
+        return
+    assert ARM_REFUSAL[arm] in result.stderr, result.stderr
+    assert named in result.stderr, result.stderr
+
+
+ALLOWLIST_ALLOWED = {
+    "config-map-labels": (merge_at("configMap", {"metadata": {"labels": {"w597": "label"}}}), "w597: label"),
+    "pod-labels": (merge_at("podTemplate", {"metadata": {"labels": {"w597": "pod"}}}), "w597: pod"),
+    "statefulset-annotations": (merge_at("statefulSet", {"metadata": {"annotations": {"w597": "sts"}}}), "w597: sts"),
+    "pod-empty-spec": (merge_at("podTemplate", {"spec": {}}), None),
+}
+
+
+@POSTURES
+@pytest.mark.parametrize("case", sorted(ALLOWLIST_ALLOWED))
+def test_a_key_on_an_arm_allowlist_renders(tmp_path, posture, case):
+    body, marker = ALLOWLIST_ALLOWED[case]
+    result = render(tmp_path, posture, body)
+    assert result.returncode == 0, result.stderr
+    if marker is not None:
+        assert marker in result.stdout, f"{marker!r} did not reach the rendered objects"
+
+
+def test_the_transport_step_key_stays_on_the_config_merge_allowlist(tmp_path):
+    """`allow_non_tls` is the documented transport step (B-N2): TLS on, `clientAuth: "off"`.
+    yadgarhq/chart's `test_nats_enabled_with_allow_non_tls_true_does_not_refuse` renders it too."""
+    body = (
+        "nats:\n  tls: {enabled: true, clientAuth: \"off\"}\n  config:\n    merge:\n      allow_non_tls: true\n"
+        "    nats:\n      tls: {enabled: true, secretName: nats-tls}\n"
+    )
+    result = render(tmp_path, "off", body)
+    assert result.returncode == 0, result.stderr
+    assert '"allow_non_tls": true' in result.stdout, result.stdout
+
+
+def nats_config(stdout: str) -> str:
+    for doc in yaml.safe_load_all(stdout):
+        if isinstance(doc, dict) and doc.get("kind") == "ConfigMap" and doc["metadata"]["name"] == "nats-config":
+            return doc["data"]["nats.conf"]
+    raise AssertionError("no ConfigMap/nats-config in the render")
+
+
+@POSTURES
+def test_the_shipped_nats_conf_carries_authorization(tmp_path, posture):
+    """The baseline the configMap row is measured against: `authorization` is in nats.conf."""
+    result = render(tmp_path, posture, "{}\n")
+    assert result.returncode == 0, result.stderr
+    assert "authorization" in nats_config(result.stdout)
+
+
+def test_the_config_map_arm_runs_under_a_bare_parent_with_a_non_bool_create(tmp_path):
+    """`create: 0` installs the broker under a bare parent (helm reads no bool as enabled),
+    so the configMap arm must run there too, with TLS off."""
+    from test_force_namespace import bare_parent
+
+    parent = bare_parent(tmp_path)
+    (tmp_path / "case.yaml").write_text(
+        "platform:\n  nats:\n    create: 0\n    tls: {enabled: false, clientAuth: \"off\"}\n"
+        "    configMap:\n      merge:\n        data:\n          nats.conf: \"port: 4222\\n\"\n"
+    )
+    result = helm("template", "yadgar", str(parent), "--namespace", "yadgar", "-f", str(tmp_path / "case.yaml"))
+    assert result.returncode != 0, nats_config(result.stdout)
+    assert "`nats.configMap.merge.data`" in result.stderr, result.stderr
+
+
+# ── `authorization` IS THE CHART'S OWN BLOCK, EXACTLY (yaadgaar 597, review F1) ──
+#
+# The `config.merge` allowlist refused extra keys but never required
+# `authorization` nor read what it held. Measured rc=0 on 624f4a8 against
+# nats-server 2.14.6 at TLS off, available and required: `merge: null` and
+# `users: []` left an open broker (`auth_required:false`, `CONNECT {}` accepted),
+# `users: [{user: anon}]` accepted an empty password, and `token`, `user`/`password`,
+# `nkey`, `default_permissions` and `auth_callout` all rendered. The bootstrap Job
+# mints the passwords, so a values writer never held password power (ADR-1160):
+# the block must equal `values.yaml`'s, compared as JSON.
+TLS_AVAILABLE = (
+    "nats:\n"
+    "  tls: {enabled: true, clientAuth: \"off\"}\n"
+    "  config:\n"
+    "    nats:\n"
+    "      tls:\n"
+    "        enabled: true\n"
+    "        secretName: nats-tls\n"
+)
+THREE_POSTURES = pytest.mark.parametrize("posture", ["off", "available", "required"])
+OWN_AUTHORIZATION = yaml.safe_load((CHART / "values.yaml").read_text())["nats"]["config"]["merge"]["authorization"]
+AUTHORIZATION_REFUSAL = "`nats.config.merge.authorization` is not the chart's own block"
+
+
+def render3(tmp_path: Path, posture: str, body: str) -> subprocess.CompletedProcess[str]:
+    if posture != "available":
+        return render(tmp_path, posture, body)
+    (tmp_path / "tls.yaml").write_text(TLS_AVAILABLE)
+    (tmp_path / "case.yaml").write_text(body)
+    return helm(
+        "template", "platform", str(CHART), "--namespace", "yadgar", *API_VERSIONS,
+        "-f", str(ADOPTER_VALUES), "-f", str(tmp_path / "tls.yaml"), "-f", str(tmp_path / "case.yaml"),
+    )
+
+
+def _changed_permission() -> str:
+    users = yaml.safe_load(yaml.safe_dump(OWN_AUTHORIZATION["users"]))
+    users[0]["permissions"]["publish"]["allow"] = [">"]
+    return yaml.safe_dump({"nats": {"config": {"merge": {"authorization": {"users": users}}}}})
+
+
+AUTHORIZATION_REFUSED = {
+    "merge-null": "nats:\n  config:\n    merge: null\n",
+    "authorization-null": "nats:\n  config:\n    merge:\n      authorization: null\n",
+    "users-empty": "nats:\n  config:\n    merge:\n      authorization:\n        users: []\n",
+    "users-anon": "nats:\n  config:\n    merge:\n      authorization:\n        users: [{user: anon}]\n",
+    "added-token": "nats:\n  config:\n    merge:\n      authorization:\n        token: s3cret\n",
+    "added-user-password": "nats:\n  config:\n    merge:\n      authorization:\n        user: a\n        password: b\n",
+    "changed-permission": _changed_permission(),
+}
+
+
+@THREE_POSTURES
+@pytest.mark.parametrize("case", sorted(AUTHORIZATION_REFUSED))
+def test_an_authorization_block_that_is_not_the_charts_own_is_refused(tmp_path, posture, case):
+    body = AUTHORIZATION_REFUSED[case]
+    result = render3(tmp_path, posture, body)
+    assert result.returncode != 0, f"the render passed for:\n{body}\n{nats_config(result.stdout)}"
+    assert "platform: the NATS TLS keys disagree" in result.stderr, result.stderr
+    assert AUTHORIZATION_REFUSAL in result.stderr, result.stderr
+
+
+@THREE_POSTURES
+def test_the_charts_own_authorization_block_renders(tmp_path, posture):
+    body = yaml.safe_dump({"nats": {"config": {"merge": {"authorization": OWN_AUTHORIZATION}}}})
+    result = render3(tmp_path, posture, body)
+    assert result.returncode == 0, result.stderr
+    assert "authorization" in nats_config(result.stdout)
+
+
+def test_the_authorization_literal_matches_values_yaml():
+    """`$natsAuthorization` is `values.yaml`'s block as `toRawJson` writes it: keys sorted, compact."""
+    import json
+
+    text = RENDER_CHECKS.read_text()
+    (line,) = [l for l in text.splitlines() if l.startswith("{{- $natsAuthorization := ")]
+    literal = line.removeprefix("{{- $natsAuthorization := `").removesuffix("` }}")
+    assert literal == json.dumps(OWN_AUTHORIZATION, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
