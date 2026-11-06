@@ -477,8 +477,10 @@ def test_an_include_directive_anywhere_under_the_config_is_refused(tmp_path, pos
 def test_a_key_that_only_contains_include_renders(tmp_path, posture):
     """The rule is the suffix nats.formatConfig reads, so a key or value that merely
     contains `$include` is not refused."""
-    # Under `config.cluster.merge`: `config.merge` is an allowlist (yaadgaar 597).
-    body = "nats:\n  config:\n    cluster:\n      merge:\n        max_payload$includex: 1\n        server_tags: [\"a$include\"]\n"
+    # Under `config.cluster` itself, which the `$include` arm reads at any depth:
+    # `config.merge` is an allowlist (yaadgaar 597) and every block merge is
+    # empty (yaadgaar 660), so neither can carry the key any more.
+    body = "nats:\n  config:\n    cluster:\n      max_payload$includex: 1\n      server_tags: [\"a$include\"]\n"
     result = render_result(*tls_arguments(tmp_path, posture, body))
     assert result.returncode == 0, result.stderr
 
