@@ -514,6 +514,52 @@ def test_the_edge_leaf_refuses_when_the_issuer_is_cleared_with_null(tmp_path):
         assert key in result.stderr, result.stderr
 
 
+def test_the_edge_leaf_refuses_a_kind_with_no_name_even_when_internal_ca_is_on(tmp_path):
+    """The other half of the partial-map refusal: `kind` alone names no issuer.
+
+    A kind without a name is half an address, so the refusal names
+    `edgeTLS.issuerRef.name` and the internal-CA fallback does not apply.
+    """
+    values = values_file(
+        tmp_path,
+        "kind-only.yaml",
+        "edgeTLS:\n  create: true\n  issuerRef:\n    kind: ClusterIssuer\ninternalCA:\n  create: true\n",
+    )
+    result = helm("template", "platform", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "a kind-only issuerRef did not refuse"
+    assert "edgeTLS.issuerRef.name" in result.stderr, result.stderr
+
+
+def test_the_edge_leaf_refuses_an_issuer_cleared_to_an_empty_scalar(tmp_path):
+    """`edgeTLS.issuerRef` set to an empty string reads as left empty, not as a bad map.
+
+    The schema gives `issuerRef` no `type`, so `""` reaches the template. With
+    `internalCA.create` at its own default (false) there is no fallback, and the
+    refusal must name `edgeTLS.issuerRef.name` rather than a type error from
+    `get` on a string.
+    """
+    values = values_file(tmp_path, "empty-scalar.yaml", 'edgeTLS:\n  create: true\n  issuerRef: ""\n')
+    result = helm("template", "platform", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "an empty-string issuerRef did not refuse"
+    assert "edgeTLS.issuerRef.name" in result.stderr, result.stderr
+
+
+def test_the_edge_leaf_refuses_the_fallback_when_the_internal_ca_has_no_name(tmp_path):
+    """The fallback names `internalCA.name`; an empty one refuses with the issuer message.
+
+    `required` is not used on that name, because it would make `internalCA.name`
+    a key `hooks/chart_required_defaults.py` gates. The refusal is the same text.
+    """
+    values = values_file(
+        tmp_path,
+        "nameless-ca.yaml",
+        'edgeTLS:\n  create: true\ninternalCA:\n  create: true\n  name: ""\n',
+    )
+    result = helm("template", "platform", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "a fallback to a nameless internal CA did not refuse"
+    assert "edgeTLS.issuerRef.name" in result.stderr, result.stderr
+
+
 def test_the_groups_this_file_names_are_the_groups_the_chart_declares():
     """`DECLARED_API_VERSIONS` RESTATED AGAINST THE CHART. An assertion, NOT a derivation.
 
