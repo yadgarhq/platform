@@ -14,9 +14,10 @@ helm installs the broker (`nats.create` is not the bool `false`): a container me
 holds the `nats.container.merge` allowlist; every other object merge holds
 `metadata.labels` and `metadata.annotations` only; a nats-box context merge must
 be empty. Five merges are allowlists in other arms (`ARM_ALLOWLISTS`, yaadgaar
-597). The `nats.conf` block merges are not judged at all, and the two
+597). The twelve `nats.conf` block merges (`BLOCK_MERGES`) are empty allowlists
+in the NATS TLS contract arm (yaadgaar 660), and the two
 `PARTLY_JUDGED` merges stay open beyond what their arms read;
-`test_every_upstream_merge_is_judged_or_listed` names both, and
+`test_every_upstream_merge_is_judged_or_listed` names every list, and
 `test_a_partly_judged_route_still_renders` pins one open shape of each partly
 judged merge, so closing one reddens it and the lists here get updated.
 
@@ -84,12 +85,13 @@ PARTLY_JUDGED_OPEN = {
     "container.merge": ("required", "nats:\n  container:\n    merge:\n      securityContext: {privileged: true}\n", "privileged: true"),
     "reloader.merge": ("required", "nats:\n  reloader:\n    merge:\n      securityContext: {privileged: true}\n", "privileged: true"),
 }
-# THE OPEN RESIDUAL. These merges write a `nats.conf` block rather than an
-# object; each block is off by default, and no arm judges them yet.
+# THE nats.conf BLOCK MERGES (yaadgaar 660, ADR-1160). These merges write a
+# `nats.conf` block rather than an object. The NATS TLS contract arm holds each
+# to an EMPTY allowlist at every TLS posture; the section at the end of this
+# file covers them.
 NATS_CONF_BLOCKS = ["cluster", "jetstream", "leafnodes", "websocket", "mqtt", "gateway", "resolver"]
-NOT_JUDGED = {f"config.{b}.merge" for b in NATS_CONF_BLOCKS} | {
-    f"config.{b}.tls.merge" for b in ("cluster", "leafnodes", "websocket", "mqtt", "gateway")
-}
+NATS_CONF_TLS_BLOCKS = ["cluster", "leafnodes", "websocket", "mqtt", "gateway"]
+BLOCK_MERGES = [f"config.{b}.merge" for b in NATS_CONF_BLOCKS] + [f"config.{b}.tls.merge" for b in NATS_CONF_TLS_BLOCKS]
 
 
 def helm(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -259,7 +261,7 @@ def test_every_upstream_merge_is_judged_or_listed():
     """A chart bump that adds a merge reddens here until an arm judges it or it is listed."""
     upstream = upstream_merge_paths()
     upstream.discard("natsBox.contexts.default.merge")
-    named = {f"{p}.merge" for p in CONTAINER_MERGES + OBJECT_MERGES} | set(ARM_ALLOWLISTS) | set(PARTLY_JUDGED) | NOT_JUDGED
+    named = {f"{p}.merge" for p in CONTAINER_MERGES + OBJECT_MERGES} | set(ARM_ALLOWLISTS) | set(PARTLY_JUDGED) | set(BLOCK_MERGES)
     assert upstream - named == set(), "the upstream chart has a merge nothing judges or lists"
     assert named - upstream == set(), "a merge is named that the upstream chart no longer has"
 
@@ -473,3 +475,140 @@ def test_the_authorization_literal_matches_values_yaml():
     (line,) = [l for l in text.splitlines() if l.startswith("{{- $natsAuthorization := ")]
     literal = line.removeprefix("{{- $natsAuthorization := `").removesuffix("` }}")
     assert literal == json.dumps(OWN_AUTHORIZATION, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+# ── THE nats.conf BLOCK MERGES ARE EMPTY ALLOWLISTS (yaadgaar 660, ADR-1160) ──
+#
+# MEASURED rc=0 on main f450808 at TLS off and available, and on a real
+# nats-server 2.14.6 (yaadgaar 660): `nats.config.websocket.enabled: true` with
+# `merge: {no_tls: true, no_auth_user: iam}` made a websocket client that sent
+# `CONNECT {}` the account `iam`, while the same `CONNECT {}` on 4222 got
+# "Authorization Violation". Each block merge is mergeOverwritten over its
+# rendered block, so any key reaches nats.conf unread. No values file the chart
+# ships or the estate writes sets one, so each list is EMPTY, judged at every
+# TLS posture and whatever the block's own `enabled` says. `no_tls` is refused
+# at TLS off too: the upstream `websocket.yaml` already writes `no_tls: true`
+# whenever `websocket.tls.enabled` is false, so the key adds no capability.
+BLOCK_REFUSAL = "platform: the NATS TLS keys disagree"
+CREDENTIAL_KEYS = ["no_auth_user", "authorization", "users", "token", "username", "password"]
+BLOCK_KEY_VALUES = {
+    "no_auth_user": "iam",
+    "authorization": {"user": "a", "password": "b"},
+    "users": [{"user": "anon"}],
+    "token": "s3cret",
+    "username": "a",
+    "password": "b",
+    "no_tls": True,
+    # A key no rule names, so the list is an allowlist and not a denylist.
+    "ping_interval": "2m",
+}
+
+
+def block_merge_body(route: str, merge, enabled: bool = False) -> str:
+    """`nats.<route>` set to `merge`, with the block's `enabled` beside its `merge`."""
+    path = route.split(".")[:-1]
+    tree: dict = {"merge": merge}
+    if enabled and path[-1] != "tls":
+        tree["enabled"] = True
+    for key in reversed(path):
+        tree = {key: tree}
+    return yaml.safe_dump({"nats": tree})
+
+
+BLOCK_REFUSED: dict[str, tuple[str, str]] = {}
+for _route in BLOCK_MERGES:
+    _keys = list(BLOCK_KEY_VALUES) if _route.count(".") == 2 else ["no_auth_user", "ping_interval"]
+    for _key in _keys:
+        BLOCK_REFUSED[f"{_route}:{_key}"] = (
+            block_merge_body(_route, {_key: BLOCK_KEY_VALUES[_key]}),
+            f'`nats.{_route}` sets the key "{_key}"',
+        )
+# THE HEADLINE, with the listener on: the websocket and mqtt measurements.
+BLOCK_REFUSED["headline-websocket"] = (
+    block_merge_body("config.websocket.merge", {"no_tls": True, "no_auth_user": "iam"}, enabled=True),
+    '`nats.config.websocket.merge` sets the key "no_auth_user"',
+)
+BLOCK_REFUSED["headline-mqtt"] = (
+    "nats:\n  config:\n    jetstream: {enabled: true}\n    mqtt:\n      enabled: true\n      merge: {no_auth_user: iam}\n",
+    '`nats.config.mqtt.merge` sets the key "no_auth_user"',
+)
+BLOCK_REFUSED["headline-leafnodes-authorization"] = (
+    block_merge_body("config.leafnodes.merge", {"authorization": {"user": "a", "password": "b"}}, enabled=True),
+    '`nats.config.leafnodes.merge` sets the key "authorization"',
+)
+BLOCK_REFUSED["not-a-map-string"] = (block_merge_body("config.websocket.merge", "x"), "`nats.config.websocket.merge` is not a map (it is string)")
+BLOCK_REFUSED["not-a-map-list"] = (block_merge_body("config.cluster.tls.merge", ["x"]), "`nats.config.cluster.tls.merge` is not a map (it is slice)")
+# MEASURED: the upstream chart's own `merge` fails on a value of the wrong kind
+# before the parent's arm runs, when the block renders. Either refusal is a
+# refusal; a pass is not.
+BLOCK_SUBCHART_REFUSES_FIRST = "wrong type for value"
+
+
+@THREE_POSTURES
+@pytest.mark.parametrize("case", sorted(BLOCK_REFUSED))
+def test_a_key_in_a_nats_conf_block_merge_is_refused_at_every_posture(tmp_path, posture, case):
+    body, named = BLOCK_REFUSED[case]
+    result = render3(tmp_path, posture, body)
+    assert result.returncode != 0, f"the render passed for:\n{body}\n{nats_config(result.stdout)}"
+    if BLOCK_SUBCHART_REFUSES_FIRST in result.stderr:
+        return
+    assert BLOCK_REFUSAL in result.stderr, result.stderr
+    assert named in result.stderr, result.stderr
+
+
+# (route, merge). The block is on except under "required", where the side
+# listener arm refuses an enabled websocket for its own reason.
+BLOCK_ALLOWED = {
+    "empty-map": ("config.websocket.merge", {}),
+    # helm deletes a `null` merge (v4) or keeps the upstream `{}` (v3.18.4).
+    "null": ("config.websocket.merge", None),
+    "tls-empty-map": ("config.leafnodes.tls.merge", {}),
+}
+
+
+@THREE_POSTURES
+@pytest.mark.parametrize("case", sorted(BLOCK_ALLOWED))
+def test_an_empty_nats_conf_block_merge_renders(tmp_path, posture, case):
+    route, merge = BLOCK_ALLOWED[case]
+    result = render3(tmp_path, posture, block_merge_body(route, merge, enabled=posture != "required"))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("posture", ["off", "available"])
+def test_a_side_listener_with_no_merge_still_renders(tmp_path, posture):
+    """The arm judges the merge, not the listener: websocket on, nothing merged,
+    renders with the upstream chart's own `no_tls: true`."""
+    result = render3(tmp_path, posture, "nats:\n  config:\n    websocket: {enabled: true}\n")
+    assert result.returncode == 0, result.stderr
+    assert '"no_tls": true' in nats_config(result.stdout)
+
+
+def test_the_template_carries_every_block_merge():
+    """The arm's literal route list is `BLOCK_MERGES`, in order."""
+    text = RENDER_CHECKS.read_text()
+    (line,) = [l for l in text.splitlines() if l.startswith("{{- $natsBlockMerges := list ")]
+    assert re.findall(r'"([a-z.]+)"', line) == BLOCK_MERGES
+
+
+# ── `allow_non_tls` IS A BOOL AT EVERY POSTURE (yaadgaar 660) ────────────────
+#
+# MEASURED rc=0 on main f450808 at TLS off: `allow_non_tls: "a: $b"` reached
+# nats.conf as a free string. The key was read only for being non-empty.
+# `null` reached nats.conf as `"allow_non_tls": null` under helm 4 and 3.18.4 alike.
+NON_BOOL_ALLOW_NON_TLS = {"string": '"a: $b"', "string-true": '"true"', "int": "1", "map": "{x: 1}", "null": "null"}
+
+
+@THREE_POSTURES
+@pytest.mark.parametrize("case", sorted(NON_BOOL_ALLOW_NON_TLS))
+def test_an_allow_non_tls_that_is_not_a_bool_is_refused(tmp_path, posture, case):
+    body = f"nats:\n  config:\n    merge:\n      allow_non_tls: {NON_BOOL_ALLOW_NON_TLS[case]}\n"
+    result = render3(tmp_path, posture, body)
+    assert result.returncode != 0, f"the render passed for:\n{body}\n{nats_config(result.stdout)}"
+    assert BLOCK_REFUSAL in result.stderr, result.stderr
+    assert "`nats.config.merge.allow_non_tls` is not a bool" in result.stderr, result.stderr
+
+
+@THREE_POSTURES
+def test_an_allow_non_tls_false_renders(tmp_path, posture):
+    result = render3(tmp_path, posture, "nats:\n  config:\n    merge:\n      allow_non_tls: false\n")
+    assert result.returncode == 0, result.stderr

@@ -959,6 +959,51 @@ their permissions). `toRawJson` sorts map keys and does not escape `<` or `>`;
 {{- $natsDisagree = append $natsDisagree (printf "`nats.config.nats.tls.merge` sets the key %s: only `verify` and `ca_file` may be merged into the client TLS block, the two keys this check reads" (toJson $key)) }}
 {{- end }}
 {{- end }}
+{{- /* `allow_non_tls` IS A BOOL (yaadgaar 660). The arms above read it for being
+non-empty, so `allow_non_tls: "a: $b"` rendered rc=0 at TLS off and the free
+string reached nats.conf (measured on main f450808); a `null` reached it as
+`"allow_non_tls": null`. nats-server reads the key as a bool, so anything else,
+`null` included, is refused at every posture. The allowlist above
+refuses every other spelling of the key. */ -}}
+{{- if and (hasKey $natsMerge "allow_non_tls") (not (kindIs "bool" (index $natsMerge "allow_non_tls"))) }}
+{{- $kind := kindOf (index $natsMerge "allow_non_tls") }}
+{{- if eq $kind "invalid" }}{{ $kind = "null" }}{{ end }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.config.merge.allow_non_tls` is not a bool (it is %s): write `true` or `false`, unquoted" $kind) }}
+{{- end }}
+{{- /* THE nats.conf BLOCK MERGES ARE EMPTY ALLOWLISTS (yaadgaar 660, ADR-1160).
+The upstream chart renders each optional `nats.conf` block (cluster, jetstream,
+leafnodes, websocket, mqtt, gateway, resolver) and each side listener's `tls`
+block through `nats.loadMergePatch`, so `nats.config.<block>.merge` and
+`nats.config.<block>.tls.merge` are mergeOverwritten over the rendered block and
+every key reaches the broker unread. MEASURED on main f450808 and on a real
+nats-server 2.14.6: `nats.config.websocket.enabled: true` with
+`merge: {no_tls: true, no_auth_user: iam}` rendered rc=0 at TLS off and
+available, and a websocket client that sent `CONNECT {}` with no credentials
+became `iam`; `mqtt.merge.no_auth_user` rendered the same way. No values file
+the chart ships or the estate writes sets any of these merges, so each list is
+EMPTY: every key refuses, at EVERY TLS posture, whatever the block's own
+`enabled` says (a merge waiting for a later `enabled: true` is the same route).
+`no_tls` refuses at TLS off too: the upstream `websocket.yaml` already writes
+`no_tls: true` whenever `nats.config.websocket.tls.enabled` is false.
+A value that is not a map refuses as well. `test_nats_merge_routes.py`'s
+`BLOCK_MERGES` pins this list, and `test_every_upstream_merge_is_judged_or_listed`
+gates it against the vendored chart. */ -}}
+{{- $natsBlockMerges := list "config.cluster.merge" "config.jetstream.merge" "config.leafnodes.merge" "config.websocket.merge" "config.mqtt.merge" "config.gateway.merge" "config.resolver.merge" "config.cluster.tls.merge" "config.leafnodes.tls.merge" "config.websocket.tls.merge" "config.mqtt.tls.merge" "config.gateway.tls.merge" }}
+{{- range $path := $natsBlockMerges }}
+{{- $value := $.Values.nats }}
+{{- range $key := splitList "." $path }}
+{{- if kindIs "map" $value }}{{ $value = index $value $key }}{{ else }}{{ $value = index (dict) "absent" }}{{ end }}
+{{- end }}
+{{- if not (kindIs "invalid" $value) }}
+{{- if not (kindIs "map" $value) }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.%s` is not a map (it is %s): a nats.conf block merge must be empty" $path (kindOf $value)) }}
+{{- else }}
+{{- range $key := keys $value | sortAlpha }}
+{{- $natsDisagree = append $natsDisagree (printf "`nats.%s` sets the key %s: a nats.conf block merge must be empty, because every key reaches the broker unread (`no_auth_user` makes a client with no password an account)" $path (toJson $key)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- /* THE CONFIGMAP ITSELF (yaadgaar 489, 597). The upstream chart renders `nats.conf`
 into a ConfigMap through `nats.loadMergePatch`: `nats.configMap.merge` is
 mergeOverwritten over the WHOLE object and `nats.configMap.patch` runs after it,
@@ -1492,8 +1537,8 @@ list goes red when an arm closes it.
 JUDGED WHATEVER THE OBJECT'S OWN `enabled` SAYS, as the patch arm judges every
 patch: a merge waiting for a later `enabled: true` is the same route. The
 `nats.conf` block merges (`config.<block>.merge` and `config.<block>.tls.merge`)
-are NOT judged here: they write nats.conf rather than an object, and
-`test_every_upstream_merge_is_judged_or_listed` names them as unjudged.
+are NOT judged here: they write nats.conf rather than an object, and the NATS
+TLS contract arm holds each to an empty allowlist (yaadgaar 660).
 `test_the_arm_judges_every_object_merge` pins this list to the vendored chart.
 
 Runs while helm installs the broker, before the patch arm, so a `$tplYaml` inside
