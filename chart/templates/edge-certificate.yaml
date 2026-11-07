@@ -57,10 +57,13 @@ EVERY VALUE IS YAML-ENCODED for the reason given there too (yaadgaar 534,
 {{- define "platform.certificates.edge" }}
 {{- if .Values.edgeTLS.create }}
 {{- $edge := .Values.edgeTLS }}
-{{- $issuerRef := $edge.issuerRef | default dict }}
-{{- if and (empty $issuerRef) .Values.internalCA.create }}
-{{- $issuerRef = dict "name" .Values.internalCA.name "kind" "Issuer" }}
-{{- end }}
+{{- /* ONE ASSIGNMENT EACH, so `hooks/chart_required_defaults.py` can bind `$issuerRef`
+to the values path `edgeTLS.issuerRef` and name the two keys the `required` calls below
+gate. The fallback is a decision (`$fallback`), not a reassignment of the map. */}}
+{{- $issuerRef := $edge.issuerRef }}
+{{- $fallback := and (empty $issuerRef) .Values.internalCA.create }}
+{{- $nameMessage := "platform: edgeTLS.issuerRef.name has no default here and must be set. edgeTLS.create is true; either name the authority that signs your edge certificate, or turn internalCA.create on and leave edgeTLS.issuerRef empty for this chart's own internal CA." }}
+{{- $kindMessage := "platform: edgeTLS.issuerRef.kind has no default here and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address — and naming only one of the two keys does not qualify for the internal-CA fallback, which applies only when the whole map is left empty." }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -86,8 +89,15 @@ spec:
   usages:
     {{- toYaml $edge.usages | nindent 4 }}
   issuerRef:
-    {{- dict "name" (required "platform: edgeTLS.issuerRef.name has no default here and must be set. edgeTLS.create is true; either name the authority that signs your edge certificate, or turn internalCA.create on and leave edgeTLS.issuerRef empty for this chart's own internal CA." (get $issuerRef "name")) | toYaml | nindent 4 }}
-    {{- dict "kind" (required "platform: edgeTLS.issuerRef.kind has no default here and must be set. It decides whether the issuer is looked up in this namespace (Issuer) or cluster-wide (ClusterIssuer), so a name without it is half an address — and naming only one of the two keys does not qualify for the internal-CA fallback, which applies only when the whole map is left empty." (get $issuerRef "kind")) | toYaml | nindent 4 }}
+    {{- if $fallback }}
+    {{- dict "name" (required $nameMessage .Values.internalCA.name) | toYaml | nindent 4 }}
+    {{- dict "kind" "Issuer" | toYaml | nindent 4 }}
+    {{- else if empty $issuerRef }}
+    {{- fail $nameMessage }}
+    {{- else }}
+    {{- dict "name" (required $nameMessage (get $issuerRef "name")) | toYaml | nindent 4 }}
+    {{- dict "kind" (required $kindMessage (get $issuerRef "kind")) | toYaml | nindent 4 }}
+    {{- end }}
     group: cert-manager.io
 {{- end }}
 {{- end }}
